@@ -12,6 +12,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
+use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
 use crate::config::BridgeheadConfig;
@@ -78,12 +79,35 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let scan_state = state.clone();
+    let scan_interval_secs = cfg.scan_interval_secs;
+    let scan_task = tokio::spawn(async move {
+        if scan_interval_secs == 0 {
+            info!("apps scanner disabled (interval=0)");
+            return;
+        }
+        loop {
+            sleep(Duration::from_secs(scan_interval_secs)).await;
+            match scanner::sync_from_apps_root(&scan_state) {
+                Ok(count) => {
+                    if let Err(err) = scan_state.reload_routes() {
+                        error!(error = %err, "failed to reload routes after scan");
+                    } else {
+                        info!(scanned = count, "apps scan completed");
+                    }
+                }
+                Err(err) => error!(error = %err, "apps scan failed"),
+            }
+        }
+    });
+
     info!("bridgeheadd started");
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
 
     proxy_task.abort();
     control_task.abort();
+    scan_task.abort();
 
     Ok(())
 }

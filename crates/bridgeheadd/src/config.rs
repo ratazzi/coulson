@@ -11,6 +11,7 @@ pub struct BridgeheadConfig {
     pub sqlite_path: PathBuf,
     pub domain_suffix: String,
     pub apps_root: PathBuf,
+    pub scan_interval_secs: u64,
 }
 
 impl Default for BridgeheadConfig {
@@ -22,6 +23,7 @@ impl Default for BridgeheadConfig {
             sqlite_path: PathBuf::from(format!("{home}/.bridgehead/state.db")),
             domain_suffix: "test".to_string(),
             apps_root: PathBuf::from(format!("{home}/Bridgehead/Apps")),
+            scan_interval_secs: 2,
         }
     }
 }
@@ -49,6 +51,11 @@ impl BridgeheadConfig {
         }
         if let Ok(path) = env::var("BRIDGEHEAD_APPS_ROOT") {
             cfg.apps_root = PathBuf::from(path);
+        }
+        if let Ok(raw) = env::var("BRIDGEHEAD_SCAN_INTERVAL_SECS") {
+            cfg.scan_interval_secs = raw
+                .parse()
+                .with_context(|| format!("invalid BRIDGEHEAD_SCAN_INTERVAL_SECS: {raw}"))?;
         }
 
         Ok(cfg)
