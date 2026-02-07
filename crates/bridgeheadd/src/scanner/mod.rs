@@ -15,9 +15,12 @@ struct BridgeheadManifest {
     name: Option<String>,
     domain: Option<String>,
     target_host: Option<String>,
+    #[serde(default)]
     target_port: u16,
     path_prefix: Option<String>,
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    socket_path: Option<String>,
     routes: Option<Vec<BridgeheadManifestRoute>>,
     enabled: Option<bool>,
     #[serde(default)]
@@ -34,8 +37,12 @@ struct BridgeheadManifest {
 struct BridgeheadManifestRoute {
     #[serde(default)]
     path_prefix: Option<String>,
-    target_host: String,
+    #[serde(default)]
+    target_host: Option<String>,
+    #[serde(default)]
     target_port: u16,
+    #[serde(default)]
+    socket_path: Option<String>,
     #[serde(default)]
     timeout_ms: Option<u64>,
     #[serde(default)]
@@ -78,6 +85,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             app.path_prefix.as_deref(),
             &app.target_host,
             app.target_port,
+            app.socket_path.as_deref(),
             app.timeout_ms,
             app.cors_enabled,
             app.basic_auth_user.as_deref(),
@@ -125,6 +133,7 @@ struct DiscoveredStaticApp {
     path_prefix: Option<String>,
     target_host: String,
     target_port: u16,
+    socket_path: Option<String>,
     timeout_ms: Option<u64>,
     cors_enabled: bool,
     basic_auth_user: Option<String>,
@@ -201,6 +210,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     path_prefix: route.path_prefix,
                     target_host: route.target_host,
                     target_port: route.target_port,
+                    socket_path: None,
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
                     basic_auth_user: None,
@@ -244,6 +254,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         path_prefix: route.path_prefix,
                         target_host: route.target_host,
                         target_port: route.target_port,
+                        socket_path: None,
                         timeout_ms: route.timeout_ms,
                         cors_enabled: false,
                         basic_auth_user: None,
@@ -283,8 +294,9 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         name: name.clone(),
                         domain: domain.clone(),
                         path_prefix: normalize_path_prefix(route.path_prefix.as_deref()),
-                        target_host: route.target_host,
+                        target_host: route.target_host.unwrap_or_else(|| "127.0.0.1".to_string()),
                         target_port: route.target_port,
+                        socket_path: route.socket_path.or_else(|| manifest.socket_path.clone()),
                         timeout_ms: route.timeout_ms,
                         cors_enabled: route.cors_enabled.or(manifest.cors_enabled).unwrap_or(false),
                         basic_auth_user: route.basic_auth_user.or_else(|| manifest.basic_auth_user.clone()),
@@ -305,6 +317,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     path_prefix: normalize_path_prefix(manifest.path_prefix.as_deref()),
                     target_host,
                     target_port: manifest.target_port,
+                    socket_path: manifest.socket_path,
                     timeout_ms: manifest.timeout_ms,
                     cors_enabled: manifest.cors_enabled.unwrap_or(false),
                     basic_auth_user: manifest.basic_auth_user,
@@ -378,6 +391,7 @@ fn discover_from_symlink(
                 path_prefix: route.path_prefix,
                 target_host: route.target_host,
                 target_port: route.target_port,
+                socket_path: None,
                 timeout_ms: route.timeout_ms,
                 cors_enabled: false,
                 basic_auth_user: None,
@@ -403,6 +417,7 @@ fn discover_from_symlink(
                     path_prefix: route.path_prefix,
                     target_host: route.target_host,
                     target_port: route.target_port,
+                    socket_path: None,
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
                     basic_auth_user: None,
@@ -428,6 +443,7 @@ fn discover_from_symlink(
                 path_prefix: None,
                 target_host,
                 target_port,
+                socket_path: None,
                 timeout_ms,
                 cors_enabled: false,
                 basic_auth_user: None,
@@ -676,6 +692,7 @@ mod tests {
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5006,
+                socket_path: None,
                 timeout_ms: None,
                 cors_enabled: false,
                 basic_auth_user: None,
@@ -694,6 +711,7 @@ mod tests {
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5007,
+                socket_path: None,
                 timeout_ms: None,
                 cors_enabled: false,
                 basic_auth_user: None,

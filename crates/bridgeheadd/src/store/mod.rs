@@ -90,6 +90,7 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN spa_rewrite INTEGER NOT NULL DEFAULT 0",
         )?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN static_root TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN socket_path TEXT")?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -220,6 +221,66 @@ impl AppRepository {
         }
     }
 
+    pub fn insert_unix_socket(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        path_prefix: Option<&str>,
+        socket_path: &str,
+        timeout_ms: Option<u64>,
+    ) -> anyhow::Result<AppSpec> {
+        let now = OffsetDateTime::now_utc();
+        let path_prefix_db = path_prefix_to_db(path_prefix);
+        let app = AppSpec {
+            id: AppId::new(),
+            name: name.to_string(),
+            kind: AppKind::Static,
+            domain: domain.clone(),
+            path_prefix: path_prefix.map(ToOwned::to_owned),
+            target: BackendTarget::UnixSocket {
+                path: socket_path.to_string(),
+            },
+            timeout_ms,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, 0, NULL, NULL, 0, ?12)",
+            params![
+                app.id.0,
+                app.name,
+                "static",
+                app.domain.0,
+                path_prefix_db,
+                "",
+                0i64,
+                app.timeout_ms.map(|v| v as i64),
+                1i64,
+                app.created_at.unix_timestamp(),
+                app.updated_at.unix_timestamp(),
+                socket_path,
+            ],
+        );
+
+        match result {
+            Ok(_) => Ok(app),
+            Err(rusqlite::Error::SqliteFailure(err, _))
+                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+            {
+                Err(StoreError::DomainConflict.into())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_static(
         &self,
@@ -302,6 +363,7 @@ impl AppRepository {
         path_prefix: Option<&str>,
         target_host: &str,
         target_port: u16,
+        socket_path: Option<&str>,
         timeout_ms: Option<u64>,
         cors_enabled: bool,
         basic_auth_user: Option<&str>,
@@ -326,7 +388,7 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8, cors_enabled = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12 WHERE id = ?13",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8, cors_enabled = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12, socket_path = ?13 WHERE id = ?14",
                     params![
                         name,
                         path_prefix_db,
@@ -340,6 +402,7 @@ impl AppRepository {
                         basic_auth_user,
                         basic_auth_pass,
                         if spa_rewrite { 1 } else { 0 },
+                        socket_path,
                         id
                     ],
                 )?;
@@ -348,8 +411,8 @@ impl AppRepository {
             None => {
                 let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         created,
                         name,
@@ -367,6 +430,7 @@ impl AppRepository {
                         basic_auth_user,
                         basic_auth_pass,
                         if spa_rewrite { 1 } else { 0 },
+                        socket_path,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -546,7 +610,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path";
 
 fn row_to_app(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -561,9 +625,12 @@ fn row_to_app(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppSpec> {
     let created_ts: i64 = row.get(9)?;
     let updated_ts: i64 = row.get(10)?;
     let static_root: Option<String> = row.get::<_, Option<String>>(15).unwrap_or(None);
+    let socket_path: Option<String> = row.get::<_, Option<String>>(16).unwrap_or(None);
 
     let target = if let Some(root) = static_root {
         BackendTarget::StaticDir { root }
+    } else if let Some(path) = socket_path {
+        BackendTarget::UnixSocket { path }
     } else {
         BackendTarget::Tcp {
             host: row.get(5)?,

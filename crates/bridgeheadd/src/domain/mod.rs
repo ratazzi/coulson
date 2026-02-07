@@ -77,6 +77,7 @@ impl DomainName {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendTarget {
     Tcp { host: String, port: u16 },
+    UnixSocket { path: String },
     StaticDir { root: String },
 }
 
@@ -84,6 +85,7 @@ impl BackendTarget {
     pub fn to_url_base(&self) -> String {
         match self {
             Self::Tcp { host, port } => format!("http://{host}:{port}"),
+            Self::UnixSocket { path } => format!("unix://{path}"),
             Self::StaticDir { root } => format!("file://{root}"),
         }
     }

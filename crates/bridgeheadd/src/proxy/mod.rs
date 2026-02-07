@@ -121,6 +121,17 @@ impl ProxyHttp for BridgeProxy {
                 }
                 Ok(peer)
             }
+            BackendTarget::UnixSocket { path } => {
+                let mut peer = HttpPeer::new_uds(&path, false, String::new())?;
+                if let Some(timeout_ms) = ctx.timeout_ms {
+                    let timeout = Duration::from_millis(timeout_ms);
+                    peer.options.connection_timeout = Some(timeout);
+                    peer.options.total_connection_timeout = Some(timeout);
+                    peer.options.read_timeout = Some(timeout);
+                    peer.options.idle_timeout = Some(timeout);
+                }
+                Ok(Box::new(peer))
+            }
             BackendTarget::StaticDir { .. } => {
                 // Should never reach here — static dirs are handled in request_filter
                 Error::e_explain(ErrorType::InternalError, "static dir has no upstream")

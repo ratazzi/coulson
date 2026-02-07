@@ -78,6 +78,17 @@ struct CreateStaticDirParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateUnixSocketParams {
+    name: String,
+    domain: String,
+    #[serde(default)]
+    path_prefix: Option<String>,
+    socket_path: String,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AppIdParams {
     app_id: String,
 }
@@ -256,6 +267,67 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
 
             match state.store.insert_static_dir(&params.name, &domain, &params.static_root) {
+                Ok(app) => {
+                    if let Err(e) = state.reload_routes() {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "app": app }))
+                }
+                Err(e) => {
+                    if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
+                        return render_err(req.request_id, ControlError::DomainConflict);
+                    }
+                    return internal_error(req.request_id, e.to_string());
+                }
+            }
+        }
+        "app.create_unix_socket" => {
+            let params: CreateUnixSocketParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            if params.name.trim().is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("name cannot be empty".to_string()),
+                );
+            }
+
+            let domain = match DomainName::parse(&params.domain, &state.domain_suffix) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            let sock = std::path::Path::new(&params.socket_path);
+            if !sock.exists() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams(format!(
+                        "socket_path does not exist: {}",
+                        params.socket_path
+                    )),
+                );
+            }
+
+            let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(msg));
+                }
+            };
+
+            match state.store.insert_unix_socket(
+                &params.name,
+                &domain,
+                path_prefix.as_deref(),
+                &params.socket_path,
+                params.timeout_ms,
+            ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());
