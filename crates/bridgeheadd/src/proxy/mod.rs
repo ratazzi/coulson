@@ -5,6 +5,7 @@ use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::http_proxy_service;
+use std::collections::HashMap;
 use tracing::info;
 
 use crate::domain::BackendTarget;
@@ -43,7 +44,7 @@ impl ProxyHttp for BridgeProxy {
 
         let target = {
             let routes = self.shared.routes.read();
-            routes.get(&host).cloned()
+            resolve_target(&routes, &host)
         };
 
         let Some(target) = target else {
@@ -92,11 +93,13 @@ fn run_proxy_blocking(bind: &str, state: SharedState) -> anyhow::Result<()> {
 }
 
 async fn write_json_error(session: &mut Session, status: u16, code: &str) -> Result<()> {
+    let body = format!(r#"{{"error":"{code}"}}"#);
     let mut resp = ResponseHeader::build(status, None)?;
     resp.insert_header("content-type", "application/json")?;
+    resp.insert_header("content-length", body.len().to_string())?;
+    resp.insert_header("connection", "close")?;
 
     session.write_response_header(Box::new(resp), false).await?;
-    let body = format!(r#"{{"error":"{code}"}}"#);
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
@@ -112,6 +115,22 @@ fn extract_host(raw: Option<&str>) -> Option<String> {
     Some(host)
 }
 
+fn resolve_target(routes: &HashMap<String, BackendTarget>, host: &str) -> Option<BackendTarget> {
+    if let Some(hit) = routes.get(host) {
+        return Some(hit.clone());
+    }
+
+    let mut parts: Vec<&str> = host.split('.').collect();
+    while parts.len() > 2 {
+        parts.remove(0);
+        let candidate = parts.join(".");
+        if let Some(hit) = routes.get(&candidate) {
+            return Some(hit.clone());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -120,5 +139,24 @@ mod tests {
     fn host_header_is_normalized() {
         let host = extract_host(Some("MyApp.test:8080")).expect("host");
         assert_eq!(host, "myapp.test");
+    }
+
+    #[test]
+    fn subdomain_falls_back_to_parent_host() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "myapp.test".to_string(),
+            BackendTarget::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: 5006,
+            },
+        );
+        let out = resolve_target(&routes, "www.myapp.test").expect("fallback");
+        match out {
+            BackendTarget::Tcp { host, port } => {
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(port, 5006);
+            }
+        }
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use anyhow::Context;
@@ -48,6 +49,8 @@ impl AppRepository {
               target_host TEXT NOT NULL,
               target_port INTEGER NOT NULL,
               enabled INTEGER NOT NULL,
+              scan_managed INTEGER NOT NULL DEFAULT 0,
+              scan_source TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL
             );
@@ -56,6 +59,11 @@ impl AppRepository {
             ON apps(enabled, domain);
             "#,
         )?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN scan_managed INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN scan_source TEXT")?;
         Ok(())
     }
 
@@ -83,8 +91,8 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9)",
             params![
                 app.id.0,
                 app.name,
@@ -130,7 +138,7 @@ impl AppRepository {
 
         if let Some(id) = existing_id {
             conn.execute(
-                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5 WHERE id = ?6",
+                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 0, scan_source = NULL WHERE id = ?6",
                 params![
                     name,
                     target_host,
@@ -143,8 +151,8 @@ impl AppRepository {
         } else {
             let created = AppId::new().0;
             conn.execute(
-                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9)",
                 params![
                     created,
                     name,
@@ -182,6 +190,110 @@ impl AppRepository {
         )?;
 
         Ok(app)
+    }
+
+    pub fn upsert_scanned_static(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        target_host: &str,
+        target_port: u16,
+        enabled: bool,
+        source: &str,
+    ) -> anyhow::Result<AppSpec> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM apps WHERE domain = ?1",
+                params![domain.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(id) = existing_id {
+            conn.execute(
+                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
+                params![
+                    name,
+                    target_host,
+                    i64::from(target_port),
+                    if enabled { 1 } else { 0 },
+                    now,
+                    source,
+                    id
+                ],
+            )?;
+        } else {
+            let created = AppId::new().0;
+            conn.execute(
+                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                params![
+                    created,
+                    name,
+                    "static",
+                    domain.0,
+                    target_host,
+                    i64::from(target_port),
+                    if enabled { 1 } else { 0 },
+                    source,
+                    now,
+                    now,
+                ],
+            )?;
+        }
+
+        let app = conn.query_row(
+            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE domain = ?1",
+            params![domain.0],
+            |row| {
+                Ok(AppSpec {
+                    id: AppId(row.get(0)?),
+                    name: row.get(1)?,
+                    kind: AppKind::Static,
+                    domain: DomainName(row.get(3)?),
+                    target: BackendTarget::Tcp {
+                        host: row.get(4)?,
+                        port: row.get::<_, i64>(5)? as u16,
+                    },
+                    enabled: row.get::<_, i64>(6)? == 1,
+                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(7)?)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(8)?)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                })
+            },
+        )?;
+
+        Ok(app)
+    }
+
+    pub fn prune_scanned_not_in(
+        &self,
+        source: &str,
+        active_domains: &HashSet<String>,
+    ) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, domain FROM apps WHERE scan_managed = 1 AND scan_source = ?1")?;
+        let mut rows = stmt.query(params![source])?;
+        let mut delete_ids: Vec<String> = Vec::new();
+
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let domain: String = row.get(1)?;
+            if !active_domains.contains(&domain) {
+                delete_ids.push(id);
+            }
+        }
+
+        let mut deleted = 0usize;
+        for id in &delete_ids {
+            deleted += conn.execute("DELETE FROM apps WHERE id = ?1", params![id])?;
+        }
+        Ok(deleted)
     }
 
     pub fn delete(&self, app_id: &str) -> anyhow::Result<bool> {
@@ -252,6 +364,18 @@ impl AppRepository {
         }
 
         Ok(apps)
+    }
+}
+
+fn add_column_if_missing(conn: &Connection, sql: &str) -> anyhow::Result<()> {
+    match conn.execute(sql, []) {
+        Ok(_) => Ok(()),
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
+            if msg.contains("duplicate column name") =>
+        {
+            Ok(())
+        }
+        Err(e) => Err(e.into()),
     }
 }
 

@@ -1,5 +1,6 @@
+use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use serde::Deserialize;
@@ -18,15 +19,21 @@ struct BridgeheadManifest {
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<usize> {
     let discovered = discover(&state.apps_root, &state.domain_suffix)?;
+    let mut active_domains: HashSet<String> = HashSet::new();
     for app in &discovered {
-        state.store.upsert_static(
+        state.store.upsert_scanned_static(
             &app.name,
             &app.domain,
             &app.target_host,
             app.target_port,
             app.enabled,
+            "apps_root",
         )?;
+        active_domains.insert(app.domain.0.clone());
     }
+    let _ = state
+        .store
+        .prune_scanned_not_in("apps_root", &active_domains)?;
     Ok(discovered.len())
 }
 
@@ -51,6 +58,16 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
         let entry = entry?;
         let file_type = entry.file_type()?;
         let file_name = entry.file_name().to_string_lossy().to_string();
+
+        if file_type.is_symlink() {
+            if file_name.starts_with('.') {
+                continue;
+            }
+            if let Some(app) = discover_from_symlink(entry.path(), &file_name, suffix)? {
+                apps.push(app);
+            }
+            continue;
+        }
 
         if file_type.is_file() {
             if file_name.starts_with('.') {
@@ -114,6 +131,66 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
     }
 
     Ok(apps)
+}
+
+fn discover_from_symlink(
+    link_path: PathBuf,
+    file_name: &str,
+    suffix: &str,
+) -> anyhow::Result<Option<DiscoveredStaticApp>> {
+    let target = fs::read_link(&link_path)
+        .with_context(|| format!("failed reading symlink {}", link_path.display()))?;
+    let resolved_target = if target.is_absolute() {
+        target
+    } else {
+        link_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(target)
+    };
+
+    let meta = match fs::metadata(&resolved_target) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+
+    let target_spec = if meta.is_file() {
+        let raw = fs::read_to_string(&resolved_target)
+            .with_context(|| format!("failed reading {}", resolved_target.display()))?;
+        parse_port_proxy_target(&raw)
+    } else if meta.is_dir() {
+        let port_file = resolved_target.join("bridgehead.port");
+        if !port_file.exists() {
+            None
+        } else {
+            let raw = fs::read_to_string(&port_file)
+                .with_context(|| format!("failed reading {}", port_file.display()))?;
+            parse_port_proxy_target(&raw)
+        }
+    } else {
+        None
+    };
+
+    let Some((target_host, target_port)) = target_spec else {
+        return Ok(None);
+    };
+
+    let domain_text = file_name_to_domain(file_name, suffix);
+    let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
+        format!(
+            "invalid domain '{}' in {}",
+            domain_text,
+            link_path.display()
+        )
+    })?;
+
+    Ok(Some(DiscoveredStaticApp {
+        name: sanitize_name(file_name),
+        domain,
+        target_host,
+        target_port,
+        enabled: true,
+    }))
 }
 
 fn file_name_to_domain(file_name: &str, suffix: &str) -> String {
@@ -190,5 +267,14 @@ mod tests {
         let out = parse_port_proxy_target("http://1.2.3.4:8080").expect("parse");
         assert_eq!(out.0, "1.2.3.4");
         assert_eq!(out.1, 8080);
+    }
+
+    #[test]
+    fn converts_file_name_to_domain() {
+        assert_eq!(file_name_to_domain("myapp", "test"), "myapp.test");
+        assert_eq!(
+            file_name_to_domain("www.myapp.test", "test"),
+            "www.myapp.test"
+        );
     }
 }
