@@ -17,12 +17,18 @@ pub struct BridgeheadConfig {
 impl Default for BridgeheadConfig {
     fn default() -> Self {
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let pow_root = PathBuf::from(format!("{home}/.pow"));
+        let apps_root = if pow_root.exists() {
+            pow_root
+        } else {
+            PathBuf::from(format!("{home}/Bridgehead/Apps"))
+        };
         Self {
             listen_http: "127.0.0.1:8080".parse().expect("default listen addr"),
             control_socket: PathBuf::from("/tmp/bridgehead/bridgeheadd.sock"),
             sqlite_path: PathBuf::from(format!("{home}/.bridgehead/state.db")),
             domain_suffix: "test".to_string(),
-            apps_root: PathBuf::from(format!("{home}/Bridgehead/Apps")),
+            apps_root,
             scan_interval_secs: 2,
         }
     }

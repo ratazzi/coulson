@@ -9,7 +9,7 @@ mod store;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration};
@@ -41,24 +41,56 @@ impl SharedState {
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    runtime::init_tracing();
+enum Command {
+    Serve,
+    Scan,
+    Ls,
+}
 
-    let cfg = BridgeheadConfig::load().context("failed to load config")?;
-    runtime::ensure_runtime_paths(&cfg)?;
+fn parse_command() -> anyhow::Result<Command> {
+    let arg = std::env::args().nth(1);
+    match arg.as_deref() {
+        None => Ok(Command::Serve),
+        Some("serve") => Ok(Command::Serve),
+        Some("scan") => Ok(Command::Scan),
+        Some("ls") => Ok(Command::Ls),
+        Some(other) => bail!("unknown command: {other}. usage: bridgeheadd [serve|scan|ls]"),
+    }
+}
+
+fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
+    runtime::ensure_runtime_paths(cfg)?;
 
     let store = Arc::new(AppRepository::new(&cfg.sqlite_path)?);
     store.init_schema()?;
 
     let (route_tx, _rx) = broadcast::channel(32);
-    let state = SharedState {
+    Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
         route_tx,
         domain_suffix: cfg.domain_suffix.clone(),
         apps_root: cfg.apps_root.clone(),
-    };
+    })
+}
+
+fn run_scan_once(cfg: BridgeheadConfig) -> anyhow::Result<()> {
+    let state = build_state(&cfg)?;
+    let count = scanner::sync_from_apps_root(&state)?;
+    state.reload_routes()?;
+    println!("{{\"ok\":true,\"scanned\":{count}}}");
+    Ok(())
+}
+
+fn run_ls(cfg: BridgeheadConfig) -> anyhow::Result<()> {
+    let state = build_state(&cfg)?;
+    let apps = state.store.list_all()?;
+    println!("{}", serde_json::to_string(&apps)?);
+    Ok(())
+}
+
+async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
+    let state = build_state(&cfg)?;
 
     scanner::sync_from_apps_root(&state)?;
     state.reload_routes()?;
@@ -110,4 +142,16 @@ async fn main() -> anyhow::Result<()> {
     scan_task.abort();
 
     Ok(())
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    runtime::init_tracing();
+    let cfg = BridgeheadConfig::load().context("failed to load config")?;
+
+    match parse_command()? {
+        Command::Serve => run_serve(cfg).await,
+        Command::Scan => run_scan_once(cfg),
+        Command::Ls => run_ls(cfg),
+    }
 }
