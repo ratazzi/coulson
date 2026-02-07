@@ -54,8 +54,12 @@ enum ControlError {
 struct CreateStaticParams {
     name: String,
     domain: String,
+    #[serde(default)]
+    path_prefix: Option<String>,
     target_host: String,
     target_port: u16,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,12 +158,27 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     ControlError::InvalidParams("target_port out of range".to_string()),
                 );
             }
+            if matches!(params.timeout_ms, Some(0)) {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("timeout_ms must be > 0".to_string()),
+                );
+            }
+
+            let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(msg));
+                }
+            };
 
             match state.store.insert_static(
                 &params.name,
                 &domain,
+                path_prefix.as_deref(),
                 &params.target_host,
                 params.target_port,
+                params.timeout_ms,
             ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
@@ -292,4 +311,21 @@ fn render_err(request_id: String, err: ControlError) -> ResponseEnvelope {
 
 fn internal_error(request_id: String, message: String) -> ResponseEnvelope {
     render_err(request_id, ControlError::Internal(message))
+}
+
+fn normalize_path_prefix(input: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = input else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with('/') {
+        return Err("path_prefix must start with '/'".to_string());
+    }
+    if trimmed.len() > 1 && trimmed.ends_with('/') {
+        return Ok(Some(trimmed.trim_end_matches('/').to_string()));
+    }
+    Ok(Some(trimmed.to_string()))
 }

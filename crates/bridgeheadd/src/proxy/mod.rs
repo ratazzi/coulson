@@ -6,10 +6,11 @@ use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::http_proxy_service;
 use std::collections::HashMap;
+use std::time::Duration;
 use tracing::info;
 
 use crate::domain::BackendTarget;
-use crate::SharedState;
+use crate::{RouteRule, SharedState};
 
 #[derive(Clone)]
 struct BridgeProxy {
@@ -19,6 +20,7 @@ struct BridgeProxy {
 #[derive(Default)]
 struct ProxyCtx {
     target: Option<BackendTarget>,
+    timeout_ms: Option<u64>,
 }
 
 #[async_trait]
@@ -41,18 +43,20 @@ impl ProxyHttp for BridgeProxy {
             write_json_error(session, 400, "missing_host").await?;
             return Ok(true);
         };
+        let req_path = session.req_header().uri.path().to_string();
 
         let target = {
             let routes = self.shared.routes.read();
-            resolve_target(&routes, &host, &self.shared.domain_suffix)
+            resolve_target(&routes, &host, &self.shared.domain_suffix, &req_path)
         };
 
-        let Some(target) = target else {
+        let Some(route) = target else {
             write_json_error(session, 404, "route_not_found").await?;
             return Ok(true);
         };
 
-        ctx.target = Some(target);
+        ctx.target = Some(route.target);
+        ctx.timeout_ms = route.timeout_ms;
         Ok(false)
     }
 
@@ -67,7 +71,14 @@ impl ProxyHttp for BridgeProxy {
 
         match target {
             BackendTarget::Tcp { host, port } => {
-                let peer = Box::new(HttpPeer::new(format!("{host}:{port}"), false, host));
+                let mut peer = Box::new(HttpPeer::new(format!("{host}:{port}"), false, host));
+                if let Some(timeout_ms) = ctx.timeout_ms {
+                    let timeout = Duration::from_millis(timeout_ms);
+                    peer.options.connection_timeout = Some(timeout);
+                    peer.options.total_connection_timeout = Some(timeout);
+                    peer.options.read_timeout = Some(timeout);
+                    peer.options.idle_timeout = Some(timeout);
+                }
                 Ok(peer)
             }
         }
@@ -116,28 +127,44 @@ fn extract_host(raw: Option<&str>) -> Option<String> {
 }
 
 fn resolve_target(
-    routes: &HashMap<String, BackendTarget>,
+    routes: &HashMap<String, Vec<RouteRule>>,
     host: &str,
     domain_suffix: &str,
-) -> Option<BackendTarget> {
-    if let Some(hit) = routes.get(host) {
-        return Some(hit.clone());
+    path: &str,
+) -> Option<RouteRule> {
+    if let Some(hit) = select_route(routes.get(host), path) {
+        return Some(hit);
     }
 
     let mut parts: Vec<&str> = host.split('.').collect();
     while parts.len() > 2 {
         parts.remove(0);
         let candidate = parts.join(".");
-        if let Some(hit) = routes.get(&candidate) {
-            return Some(hit.clone());
+        if let Some(hit) = select_route(routes.get(&candidate), path) {
+            return Some(hit);
         }
     }
 
     let default_host = format!("default.{domain_suffix}");
-    if let Some(hit) = routes.get(&default_host) {
-        return Some(hit.clone());
+    if let Some(hit) = select_route(routes.get(&default_host), path) {
+        return Some(hit);
     }
 
+    None
+}
+
+fn select_route(candidates: Option<&Vec<RouteRule>>, path: &str) -> Option<RouteRule> {
+    let candidates = candidates?;
+    for route in candidates {
+        match route.path_prefix.as_deref() {
+            None => return Some(route.clone()),
+            Some("/") => return Some(route.clone()),
+            Some(prefix) if path == prefix || path.starts_with(&format!("{prefix}/")) => {
+                return Some(route.clone());
+            }
+            _ => {}
+        }
+    }
     None
 }
 
@@ -153,16 +180,20 @@ mod tests {
 
     #[test]
     fn subdomain_falls_back_to_parent_host() {
-        let mut routes = HashMap::new();
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
             "myapp.test".to_string(),
-            BackendTarget::Tcp {
-                host: "127.0.0.1".to_string(),
-                port: 5006,
-            },
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5006,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
         );
-        let out = resolve_target(&routes, "www.myapp.test", "test").expect("fallback");
-        match out {
+        let out = resolve_target(&routes, "www.myapp.test", "test", "/").expect("fallback");
+        match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, 5006);
@@ -172,20 +203,54 @@ mod tests {
 
     #[test]
     fn unknown_host_falls_back_to_default() {
-        let mut routes = HashMap::new();
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
             "default.test".to_string(),
-            BackendTarget::Tcp {
-                host: "127.0.0.1".to_string(),
-                port: 5007,
-            },
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5007,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
         );
-        let out = resolve_target(&routes, "totally-unknown.test", "test").expect("default");
-        match out {
+        let out = resolve_target(&routes, "totally-unknown.test", "test", "/").expect("default");
+        match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, 5007);
             }
+        }
+    }
+
+    #[test]
+    fn longest_path_prefix_wins() {
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        routes.insert(
+            "myapp.test".to_string(),
+            vec![
+                RouteRule {
+                    target: BackendTarget::Tcp {
+                        host: "127.0.0.1".to_string(),
+                        port: 5000,
+                    },
+                    path_prefix: Some("/api/v1".to_string()),
+                    timeout_ms: None,
+                },
+                RouteRule {
+                    target: BackendTarget::Tcp {
+                        host: "127.0.0.1".to_string(),
+                        port: 4000,
+                    },
+                    path_prefix: Some("/api".to_string()),
+                    timeout_ms: None,
+                },
+            ],
+        );
+        let out = resolve_target(&routes, "myapp.test", "test", "/api/v1/users").expect("route");
+        match out.target {
+            BackendTarget::Tcp { port, .. } => assert_eq!(port, 5000),
         }
     }
 }

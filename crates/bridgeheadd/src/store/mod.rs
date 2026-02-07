@@ -52,14 +52,17 @@ impl AppRepository {
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
               kind TEXT NOT NULL,
-              domain TEXT NOT NULL UNIQUE,
+              domain TEXT NOT NULL,
+              path_prefix TEXT NOT NULL DEFAULT '',
               target_host TEXT NOT NULL,
               target_port INTEGER NOT NULL,
+              timeout_ms INTEGER,
               enabled INTEGER NOT NULL,
               scan_managed INTEGER NOT NULL DEFAULT 0,
               scan_source TEXT,
               created_at INTEGER NOT NULL,
-              updated_at INTEGER NOT NULL
+              updated_at INTEGER NOT NULL,
+              UNIQUE(domain, path_prefix)
             );
 
             CREATE INDEX IF NOT EXISTS idx_apps_enabled_domain
@@ -71,6 +74,12 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN scan_managed INTEGER NOT NULL DEFAULT 0",
         )?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN scan_source TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN path_prefix TEXT NOT NULL DEFAULT ''",
+        )?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN timeout_ms INTEGER")?;
+        migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
 
@@ -78,19 +87,24 @@ impl AppRepository {
         &self,
         name: &str,
         domain: &DomainName,
+        path_prefix: Option<&str>,
         target_host: &str,
         target_port: u16,
+        timeout_ms: Option<u64>,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
+        let path_prefix_db = path_prefix_to_db(path_prefix);
         let app = AppSpec {
             id: AppId::new(),
             name: name.to_string(),
             kind: AppKind::Static,
             domain: domain.clone(),
+            path_prefix: path_prefix.map(ToOwned::to_owned),
             target: BackendTarget::Tcp {
                 host: target_host.to_string(),
                 port: target_port,
             },
+            timeout_ms,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -98,15 +112,17 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9)",
+            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11)",
             params![
                 app.id.0,
                 app.name,
                 "static",
                 app.domain.0,
+                path_prefix_db,
                 target_host,
                 i64::from(target_port),
+                app.timeout_ms.map(|v| v as i64),
                 if app.enabled { 1 } else { 0 },
                 app.created_at.unix_timestamp(),
                 app.updated_at.unix_timestamp(),
@@ -128,28 +144,33 @@ impl AppRepository {
         &self,
         name: &str,
         domain: &DomainName,
+        path_prefix: Option<&str>,
         target_host: &str,
         target_port: u16,
+        timeout_ms: Option<u64>,
         enabled: bool,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
+        let path_prefix_db = path_prefix_to_db(path_prefix);
 
         let existing_id: Option<String> = conn
             .query_row(
-                "SELECT id FROM apps WHERE domain = ?1",
-                params![domain.0],
+                "SELECT id FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+                params![domain.0, path_prefix_db],
                 |row| row.get(0),
             )
             .optional()?;
 
         if let Some(id) = existing_id {
             conn.execute(
-                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 0, scan_source = NULL WHERE id = ?6",
+                "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 0, scan_source = NULL WHERE id = ?8",
                 params![
                     name,
+                    path_prefix_db,
                     target_host,
                     i64::from(target_port),
+                    timeout_ms.map(|v| v as i64),
                     if enabled { 1 } else { 0 },
                     now,
                     id
@@ -158,15 +179,17 @@ impl AppRepository {
         } else {
             let created = AppId::new().0;
             conn.execute(
-                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, NULL, ?8, ?9)",
+                "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11)",
                 params![
                     created,
                     name,
                     "static",
                     domain.0,
+                    path_prefix_db,
                     target_host,
                     i64::from(target_port),
+                    timeout_ms.map(|v| v as i64),
                     if enabled { 1 } else { 0 },
                     now,
                     now,
@@ -175,22 +198,24 @@ impl AppRepository {
         }
 
         let app = conn.query_row(
-            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE domain = ?1",
-            params![domain.0],
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+            params![domain.0, path_prefix_db],
             |row| {
                 Ok(AppSpec {
                     id: AppId(row.get(0)?),
                     name: row.get(1)?,
                     kind: AppKind::Static,
                     domain: DomainName(row.get(3)?),
+                    path_prefix: path_prefix_from_db(row.get::<_, String>(4)?),
                     target: BackendTarget::Tcp {
-                        host: row.get(4)?,
-                        port: row.get::<_, i64>(5)? as u16,
+                        host: row.get(5)?,
+                        port: row.get::<_, i64>(6)? as u16,
                     },
-                    enabled: row.get::<_, i64>(6)? == 1,
-                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(7)?)
+                    timeout_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                    enabled: row.get::<_, i64>(8)? == 1,
+                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(9)?)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH),
-                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(8)?)
+                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(10)?)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH),
                 })
             },
@@ -213,7 +238,7 @@ impl AppRepository {
 
         let existing: Option<(String, i64)> = conn
             .query_row(
-                "SELECT id, scan_managed FROM apps WHERE domain = ?1",
+                "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ''",
                 params![domain.0],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
@@ -223,7 +248,7 @@ impl AppRepository {
             Some((_id, scan_managed)) if scan_managed == 0 => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
+                    "UPDATE apps SET name = ?1, path_prefix = '', target_host = ?2, target_port = ?3, timeout_ms = NULL, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
                     params![
                         name,
                         target_host,
@@ -239,8 +264,8 @@ impl AppRepository {
             None => {
                 let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, NULL, ?7, 1, ?8, ?9, ?10)",
                     params![
                         created,
                         name,
@@ -259,7 +284,7 @@ impl AppRepository {
         };
 
         let app = conn.query_row(
-            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE domain = ?1",
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps WHERE domain = ?1 AND path_prefix = ''",
             params![domain.0],
             |row| {
                 Ok(AppSpec {
@@ -267,14 +292,16 @@ impl AppRepository {
                     name: row.get(1)?,
                     kind: AppKind::Static,
                     domain: DomainName(row.get(3)?),
+                    path_prefix: path_prefix_from_db(row.get::<_, String>(4)?),
                     target: BackendTarget::Tcp {
-                        host: row.get(4)?,
-                        port: row.get::<_, i64>(5)? as u16,
+                        host: row.get(5)?,
+                        port: row.get::<_, i64>(6)? as u16,
                     },
-                    enabled: row.get::<_, i64>(6)? == 1,
-                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(7)?)
+                    timeout_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                    enabled: row.get::<_, i64>(8)? == 1,
+                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(9)?)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH),
-                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(8)?)
+                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(10)?)
                         .unwrap_or(OffsetDateTime::UNIX_EPOCH),
                 })
             },
@@ -337,9 +364,9 @@ impl AppRepository {
 
     fn query_apps(conn: &Connection, enabled_only: bool) -> anyhow::Result<Vec<AppSpec>> {
         let sql = if enabled_only {
-            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE enabled = 1 ORDER BY domain ASC"
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps WHERE enabled = 1 ORDER BY domain ASC, LENGTH(path_prefix) DESC"
         } else {
-            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps ORDER BY domain ASC"
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps ORDER BY domain ASC, LENGTH(path_prefix) DESC"
         };
 
         let mut stmt = conn.prepare(sql)?;
@@ -356,19 +383,21 @@ impl AppRepository {
                 _ => AppKind::Static,
             };
 
-            let created_ts: i64 = row.get(7)?;
-            let updated_ts: i64 = row.get(8)?;
+            let created_ts: i64 = row.get(9)?;
+            let updated_ts: i64 = row.get(10)?;
 
             apps.push(AppSpec {
                 id: AppId(row.get(0)?),
                 name: row.get(1)?,
                 kind,
                 domain: DomainName(row.get(3)?),
+                path_prefix: path_prefix_from_db(row.get::<_, String>(4)?),
                 target: BackendTarget::Tcp {
-                    host: row.get(4)?,
-                    port: row.get::<_, i64>(5)? as u16,
+                    host: row.get(5)?,
+                    port: row.get::<_, i64>(6)? as u16,
                 },
-                enabled: row.get::<_, i64>(6)? == 1,
+                timeout_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
+                enabled: row.get::<_, i64>(8)? == 1,
                 created_at: OffsetDateTime::from_unix_timestamp(created_ts)
                     .unwrap_or(OffsetDateTime::UNIX_EPOCH),
                 updated_at: OffsetDateTime::from_unix_timestamp(updated_ts)
@@ -392,6 +421,72 @@ fn add_column_if_missing(conn: &Connection, sql: &str) -> anyhow::Result<()> {
     }
 }
 
+fn path_prefix_to_db(path_prefix: Option<&str>) -> String {
+    path_prefix.unwrap_or("").to_string()
+}
+
+fn path_prefix_from_db(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Result<()> {
+    let table_sql: Option<String> = conn
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'apps'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(sql) = table_sql else {
+        return Ok(());
+    };
+
+    // v1 schema had `domain TEXT NOT NULL UNIQUE`, which blocks host+path multi-route.
+    if !sql.contains("domain TEXT NOT NULL UNIQUE") {
+        return Ok(());
+    }
+
+    conn.execute_batch(
+        r#"
+        BEGIN;
+        ALTER TABLE apps RENAME TO apps_old;
+        CREATE TABLE apps (
+          id TEXT PRIMARY KEY,
+          name TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          domain TEXT NOT NULL,
+          path_prefix TEXT NOT NULL DEFAULT '',
+          target_host TEXT NOT NULL,
+          target_port INTEGER NOT NULL,
+          timeout_ms INTEGER,
+          enabled INTEGER NOT NULL,
+          scan_managed INTEGER NOT NULL DEFAULT 0,
+          scan_source TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE(domain, path_prefix)
+        );
+        INSERT INTO apps (
+          id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms,
+          enabled, scan_managed, scan_source, created_at, updated_at
+        )
+        SELECT
+          id, name, kind, domain, '', target_host, target_port, NULL,
+          enabled, scan_managed, scan_source, created_at, updated_at
+        FROM apps_old;
+        DROP TABLE apps_old;
+        CREATE INDEX IF NOT EXISTS idx_apps_enabled_domain ON apps(enabled, domain);
+        COMMIT;
+        "#,
+    )?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -404,7 +499,7 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.test".to_string());
 
-        repo.insert_static("myapp", &domain, "127.0.0.1", 9001)
+        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None)
             .expect("insert");
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
