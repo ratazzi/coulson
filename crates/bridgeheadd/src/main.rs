@@ -1,6 +1,7 @@
 mod config;
 mod control;
 mod domain;
+mod mdns;
 mod proxy;
 mod runtime;
 mod scanner;
@@ -131,8 +132,9 @@ fn parse_command() -> anyhow::Result<Command> {
 fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
     runtime::ensure_runtime_paths(cfg)?;
 
-    let store = Arc::new(AppRepository::new(&cfg.sqlite_path)?);
+    let store = Arc::new(AppRepository::new(&cfg.sqlite_path, &cfg.domain_suffix)?);
     store.init_schema()?;
+    store.migrate_domain_to_prefix()?;
 
     let (route_tx, _rx) = broadcast::channel(32);
     Ok(SharedState {
@@ -293,6 +295,13 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         drop(watcher);
     });
 
+    let mdns_state = state.clone();
+    let mdns_task = tokio::spawn(async move {
+        if let Err(err) = mdns::run_mdns_responder(mdns_state).await {
+            error!(error = %err, "mdns responder exited with error");
+        }
+    });
+
     info!("bridgeheadd started");
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
@@ -301,6 +310,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     control_task.abort();
     scan_task.abort();
     watch_task.abort();
+    mdns_task.abort();
 
     Ok(())
 }

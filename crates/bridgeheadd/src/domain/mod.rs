@@ -115,31 +115,36 @@ mod tests {
 
     #[test]
     fn accepts_valid_test_domain() {
-        let domain = DomainName::parse("myapp.test", "test").expect("valid domain");
-        assert_eq!(domain.0, "myapp.test");
+        let domain =
+            DomainName::parse("myapp.bridgehead.local", "bridgehead.local").expect("valid domain");
+        assert_eq!(domain.0, "myapp.bridgehead.local");
     }
 
     #[test]
     fn rejects_invalid_suffix() {
-        let err = DomainName::parse("myapp.local", "test").expect_err("must fail");
+        let err =
+            DomainName::parse("myapp.test", "bridgehead.local").expect_err("must fail");
         assert!(matches!(err, DomainError::InvalidSuffix(_)));
     }
 
     #[test]
     fn accepts_subdomain_labels() {
-        let domain = DomainName::parse("www.myapp.test", "test").expect("valid");
-        assert_eq!(domain.0, "www.myapp.test");
+        let domain =
+            DomainName::parse("www.myapp.bridgehead.local", "bridgehead.local").expect("valid");
+        assert_eq!(domain.0, "www.myapp.bridgehead.local");
     }
 
     #[test]
     fn accepts_wildcard_subdomain() {
-        let domain = DomainName::parse("*.myapp.test", "test").expect("valid");
-        assert_eq!(domain.0, "*.myapp.test");
+        let domain =
+            DomainName::parse("*.myapp.bridgehead.local", "bridgehead.local").expect("valid");
+        assert_eq!(domain.0, "*.myapp.bridgehead.local");
     }
 
     #[test]
     fn wildcard_must_have_suffix_labels() {
-        let err = DomainName::parse("*.test", "test").expect_err("must fail");
+        let err =
+            DomainName::parse("*.bridgehead.local", "bridgehead.local").expect_err("must fail");
         assert!(matches!(err, DomainError::InvalidLabel));
     }
 }

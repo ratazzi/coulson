@@ -7,7 +7,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::domain::DomainName;
-use crate::store::{route_key, ScanUpsertResult};
+use crate::store::{domain_to_db, route_key, ScanUpsertResult};
 use crate::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -99,7 +99,8 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             ScanUpsertResult::Updated => updated += 1,
             ScanUpsertResult::SkippedManual => skipped_manual += 1,
         }
-        let route_key = route_key(&app.domain.0, app.path_prefix.as_deref().unwrap_or(""));
+        let domain_prefix = domain_to_db(&app.domain.0, &state.domain_suffix);
+        let route_key = route_key(&domain_prefix, app.path_prefix.as_deref().unwrap_or(""));
         active_routes.insert(route_key);
     }
     let pruned = state
@@ -672,10 +673,13 @@ mod tests {
 
     #[test]
     fn converts_file_name_to_domain() {
-        assert_eq!(file_name_to_domain("myapp", "test"), "myapp.test");
         assert_eq!(
-            file_name_to_domain("www.myapp.test", "test"),
-            "www.myapp.test"
+            file_name_to_domain("myapp", "bridgehead.local"),
+            "myapp.bridgehead.local"
+        );
+        assert_eq!(
+            file_name_to_domain("www.myapp.bridgehead.local", "bridgehead.local"),
+            "www.myapp.bridgehead.local"
         );
     }
 
@@ -688,7 +692,7 @@ mod tests {
             &mut conflicts,
             DiscoveredStaticApp {
                 name: "a".to_string(),
-                domain: DomainName("myapp.test".to_string()),
+                domain: DomainName("myapp.bridgehead.local".to_string()),
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5006,
@@ -707,7 +711,7 @@ mod tests {
             &mut conflicts,
             DiscoveredStaticApp {
                 name: "b".to_string(),
-                domain: DomainName("myapp.test".to_string()),
+                domain: DomainName("myapp.bridgehead.local".to_string()),
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5007,
@@ -721,7 +725,7 @@ mod tests {
                 explicit_domain: true,
             },
         );
-        let winner = map.get("myapp.test|").expect("winner");
+        let winner = map.get("myapp.bridgehead.local|").expect("winner");
         assert_eq!(winner.target_port, 5007);
         assert_eq!(conflicts.len(), 1);
     }
@@ -759,14 +763,14 @@ mod tests {
 
     #[test]
     fn humanize_conflict_key_default_route() {
-        assert_eq!(humanize_route_conflict_key("myapp.test|"), "myapp.test");
+        assert_eq!(humanize_route_conflict_key("myapp.bridgehead.local|"), "myapp.bridgehead.local");
     }
 
     #[test]
     fn humanize_conflict_key_path_route() {
         assert_eq!(
-            humanize_route_conflict_key("myapp.test|/api"),
-            "myapp.test (path=/api)"
+            humanize_route_conflict_key("myapp.bridgehead.local|/api"),
+            "myapp.bridgehead.local (path=/api)"
         );
     }
 }

@@ -24,10 +24,11 @@ pub enum ScanUpsertResult {
 
 pub struct AppRepository {
     conn: Mutex<Connection>,
+    domain_suffix: String,
 }
 
 impl AppRepository {
-    pub fn new(path: &Path) -> anyhow::Result<Self> {
+    pub fn new(path: &Path, domain_suffix: &str) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create sqlite dir: {}", parent.display()))?;
@@ -36,6 +37,7 @@ impl AppRepository {
             .with_context(|| format!("failed to open sqlite db: {}", path.display()))?;
         Ok(Self {
             conn: Mutex::new(conn),
+            domain_suffix: domain_suffix.to_string(),
         })
     }
 
@@ -95,6 +97,19 @@ impl AppRepository {
         Ok(())
     }
 
+    /// Strip domain suffix from existing rows (idempotent migration).
+    pub fn migrate_domain_to_prefix(&self) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        let dot_suffix = format!(".{}", self.domain_suffix);
+        let suffix_len = dot_suffix.len() as i64;
+        let pattern = format!("%{dot_suffix}");
+        conn.execute(
+            "UPDATE apps SET domain = SUBSTR(domain, 1, LENGTH(domain) - ?1) WHERE domain LIKE ?2",
+            params![suffix_len, pattern],
+        )?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn insert_static(
         &self,
@@ -111,6 +126,7 @@ impl AppRepository {
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(path_prefix);
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
         let app = AppSpec {
             id: AppId::new(),
             name: name.to_string(),
@@ -139,7 +155,7 @@ impl AppRepository {
                 app.id.0,
                 app.name,
                 "static",
-                app.domain.0,
+                domain_db,
                 path_prefix_db,
                 target_host,
                 i64::from(target_port),
@@ -172,6 +188,7 @@ impl AppRepository {
         static_root: &str,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
         let app = AppSpec {
             id: AppId::new(),
             name: name.to_string(),
@@ -199,7 +216,7 @@ impl AppRepository {
                 app.id.0,
                 app.name,
                 "static",
-                app.domain.0,
+                domain_db,
                 "",
                 "",
                 0i64,
@@ -231,6 +248,7 @@ impl AppRepository {
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(path_prefix);
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
         let app = AppSpec {
             id: AppId::new(),
             name: name.to_string(),
@@ -258,7 +276,7 @@ impl AppRepository {
                 app.id.0,
                 app.name,
                 "static",
-                app.domain.0,
+                domain_db,
                 path_prefix_db,
                 "",
                 0i64,
@@ -299,11 +317,12 @@ impl AppRepository {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
         let path_prefix_db = path_prefix_to_db(path_prefix);
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
 
         let existing_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM apps WHERE domain = ?1 AND path_prefix = ?2",
-                params![domain.0, path_prefix_db],
+                params![domain_db, path_prefix_db],
                 |row| row.get(0),
             )
             .optional()?;
@@ -335,7 +354,7 @@ impl AppRepository {
                     created,
                     name,
                     "static",
-                    domain.0,
+                    domain_db,
                     path_prefix_db,
                     target_host,
                     i64::from(target_port),
@@ -351,7 +370,8 @@ impl AppRepository {
             )?;
         }
 
-        let app = Self::read_app_by_route(&conn, &domain.0, &path_prefix_db)?;
+        let suffix = &self.domain_suffix;
+        let app = Self::read_app_by_route(&conn, &domain_db, &path_prefix_db, suffix)?;
         Ok(app)
     }
 
@@ -375,11 +395,12 @@ impl AppRepository {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
         let path_prefix_db = path_prefix_to_db(path_prefix);
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
 
         let existing: Option<(String, i64)> = conn
             .query_row(
                 "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
-                params![domain.0, path_prefix_db],
+                params![domain_db, path_prefix_db],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -417,7 +438,7 @@ impl AppRepository {
                         created,
                         name,
                         "static",
-                        domain.0,
+                        domain_db,
                         path_prefix_db,
                         target_host,
                         i64::from(target_port),
@@ -437,7 +458,8 @@ impl AppRepository {
             }
         };
 
-        let app = Self::read_app_by_route(&conn, &domain.0, &path_prefix_db)?;
+        let suffix = &self.domain_suffix;
+        let app = Self::read_app_by_route(&conn, &domain_db, &path_prefix_db, suffix)?;
         Ok((app, op))
     }
 
@@ -455,9 +477,10 @@ impl AppRepository {
 
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
-            let domain: String = row.get(1)?;
+            let domain_prefix: String = row.get(1)?;
             let path_prefix: String = row.get(2)?;
-            let key = route_key(&domain, &path_prefix);
+            // route_key uses prefix (same as what scanner builds)
+            let key = route_key(&domain_prefix, &path_prefix);
             if !active_routes.contains(&key) {
                 delete_ids.push(id);
             }
@@ -488,7 +511,7 @@ impl AppRepository {
 
     pub fn list_all(&self) -> anyhow::Result<Vec<AppSpec>> {
         let conn = self.conn.lock();
-        Self::query_apps(&conn, false)
+        Self::query_apps(&conn, false, &self.domain_suffix)
     }
 
     pub fn list_filtered(
@@ -496,13 +519,14 @@ impl AppRepository {
         managed: Option<bool>,
         domain: Option<&str>,
     ) -> anyhow::Result<Vec<AppSpec>> {
+        let domain_db = domain.map(|d| domain_to_db(d, &self.domain_suffix));
         let conn = self.conn.lock();
-        Self::query_apps_filtered(&conn, managed, domain)
+        Self::query_apps_filtered(&conn, managed, domain_db.as_deref(), &self.domain_suffix)
     }
 
     pub fn list_enabled(&self) -> anyhow::Result<Vec<AppSpec>> {
         let conn = self.conn.lock();
-        Self::query_apps(&conn, true)
+        Self::query_apps(&conn, true, &self.domain_suffix)
     }
 
     pub fn update_settings(
@@ -552,16 +576,25 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    fn read_app_by_route(conn: &Connection, domain: &str, path_prefix_db: &str) -> anyhow::Result<AppSpec> {
+    fn read_app_by_route(
+        conn: &Connection,
+        domain_db: &str,
+        path_prefix_db: &str,
+        suffix: &str,
+    ) -> anyhow::Result<AppSpec> {
         let app = conn.query_row(
             &format!("SELECT {} FROM apps WHERE domain = ?1 AND path_prefix = ?2", COLS),
-            params![domain, path_prefix_db],
-            row_to_app,
+            params![domain_db, path_prefix_db],
+            |row| row_to_app(row, suffix),
         )?;
         Ok(app)
     }
 
-    fn query_apps(conn: &Connection, enabled_only: bool) -> anyhow::Result<Vec<AppSpec>> {
+    fn query_apps(
+        conn: &Connection,
+        enabled_only: bool,
+        suffix: &str,
+    ) -> anyhow::Result<Vec<AppSpec>> {
         let sql = if enabled_only {
             format!("SELECT {} FROM apps WHERE enabled = 1 ORDER BY domain ASC, LENGTH(path_prefix) DESC", COLS)
         } else {
@@ -570,13 +603,14 @@ impl AppRepository {
 
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query([])?;
-        Self::collect_rows(&mut rows)
+        Self::collect_rows(&mut rows, suffix)
     }
 
     fn query_apps_filtered(
         conn: &Connection,
         managed: Option<bool>,
-        domain: Option<&str>,
+        domain_db: Option<&str>,
+        suffix: &str,
     ) -> anyhow::Result<Vec<AppSpec>> {
         let mut sql = format!("SELECT {} FROM apps", COLS);
         let mut clauses: Vec<&str> = Vec::new();
@@ -586,7 +620,7 @@ impl AppRepository {
             clauses.push("scan_managed = ?");
             values.push(Value::Integer(if flag { 1 } else { 0 }));
         }
-        if let Some(domain) = domain {
+        if let Some(domain) = domain_db {
             clauses.push("domain = ?");
             values.push(Value::Text(domain.to_string()));
         }
@@ -598,13 +632,13 @@ impl AppRepository {
 
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(values.iter()))?;
-        Self::collect_rows(&mut rows)
+        Self::collect_rows(&mut rows, suffix)
     }
 
-    fn collect_rows(rows: &mut rusqlite::Rows<'_>) -> anyhow::Result<Vec<AppSpec>> {
+    fn collect_rows(rows: &mut rusqlite::Rows<'_>, suffix: &str) -> anyhow::Result<Vec<AppSpec>> {
         let mut apps = Vec::new();
         while let Some(row) = rows.next()? {
-            apps.push(row_to_app(row)?);
+            apps.push(row_to_app(row, suffix)?);
         }
         Ok(apps)
     }
@@ -612,7 +646,7 @@ impl AppRepository {
 
 const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path";
 
-fn row_to_app(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppSpec> {
+fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
     let kind = match kind.as_str() {
         "static" => AppKind::Static,
@@ -638,11 +672,14 @@ fn row_to_app(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppSpec> {
         }
     };
 
+    let domain_prefix: String = row.get(3)?;
+    let full_domain = domain_from_db(&domain_prefix, suffix);
+
     Ok(AppSpec {
         id: AppId(row.get(0)?),
         name: row.get(1)?,
         kind,
-        domain: DomainName(row.get(3)?),
+        domain: DomainName(full_domain),
         path_prefix: path_prefix_from_db(row.get::<_, String>(4)?),
         target,
         timeout_ms: row.get::<_, Option<i64>>(7)?.map(|v| v as u64),
@@ -680,6 +717,20 @@ fn path_prefix_from_db(value: String) -> Option<String> {
     } else {
         Some(value)
     }
+}
+
+/// Strip `.{suffix}` from a full domain to get the DB prefix.
+pub fn domain_to_db(full_domain: &str, suffix: &str) -> String {
+    let dot_suffix = format!(".{suffix}");
+    full_domain
+        .strip_suffix(&dot_suffix)
+        .unwrap_or(full_domain)
+        .to_string()
+}
+
+/// Append `.{suffix}` to a DB prefix to reconstruct the full domain.
+fn domain_from_db(prefix: &str, suffix: &str) -> String {
+    format!("{prefix}.{suffix}")
 }
 
 pub fn route_key(domain: &str, path_prefix_db: &str) -> String {
@@ -748,14 +799,35 @@ mod tests {
     fn insert_and_list_enabled() {
         let repo = AppRepository {
             conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
+            domain_suffix: "bridgehead.local".to_string(),
         };
         repo.init_schema().expect("schema");
-        let domain = DomainName("myapp.test".to_string());
+        let domain = DomainName("myapp.bridgehead.local".to_string());
 
         repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false)
             .expect("insert");
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
-        assert_eq!(apps[0].domain.0, "myapp.test");
+        assert_eq!(apps[0].domain.0, "myapp.bridgehead.local");
+    }
+
+    #[test]
+    fn db_stores_prefix_only() {
+        let repo = AppRepository {
+            conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
+            domain_suffix: "bridgehead.local".to_string(),
+        };
+        repo.init_schema().expect("schema");
+        let domain = DomainName("myapp.bridgehead.local".to_string());
+
+        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false)
+            .expect("insert");
+
+        // Verify raw DB stores only prefix
+        let conn = repo.conn.lock();
+        let raw: String = conn
+            .query_row("SELECT domain FROM apps LIMIT 1", [], |row| row.get(0))
+            .expect("query");
+        assert_eq!(raw, "myapp");
     }
 }

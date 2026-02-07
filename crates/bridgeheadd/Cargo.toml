@@ -10,6 +10,7 @@ async-trait.workspace = true
 bytes.workspace = true
 parking_lot.workspace = true
 pingora.workspace = true
+mdns-sd.workspace = true
 notify.workspace = true
 regex.workspace = true
 rusqlite.workspace = true

@@ -30,7 +30,7 @@ impl Default for BridgeheadConfig {
             control_socket: PathBuf::from("/tmp/bridgehead/bridgeheadd.sock"),
             sqlite_path: PathBuf::from(format!("{home}/.bridgehead/state.db")),
             scan_warnings_path: PathBuf::from(format!("{home}/.bridgehead/scan_warnings.json")),
-            domain_suffix: "test".to_string(),
+            domain_suffix: "bridgehead.local".to_string(),
             apps_root,
             scan_interval_secs: 2,
             watch_fs: true,

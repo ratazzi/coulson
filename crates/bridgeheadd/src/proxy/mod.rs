@@ -181,6 +181,13 @@ fn run_proxy_blocking(bind: &str, state: SharedState) -> anyhow::Result<()> {
 
     let mut service = http_proxy_service(&server.configuration, BridgeProxy { shared: state });
     service.add_tcp(bind);
+    // Also listen on IPv6 loopback so mDNS-resolved AAAA connections work
+    if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
+        if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
+            let v6_bind = format!("[::1]:{}", addr.port());
+            service.add_tcp(&v6_bind);
+        }
+    }
     server.add_service(service);
     server.run_forever();
 }
@@ -771,15 +778,15 @@ mod tests {
 
     #[test]
     fn host_header_is_normalized() {
-        let host = extract_host(Some("MyApp.test:8080")).expect("host");
-        assert_eq!(host, "myapp.test");
+        let host = extract_host(Some("MyApp.bridgehead.local:8080")).expect("host");
+        assert_eq!(host, "myapp.bridgehead.local");
     }
 
     #[test]
     fn subdomain_falls_back_to_parent_host() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "myapp.test".to_string(),
+            "myapp.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -793,7 +800,7 @@ mod tests {
                 spa_rewrite: false,
             }],
         );
-        let out = resolve_target(&routes, "www.myapp.test", "test", "/").expect("fallback");
+        let out = resolve_target(&routes, "www.myapp.bridgehead.local", "bridgehead.local", "/").expect("fallback");
         match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
@@ -807,7 +814,7 @@ mod tests {
     fn unknown_host_falls_back_to_default() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "default.test".to_string(),
+            "default.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -821,7 +828,7 @@ mod tests {
                 spa_rewrite: false,
             }],
         );
-        let out = resolve_target(&routes, "totally-unknown.test", "test", "/").expect("default");
+        let out = resolve_target(&routes, "totally-unknown.bridgehead.local", "bridgehead.local", "/").expect("default");
         match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
@@ -835,7 +842,7 @@ mod tests {
     fn longest_path_prefix_wins() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "myapp.test".to_string(),
+            "myapp.bridgehead.local".to_string(),
             vec![
                 RouteRule {
                     target: BackendTarget::Tcp {
@@ -863,7 +870,7 @@ mod tests {
                 },
             ],
         );
-        let out = resolve_target(&routes, "myapp.test", "test", "/api/v1/users").expect("route");
+        let out = resolve_target(&routes, "myapp.bridgehead.local", "bridgehead.local", "/api/v1/users").expect("route");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5000),
             _ => panic!("expected tcp"),
@@ -874,7 +881,7 @@ mod tests {
     fn wildcard_host_matches_subdomain() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "*.myapp.test".to_string(),
+            "*.myapp.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -888,7 +895,7 @@ mod tests {
                 spa_rewrite: false,
             }],
         );
-        let out = resolve_target(&routes, "api.myapp.test", "test", "/").expect("wildcard");
+        let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("wildcard");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5010),
             _ => panic!("expected tcp"),
@@ -899,7 +906,7 @@ mod tests {
     fn exact_host_beats_wildcard() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "api.myapp.test".to_string(),
+            "api.myapp.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -914,7 +921,7 @@ mod tests {
             }],
         );
         routes.insert(
-            "*.myapp.test".to_string(),
+            "*.myapp.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -928,7 +935,7 @@ mod tests {
                 spa_rewrite: false,
             }],
         );
-        let out = resolve_target(&routes, "api.myapp.test", "test", "/").expect("route");
+        let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("route");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5001),
             _ => panic!("expected tcp"),
@@ -939,7 +946,7 @@ mod tests {
     fn wildcard_requires_subdomain() {
         let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
         routes.insert(
-            "*.myapp.test".to_string(),
+            "*.myapp.bridgehead.local".to_string(),
             vec![RouteRule {
                 target: BackendTarget::Tcp {
                     host: "127.0.0.1".to_string(),
@@ -953,7 +960,7 @@ mod tests {
                 spa_rewrite: false,
             }],
         );
-        assert!(resolve_target(&routes, "myapp.test", "test", "/").is_none());
+        assert!(resolve_target(&routes, "myapp.bridgehead.local", "bridgehead.local", "/").is_none());
     }
 
     // --- New feature tests ---
