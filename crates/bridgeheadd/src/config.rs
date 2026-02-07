@@ -9,6 +9,7 @@ pub struct BridgeheadConfig {
     pub listen_http: SocketAddr,
     pub control_socket: PathBuf,
     pub sqlite_path: PathBuf,
+    pub scan_warnings_path: PathBuf,
     pub domain_suffix: String,
     pub apps_root: PathBuf,
     pub scan_interval_secs: u64,
@@ -28,6 +29,7 @@ impl Default for BridgeheadConfig {
             listen_http: "127.0.0.1:8080".parse().expect("default listen addr"),
             control_socket: PathBuf::from("/tmp/bridgehead/bridgeheadd.sock"),
             sqlite_path: PathBuf::from(format!("{home}/.bridgehead/state.db")),
+            scan_warnings_path: PathBuf::from(format!("{home}/.bridgehead/scan_warnings.json")),
             domain_suffix: "test".to_string(),
             apps_root,
             scan_interval_secs: 2,
@@ -52,6 +54,9 @@ impl BridgeheadConfig {
 
         if let Ok(path) = env::var("BRIDGEHEAD_SQLITE_PATH") {
             cfg.sqlite_path = PathBuf::from(path);
+        }
+        if let Ok(path) = env::var("BRIDGEHEAD_SCAN_WARNINGS_PATH") {
+            cfg.scan_warnings_path = PathBuf::from(path);
         }
 
         if let Ok(suffix) = env::var("BRIDGEHEAD_DOMAIN_SUFFIX") {

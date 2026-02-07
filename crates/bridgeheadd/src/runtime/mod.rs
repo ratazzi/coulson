@@ -1,9 +1,13 @@
 use std::fs;
+use std::path::Path;
 
 use anyhow::Context;
+use serde::Serialize;
+use time::OffsetDateTime;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::BridgeheadConfig;
+use crate::scanner::ScanStats;
 
 pub fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -30,6 +34,10 @@ pub fn ensure_runtime_paths(cfg: &BridgeheadConfig) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create sqlite dir: {}", parent.display()))?;
     }
+    if let Some(parent) = cfg.scan_warnings_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create scan warnings dir: {}", parent.display()))?;
+    }
     fs::create_dir_all(&cfg.apps_root)
         .with_context(|| format!("failed to create apps root: {}", cfg.apps_root.display()))?;
 
@@ -38,4 +46,24 @@ pub fn ensure_runtime_paths(cfg: &BridgeheadConfig) -> anyhow::Result<()> {
 
 pub async fn wait_for_shutdown() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+#[derive(Serialize)]
+struct PersistedScanWarnings<'a> {
+    updated_at: i64,
+    scan: &'a ScanStats,
+}
+
+pub fn write_scan_warnings(path: &Path, stats: &ScanStats) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create warnings dir: {}", parent.display()))?;
+    }
+    let payload = PersistedScanWarnings {
+        updated_at: OffsetDateTime::now_utc().unix_timestamp(),
+        scan: stats,
+    };
+    let raw = serde_json::to_vec_pretty(&payload)?;
+    fs::write(path, raw).with_context(|| format!("failed writing {}", path.display()))?;
+    Ok(())
 }

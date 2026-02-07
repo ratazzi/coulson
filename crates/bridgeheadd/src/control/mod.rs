@@ -241,6 +241,11 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         },
         "apps.scan" => match scanner::sync_from_apps_root(state) {
             Ok(stats) => {
+                if let Err(e) =
+                    crate::runtime::write_scan_warnings(&state.scan_warnings_path, &stats)
+                {
+                    return internal_error(req.request_id, e.to_string());
+                }
                 if let Err(e) = state.reload_routes() {
                     return internal_error(req.request_id, e.to_string());
                 }

@@ -28,6 +28,7 @@ pub struct SharedState {
     pub route_tx: broadcast::Sender<()>,
     pub domain_suffix: String,
     pub apps_root: std::path::PathBuf,
+    pub scan_warnings_path: std::path::PathBuf,
 }
 
 impl SharedState {
@@ -73,12 +74,14 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         route_tx,
         domain_suffix: cfg.domain_suffix.clone(),
         apps_root: cfg.apps_root.clone(),
+        scan_warnings_path: cfg.scan_warnings_path.clone(),
     })
 }
 
 fn run_scan_once(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
     let stats = scanner::sync_from_apps_root(&state)?;
+    runtime::write_scan_warnings(&state.scan_warnings_path, &stats)?;
     state.reload_routes()?;
     println!(
         "{}",
@@ -101,6 +104,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
 
     let startup_scan = scanner::sync_from_apps_root(&state)?;
+    runtime::write_scan_warnings(&state.scan_warnings_path, &startup_scan)?;
     state.reload_routes()?;
     info!(
         discovered = startup_scan.discovered,
@@ -138,6 +142,11 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
             sleep(Duration::from_secs(scan_interval_secs)).await;
             match scanner::sync_from_apps_root(&scan_state) {
                 Ok(stats) => {
+                    if let Err(err) =
+                        runtime::write_scan_warnings(&scan_state.scan_warnings_path, &stats)
+                    {
+                        error!(error = %err, "failed to write scan warnings");
+                    }
                     if let Err(err) = scan_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after scan");
                     } else {
@@ -178,6 +187,11 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         while rx.recv().await.is_some() {
             match scanner::sync_from_apps_root(&watch_state) {
                 Ok(stats) => {
+                    if let Err(err) =
+                        runtime::write_scan_warnings(&watch_state.scan_warnings_path, &stats)
+                    {
+                        error!(error = %err, "failed to write scan warnings");
+                    }
                     if let Err(err) = watch_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after fs event");
                     } else {
