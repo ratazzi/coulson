@@ -60,11 +60,35 @@ struct CreateStaticParams {
     target_port: u16,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    cors_enabled: bool,
+    #[serde(default)]
+    basic_auth_user: Option<String>,
+    #[serde(default)]
+    basic_auth_pass: Option<String>,
+    #[serde(default)]
+    spa_rewrite: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateStaticDirParams {
+    name: String,
+    domain: String,
+    static_root: String,
 }
 
 #[derive(Debug, Deserialize)]
 struct AppIdParams {
     app_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateSettingsParams {
+    app_id: String,
+    cors_enabled: Option<bool>,
+    basic_auth_user: Option<Option<String>>,
+    basic_auth_pass: Option<Option<String>>,
+    spa_rewrite: Option<bool>,
 }
 
 pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
@@ -179,6 +203,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 &params.target_host,
                 params.target_port,
                 params.timeout_ms,
+                params.cors_enabled,
+                params.basic_auth_user.as_deref(),
+                params.basic_auth_pass.as_deref(),
+                params.spa_rewrite,
             ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
@@ -192,6 +220,80 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     }
                     return internal_error(req.request_id, e.to_string());
                 }
+            }
+        }
+        "app.create_static_dir" => {
+            let params: CreateStaticDirParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            if params.name.trim().is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("name cannot be empty".to_string()),
+                );
+            }
+
+            let domain = match DomainName::parse(&params.domain, &state.domain_suffix) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            let root = std::path::Path::new(&params.static_root);
+            if !root.is_dir() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams(format!(
+                        "static_root is not a directory: {}",
+                        params.static_root
+                    )),
+                );
+            }
+
+            match state.store.insert_static_dir(&params.name, &domain, &params.static_root) {
+                Ok(app) => {
+                    if let Err(e) = state.reload_routes() {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "app": app }))
+                }
+                Err(e) => {
+                    if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
+                        return render_err(req.request_id, ControlError::DomainConflict);
+                    }
+                    return internal_error(req.request_id, e.to_string());
+                }
+            }
+        }
+        "app.update" => {
+            let params: UpdateSettingsParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+            match state.store.update_settings(
+                &params.app_id,
+                params.cors_enabled,
+                params.basic_auth_user.as_ref().map(|v| v.as_deref()),
+                params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
+                params.spa_rewrite,
+            ) {
+                Ok(found) => {
+                    if !found {
+                        return render_err(req.request_id, ControlError::NotFound);
+                    }
+                    if let Err(e) = state.reload_routes() {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "updated": true }))
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
             }
         }
         "app.delete" => {

@@ -26,6 +26,10 @@ pub struct RouteRule {
     pub target: BackendTarget,
     pub path_prefix: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub cors_enabled: bool,
+    pub basic_auth_user: Option<String>,
+    pub basic_auth_pass: Option<String>,
+    pub spa_rewrite: bool,
 }
 
 #[derive(Clone)]
@@ -47,6 +51,10 @@ impl SharedState {
                 target: app.target,
                 path_prefix: app.path_prefix,
                 timeout_ms: app.timeout_ms,
+                cors_enabled: app.cors_enabled,
+                basic_auth_user: app.basic_auth_user,
+                basic_auth_pass: app.basic_auth_pass,
+                spa_rewrite: app.spa_rewrite,
             });
         }
         for rules in table.values_mut() {

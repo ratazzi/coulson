@@ -20,6 +20,14 @@ struct BridgeheadManifest {
     timeout_ms: Option<u64>,
     routes: Option<Vec<BridgeheadManifestRoute>>,
     enabled: Option<bool>,
+    #[serde(default)]
+    cors_enabled: Option<bool>,
+    #[serde(default)]
+    basic_auth_user: Option<String>,
+    #[serde(default)]
+    basic_auth_pass: Option<String>,
+    #[serde(default)]
+    spa_rewrite: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +38,14 @@ struct BridgeheadManifestRoute {
     target_port: u16,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    cors_enabled: Option<bool>,
+    #[serde(default)]
+    basic_auth_user: Option<String>,
+    #[serde(default)]
+    basic_auth_pass: Option<String>,
+    #[serde(default)]
+    spa_rewrite: Option<bool>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -63,6 +79,10 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             &app.target_host,
             app.target_port,
             app.timeout_ms,
+            app.cors_enabled,
+            app.basic_auth_user.as_deref(),
+            app.basic_auth_pass.as_deref(),
+            app.spa_rewrite,
             app.enabled,
             "apps_root",
         )?;
@@ -106,6 +126,10 @@ struct DiscoveredStaticApp {
     target_host: String,
     target_port: u16,
     timeout_ms: Option<u64>,
+    cors_enabled: bool,
+    basic_auth_user: Option<String>,
+    basic_auth_pass: Option<String>,
+    spa_rewrite: bool,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -178,6 +202,10 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     target_host: route.target_host,
                     target_port: route.target_port,
                     timeout_ms: route.timeout_ms,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
@@ -217,6 +245,10 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         target_host: route.target_host,
                         target_port: route.target_port,
                         timeout_ms: route.timeout_ms,
+                        cors_enabled: false,
+                        basic_auth_user: None,
+                        basic_auth_pass: None,
+                        spa_rewrite: false,
                         enabled: true,
                         explicit_domain,
                     };
@@ -254,6 +286,10 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         target_host: route.target_host,
                         target_port: route.target_port,
                         timeout_ms: route.timeout_ms,
+                        cors_enabled: route.cors_enabled.or(manifest.cors_enabled).unwrap_or(false),
+                        basic_auth_user: route.basic_auth_user.or_else(|| manifest.basic_auth_user.clone()),
+                        basic_auth_pass: route.basic_auth_pass.or_else(|| manifest.basic_auth_pass.clone()),
+                        spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
                         enabled,
                         explicit_domain,
                     };
@@ -270,6 +306,10 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     target_host,
                     target_port: manifest.target_port,
                     timeout_ms: manifest.timeout_ms,
+                    cors_enabled: manifest.cors_enabled.unwrap_or(false),
+                    basic_auth_user: manifest.basic_auth_user,
+                    basic_auth_pass: manifest.basic_auth_pass,
+                    spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     enabled,
                     explicit_domain,
                 };
@@ -339,6 +379,10 @@ fn discover_from_symlink(
                 target_host: route.target_host,
                 target_port: route.target_port,
                 timeout_ms: route.timeout_ms,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
                 enabled: true,
                 explicit_domain,
             });
@@ -360,6 +404,10 @@ fn discover_from_symlink(
                     target_host: route.target_host,
                     target_port: route.target_port,
                     timeout_ms: route.timeout_ms,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
                     enabled: true,
                     explicit_domain,
                 });
@@ -381,6 +429,10 @@ fn discover_from_symlink(
                 target_host,
                 target_port,
                 timeout_ms,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
                 enabled: true,
                 explicit_domain,
             }]);
@@ -528,9 +580,7 @@ fn sanitize_name(name: &str) -> String {
 }
 
 fn normalize_path_prefix(input: Option<&str>) -> Option<String> {
-    let Some(raw) = input else {
-        return None;
-    };
+    let raw = input?;
     let trimmed = raw.trim();
     if trimmed.is_empty() || trimmed == "/" {
         return None;
@@ -627,6 +677,10 @@ mod tests {
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5006,
                 timeout_ms: None,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -641,6 +695,10 @@ mod tests {
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5007,
                 timeout_ms: None,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
                 enabled: true,
                 explicit_domain: true,
             },

@@ -7,9 +7,15 @@ use uuid::Uuid;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AppId(pub String);
 
+impl Default for AppId {
+    fn default() -> Self {
+        Self(Uuid::now_v7().to_string())
+    }
+}
+
 impl AppId {
     pub fn new() -> Self {
-        Self(Uuid::now_v7().to_string())
+        Self::default()
     }
 }
 
@@ -71,12 +77,14 @@ impl DomainName {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendTarget {
     Tcp { host: String, port: u16 },
+    StaticDir { root: String },
 }
 
 impl BackendTarget {
     pub fn to_url_base(&self) -> String {
         match self {
             Self::Tcp { host, port } => format!("http://{host}:{port}"),
+            Self::StaticDir { root } => format!("file://{root}"),
         }
     }
 }
@@ -90,6 +98,10 @@ pub struct AppSpec {
     pub path_prefix: Option<String>,
     pub target: BackendTarget,
     pub timeout_ms: Option<u64>,
+    pub cors_enabled: bool,
+    pub basic_auth_user: Option<String>,
+    pub basic_auth_pass: Option<String>,
+    pub spa_rewrite: bool,
     pub enabled: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
