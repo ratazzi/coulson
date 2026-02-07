@@ -41,6 +41,8 @@ pub struct ScanStats {
     pub pruned: usize,
     pub conflicts: usize,
     pub conflict_domains: Vec<String>,
+    #[serde(default)]
+    pub parse_warnings: Vec<String>,
 }
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
@@ -83,6 +85,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             .into_iter()
             .map(|k| humanize_route_conflict_key(&k))
             .collect(),
+        parse_warnings: discovered.parse_warnings,
     })
 }
 
@@ -101,6 +104,7 @@ struct DiscoveredStaticApp {
 struct DiscoverResult {
     apps: Vec<DiscoveredStaticApp>,
     conflicts: Vec<String>,
+    parse_warnings: Vec<String>,
 }
 
 fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
@@ -108,11 +112,13 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
         return Ok(DiscoverResult {
             apps: Vec::new(),
             conflicts: Vec::new(),
+            parse_warnings: Vec::new(),
         });
     }
 
     let mut by_route: HashMap<String, DiscoveredStaticApp> = HashMap::new();
     let mut conflicts: Vec<String> = Vec::new();
+    let mut parse_warnings: Vec<String> = Vec::new();
 
     for entry in fs::read_dir(root)
         .with_context(|| format!("failed reading apps root: {}", root.display()))?
@@ -138,7 +144,14 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             }
             let raw = fs::read_to_string(entry.path())
                 .with_context(|| format!("failed reading {}", entry.path().display()))?;
-            let routes = parse_pow_file_routes(&raw);
+            let parse = parse_pow_file_routes(&raw);
+            parse_warnings.extend(
+                parse
+                    .warnings
+                    .into_iter()
+                    .map(|w| format!("{}: {}", entry.path().display(), w)),
+            );
+            let routes = parse.routes;
             for route in routes {
                 let domain_text = file_name_to_domain(&file_name, suffix);
                 let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
@@ -170,7 +183,14 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             if routes_path.exists() {
                 let raw = fs::read_to_string(&routes_path)
                     .with_context(|| format!("failed reading {}", routes_path.display()))?;
-                let routes = parse_pow_file_routes(&raw);
+                let parse = parse_pow_file_routes(&raw);
+                parse_warnings.extend(
+                    parse
+                        .warnings
+                        .into_iter()
+                        .map(|w| format!("{}: {}", routes_path.display(), w)),
+                );
+                let routes = parse.routes;
                 let domain_text = file_name_to_domain(&dir_name, suffix);
                 let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
                     format!(
@@ -257,7 +277,13 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
     });
     conflicts.sort();
     conflicts.dedup();
-    Ok(DiscoverResult { apps, conflicts })
+    parse_warnings.sort();
+    parse_warnings.dedup();
+    Ok(DiscoverResult {
+        apps,
+        conflicts,
+        parse_warnings,
+    })
 }
 
 fn discover_from_symlink(
@@ -296,7 +322,7 @@ fn discover_from_symlink(
         let raw = fs::read_to_string(&resolved_target)
             .with_context(|| format!("failed reading {}", resolved_target.display()))?;
         let mut out = Vec::new();
-        for route in parse_pow_file_routes(&raw) {
+        for route in parse_pow_file_routes(&raw).routes {
             out.push(DiscoveredStaticApp {
                 name: name.clone(),
                 domain: domain.clone(),
@@ -317,7 +343,7 @@ fn discover_from_symlink(
             let raw = fs::read_to_string(&routes_file)
                 .with_context(|| format!("failed reading {}", routes_file.display()))?;
             let mut out = Vec::new();
-            for route in parse_pow_file_routes(&raw) {
+            for route in parse_pow_file_routes(&raw).routes {
                 out.push(DiscoveredStaticApp {
                     name: name.clone(),
                     domain: domain.clone(),
@@ -371,23 +397,36 @@ struct PowRoute {
     timeout_ms: Option<u64>,
 }
 
-fn parse_pow_file_routes(raw: &str) -> Vec<PowRoute> {
+struct PowParseResult {
+    routes: Vec<PowRoute>,
+    warnings: Vec<String>,
+}
+
+fn parse_pow_file_routes(raw: &str) -> PowParseResult {
     let mut out = Vec::new();
-    for line in raw.lines() {
+    let mut warnings = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         if let Some(route) = parse_pow_route_line(trimmed) {
             out.push(route);
+        } else {
+            warnings.push(format!("line {} ignored: invalid route syntax", idx + 1));
         }
     }
     if out.is_empty() {
         if let Some(route) = parse_pow_route_line(raw.trim()) {
             out.push(route);
+        } else if !raw.trim().is_empty() {
+            warnings.push("content ignored: invalid route syntax".to_string());
         }
     }
-    out
+    PowParseResult {
+        routes: out,
+        warnings,
+    }
 }
 
 fn parse_pow_route_line(line: &str) -> Option<PowRoute> {
@@ -609,13 +648,28 @@ mod tests {
         /api 127.0.0.1:7001 5000
         7002
         "#;
-        let routes = parse_pow_file_routes(raw);
+        let parsed = parse_pow_file_routes(raw);
+        let routes = parsed.routes;
         assert_eq!(routes.len(), 2);
         assert_eq!(routes[0].path_prefix.as_deref(), Some("/api"));
         assert_eq!(routes[0].target_port, 7001);
         assert_eq!(routes[0].timeout_ms, Some(5000));
         assert_eq!(routes[1].path_prefix, None);
         assert_eq!(routes[1].target_port, 7002);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_pow_file_routes_reports_invalid_lines() {
+        let raw = r#"
+        /api
+        bad:token
+        /v1 127.0.0.1:7001
+        "#;
+        let parsed = parse_pow_file_routes(raw);
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.routes[0].path_prefix.as_deref(), Some("/v1"));
+        assert!(parsed.warnings.len() >= 2);
     }
 
     #[test]
