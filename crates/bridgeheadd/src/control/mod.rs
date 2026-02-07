@@ -272,6 +272,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
+        "apps.warnings" => match crate::runtime::read_scan_warnings(&state.scan_warnings_path) {
+            Ok(data) => Ok(json!({ "warnings": data })),
+            Err(e) => return internal_error(req.request_id, e.to_string()),
+        },
         _ => Err(ControlError::InvalidParams(format!(
             "unknown method: {}",
             req.method

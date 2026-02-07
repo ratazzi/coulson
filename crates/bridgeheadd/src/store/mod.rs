@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -367,6 +367,15 @@ impl AppRepository {
         Self::query_apps(&conn, false)
     }
 
+    pub fn list_filtered(
+        &self,
+        managed: Option<bool>,
+        domain: Option<&str>,
+    ) -> anyhow::Result<Vec<AppSpec>> {
+        let conn = self.conn.lock();
+        Self::query_apps_filtered(&conn, managed, domain)
+    }
+
     pub fn list_enabled(&self) -> anyhow::Result<Vec<AppSpec>> {
         let conn = self.conn.lock();
         Self::query_apps(&conn, true)
@@ -381,7 +390,40 @@ impl AppRepository {
 
         let mut stmt = conn.prepare(sql)?;
         let mut rows = stmt.query([])?;
+        Self::collect_rows(&mut rows)
+    }
 
+    fn query_apps_filtered(
+        conn: &Connection,
+        managed: Option<bool>,
+        domain: Option<&str>,
+    ) -> anyhow::Result<Vec<AppSpec>> {
+        let mut sql = String::from(
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps",
+        );
+        let mut clauses: Vec<&str> = Vec::new();
+        let mut values: Vec<Value> = Vec::new();
+
+        if let Some(flag) = managed {
+            clauses.push("scan_managed = ?");
+            values.push(Value::Integer(if flag { 1 } else { 0 }));
+        }
+        if let Some(domain) = domain {
+            clauses.push("domain = ?");
+            values.push(Value::Text(domain.to_string()));
+        }
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY domain ASC, LENGTH(path_prefix) DESC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(values.iter()))?;
+        Self::collect_rows(&mut rows)
+    }
+
+    fn collect_rows(rows: &mut rusqlite::Rows<'_>) -> anyhow::Result<Vec<AppSpec>> {
         let mut apps = Vec::new();
         while let Some(row) = rows.next()? {
             let kind: String = row.get(2)?;

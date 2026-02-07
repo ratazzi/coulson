@@ -2,7 +2,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Context;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use tracing_subscriber::EnvFilter;
 
@@ -54,6 +54,12 @@ struct PersistedScanWarnings<'a> {
     scan: &'a ScanStats,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScanWarningsFile {
+    pub updated_at: i64,
+    pub scan: ScanStats,
+}
+
 pub fn write_scan_warnings(path: &Path, stats: &ScanStats) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
@@ -66,4 +72,14 @@ pub fn write_scan_warnings(path: &Path, stats: &ScanStats) -> anyhow::Result<()>
     let raw = serde_json::to_vec_pretty(&payload)?;
     fs::write(path, raw).with_context(|| format!("failed writing {}", path.display()))?;
     Ok(())
+}
+
+pub fn read_scan_warnings(path: &Path) -> anyhow::Result<Option<ScanWarningsFile>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read(path).with_context(|| format!("failed reading {}", path.display()))?;
+    let data: ScanWarningsFile = serde_json::from_slice(&raw)
+        .with_context(|| format!("invalid JSON in {}", path.display()))?;
+    Ok(Some(data))
 }

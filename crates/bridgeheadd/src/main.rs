@@ -65,17 +65,58 @@ impl SharedState {
 enum Command {
     Serve,
     Scan,
-    Ls,
+    Ls {
+        managed: Option<bool>,
+        domain: Option<String>,
+    },
+    Warnings,
 }
 
 fn parse_command() -> anyhow::Result<Command> {
-    let arg = std::env::args().nth(1);
-    match arg.as_deref() {
-        None => Ok(Command::Serve),
-        Some("serve") => Ok(Command::Serve),
-        Some("scan") => Ok(Command::Scan),
-        Some("ls") => Ok(Command::Ls),
-        Some(other) => bail!("unknown command: {other}. usage: bridgeheadd [serve|scan|ls]"),
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.is_empty() {
+        return Ok(Command::Serve);
+    }
+
+    match args[0].as_str() {
+        "serve" => Ok(Command::Serve),
+        "scan" => Ok(Command::Scan),
+        "warnings" => Ok(Command::Warnings),
+        "ls" => {
+            let mut managed: Option<bool> = None;
+            let mut domain: Option<String> = None;
+            let mut i = 1usize;
+            while i < args.len() {
+                match args[i].as_str() {
+                    "--managed" => {
+                        if managed == Some(false) {
+                            bail!("cannot use --managed and --manual together");
+                        }
+                        managed = Some(true);
+                        i += 1;
+                    }
+                    "--manual" => {
+                        if managed == Some(true) {
+                            bail!("cannot use --managed and --manual together");
+                        }
+                        managed = Some(false);
+                        i += 1;
+                    }
+                    "--domain" => {
+                        if i + 1 >= args.len() {
+                            bail!("--domain requires a value");
+                        }
+                        domain = Some(args[i + 1].clone());
+                        i += 2;
+                    }
+                    other => {
+                        bail!("unknown ls option: {other}. supported: --managed --manual --domain <host>");
+                    }
+                }
+            }
+            Ok(Command::Ls { managed, domain })
+        }
+        other => bail!("unknown command: {other}. usage: bridgeheadd [serve|scan|ls|warnings]"),
     }
 }
 
@@ -111,10 +152,21 @@ fn run_scan_once(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_ls(cfg: BridgeheadConfig) -> anyhow::Result<()> {
+fn run_ls(
+    cfg: BridgeheadConfig,
+    managed: Option<bool>,
+    domain: Option<String>,
+) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
-    let apps = state.store.list_all()?;
+    let apps = state.store.list_filtered(managed, domain.as_deref())?;
     println!("{}", serde_json::to_string(&apps)?);
+    Ok(())
+}
+
+fn run_warnings(cfg: BridgeheadConfig) -> anyhow::Result<()> {
+    let state = build_state(&cfg)?;
+    let warnings = runtime::read_scan_warnings(&state.scan_warnings_path)?;
+    println!("{}", serde_json::to_string(&warnings)?);
     Ok(())
 }
 
@@ -281,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
     match parse_command()? {
         Command::Serve => run_serve(cfg).await,
         Command::Scan => run_scan_once(cfg),
-        Command::Ls => run_ls(cfg),
+        Command::Ls { managed, domain } => run_ls(cfg, managed, domain),
+        Command::Warnings => run_warnings(cfg),
     }
 }

@@ -32,7 +32,7 @@ struct BridgeheadManifestRoute {
     timeout_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ScanStats {
     pub discovered: usize,
     pub inserted: usize,
@@ -65,10 +65,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             ScanUpsertResult::Updated => updated += 1,
             ScanUpsertResult::SkippedManual => skipped_manual += 1,
         }
-        let route_key = route_key(
-            &app.domain.0,
-            app.path_prefix.as_deref().unwrap_or(""),
-        );
+        let route_key = route_key(&app.domain.0, app.path_prefix.as_deref().unwrap_or(""));
         active_routes.insert(route_key);
     }
     let pruned = state
@@ -124,7 +121,8 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             if file_name.starts_with('.') {
                 continue;
             }
-            if let Some(app) = discover_from_symlink(entry.path(), &file_name, suffix)? {
+            let apps = discover_from_symlink(entry.path(), &file_name, suffix)?;
+            for app in apps {
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             }
             continue;
@@ -164,6 +162,36 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
 
         if file_type.is_dir() {
             let dir_name = file_name;
+            let routes_path = entry.path().join("bridgehead.routes");
+            if routes_path.exists() {
+                let raw = fs::read_to_string(&routes_path)
+                    .with_context(|| format!("failed reading {}", routes_path.display()))?;
+                let routes = parse_pow_file_routes(&raw);
+                let domain_text = file_name_to_domain(&dir_name, suffix);
+                let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
+                    format!(
+                        "invalid domain '{}' in {}",
+                        domain_text,
+                        routes_path.display()
+                    )
+                })?;
+                let explicit_domain = dir_name.ends_with(&format!(".{suffix}"));
+                for route in routes {
+                    let app = DiscoveredStaticApp {
+                        name: sanitize_name(&dir_name),
+                        domain: domain.clone(),
+                        path_prefix: route.path_prefix,
+                        target_host: route.target_host,
+                        target_port: route.target_port,
+                        timeout_ms: route.timeout_ms,
+                        enabled: true,
+                        explicit_domain,
+                    };
+                    insert_with_priority(&mut by_route, &mut conflicts, app);
+                }
+                continue;
+            }
+
             let manifest_path = entry.path().join("bridgehead.json");
             if !manifest_path.exists() {
                 continue;
@@ -232,7 +260,7 @@ fn discover_from_symlink(
     link_path: PathBuf,
     file_name: &str,
     suffix: &str,
-) -> anyhow::Result<Option<DiscoveredStaticApp>> {
+) -> anyhow::Result<Vec<DiscoveredStaticApp>> {
     let target = fs::read_link(&link_path)
         .with_context(|| format!("failed reading symlink {}", link_path.display()))?;
     let resolved_target = if target.is_absolute() {
@@ -246,28 +274,7 @@ fn discover_from_symlink(
 
     let meta = match fs::metadata(&resolved_target) {
         Ok(m) => m,
-        Err(_) => return Ok(None),
-    };
-
-    let target_spec = if meta.is_file() {
-        let raw = fs::read_to_string(&resolved_target)
-            .with_context(|| format!("failed reading {}", resolved_target.display()))?;
-        parse_port_proxy_target(&raw)
-    } else if meta.is_dir() {
-        let port_file = resolved_target.join("bridgehead.port");
-        if !port_file.exists() {
-            None
-        } else {
-            let raw = fs::read_to_string(&port_file)
-                .with_context(|| format!("failed reading {}", port_file.display()))?;
-            parse_port_proxy_target(&raw)
-        }
-    } else {
-        None
-    };
-
-    let Some((target_host, target_port, timeout_ms)) = target_spec else {
-        return Ok(None);
+        Err(_) => return Ok(Vec::new()),
     };
 
     let domain_text = file_name_to_domain(file_name, suffix);
@@ -278,17 +285,70 @@ fn discover_from_symlink(
             link_path.display()
         )
     })?;
+    let explicit_domain = file_name.ends_with(&format!(".{suffix}"));
+    let name = sanitize_name(file_name);
 
-    Ok(Some(DiscoveredStaticApp {
-        name: sanitize_name(file_name),
-        domain,
-        path_prefix: None,
-        target_host,
-        target_port,
-        timeout_ms,
-        enabled: true,
-        explicit_domain: file_name.ends_with(&format!(".{suffix}")),
-    }))
+    if meta.is_file() {
+        let raw = fs::read_to_string(&resolved_target)
+            .with_context(|| format!("failed reading {}", resolved_target.display()))?;
+        let mut out = Vec::new();
+        for route in parse_pow_file_routes(&raw) {
+            out.push(DiscoveredStaticApp {
+                name: name.clone(),
+                domain: domain.clone(),
+                path_prefix: route.path_prefix,
+                target_host: route.target_host,
+                target_port: route.target_port,
+                timeout_ms: route.timeout_ms,
+                enabled: true,
+                explicit_domain,
+            });
+        }
+        return Ok(out);
+    }
+
+    if meta.is_dir() {
+        let routes_file = resolved_target.join("bridgehead.routes");
+        if routes_file.exists() {
+            let raw = fs::read_to_string(&routes_file)
+                .with_context(|| format!("failed reading {}", routes_file.display()))?;
+            let mut out = Vec::new();
+            for route in parse_pow_file_routes(&raw) {
+                out.push(DiscoveredStaticApp {
+                    name: name.clone(),
+                    domain: domain.clone(),
+                    path_prefix: route.path_prefix,
+                    target_host: route.target_host,
+                    target_port: route.target_port,
+                    timeout_ms: route.timeout_ms,
+                    enabled: true,
+                    explicit_domain,
+                });
+            }
+            return Ok(out);
+        }
+
+        let port_file = resolved_target.join("bridgehead.port");
+        if !port_file.exists() {
+            return Ok(Vec::new());
+        }
+        let raw = fs::read_to_string(&port_file)
+            .with_context(|| format!("failed reading {}", port_file.display()))?;
+        if let Some((target_host, target_port, timeout_ms)) = parse_port_proxy_target(&raw) {
+            return Ok(vec![DiscoveredStaticApp {
+                name,
+                domain,
+                path_prefix: None,
+                target_host,
+                target_port,
+                timeout_ms,
+                enabled: true,
+                explicit_domain,
+            }]);
+        }
+    }
+
+    Ok(Vec::new())
 }
 
 fn file_name_to_domain(file_name: &str, suffix: &str) -> String {
@@ -351,7 +411,9 @@ fn parse_pow_route_line(line: &str) -> Option<PowRoute> {
     };
 
     let (target_host, target_port) = parse_target_token(target_token)?;
-    let timeout_ms = timeout_token.and_then(|t| t.parse::<u64>().ok()).filter(|v| *v > 0);
+    let timeout_ms = timeout_token
+        .and_then(|t| t.parse::<u64>().ok())
+        .filter(|v| *v > 0);
 
     Some(PowRoute {
         path_prefix,
@@ -435,7 +497,10 @@ fn insert_with_priority(
     conflicts: &mut Vec<String>,
     candidate: DiscoveredStaticApp,
 ) {
-    let key = route_key(&candidate.domain.0, candidate.path_prefix.as_deref().unwrap_or(""));
+    let key = route_key(
+        &candidate.domain.0,
+        candidate.path_prefix.as_deref().unwrap_or(""),
+    );
     match by_route.get(&key) {
         None => {
             by_route.insert(key, candidate);
@@ -520,5 +585,21 @@ mod tests {
         let winner = map.get("myapp.test|").expect("winner");
         assert_eq!(winner.target_port, 5007);
         assert_eq!(conflicts.len(), 1);
+    }
+
+    #[test]
+    fn parse_pow_file_routes_supports_multiple_lines() {
+        let raw = r#"
+        # comment
+        /api 127.0.0.1:7001 5000
+        7002
+        "#;
+        let routes = parse_pow_file_routes(raw);
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].path_prefix.as_deref(), Some("/api"));
+        assert_eq!(routes[0].target_port, 7001);
+        assert_eq!(routes[0].timeout_ms, Some(5000));
+        assert_eq!(routes[1].path_prefix, None);
+        assert_eq!(routes[1].target_port, 7002);
     }
 }
