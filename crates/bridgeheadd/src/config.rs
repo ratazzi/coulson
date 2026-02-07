@@ -12,6 +12,7 @@ pub struct BridgeheadConfig {
     pub domain_suffix: String,
     pub apps_root: PathBuf,
     pub scan_interval_secs: u64,
+    pub watch_fs: bool,
 }
 
 impl Default for BridgeheadConfig {
@@ -30,6 +31,7 @@ impl Default for BridgeheadConfig {
             domain_suffix: "test".to_string(),
             apps_root,
             scan_interval_secs: 2,
+            watch_fs: true,
         }
     }
 }
@@ -63,7 +65,19 @@ impl BridgeheadConfig {
                 .parse()
                 .with_context(|| format!("invalid BRIDGEHEAD_SCAN_INTERVAL_SECS: {raw}"))?;
         }
+        if let Ok(raw) = env::var("BRIDGEHEAD_WATCH_FS") {
+            cfg.watch_fs =
+                parse_bool(&raw).with_context(|| format!("invalid BRIDGEHEAD_WATCH_FS: {raw}"))?;
+        }
 
         Ok(cfg)
+    }
+}
+
+fn parse_bool(input: &str) -> anyhow::Result<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("expected boolean"),
     }
 }

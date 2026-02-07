@@ -30,6 +30,8 @@ pub fn ensure_runtime_paths(cfg: &BridgeheadConfig) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create sqlite dir: {}", parent.display()))?;
     }
+    fs::create_dir_all(&cfg.apps_root)
+        .with_context(|| format!("failed to create apps root: {}", cfg.apps_root.display()))?;
 
     Ok(())
 }

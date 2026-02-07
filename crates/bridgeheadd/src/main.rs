@@ -10,8 +10,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::RwLock;
 use tokio::sync::broadcast;
+use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
@@ -133,6 +135,44 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         }
     });
 
+    let watch_state = state.clone();
+    let watch_root = cfg.apps_root.clone();
+    let watch_enabled = cfg.watch_fs;
+    let watch_task = tokio::spawn(async move {
+        if !watch_enabled {
+            info!("fs watcher disabled");
+            return;
+        }
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<()>();
+        let watcher = match build_watcher(watch_root.clone(), tx) {
+            Ok(w) => w,
+            Err(err) => {
+                error!(error = %err, path = %watch_root.display(), "failed to start fs watcher");
+                return;
+            }
+        };
+        info!(path = %watch_root.display(), "fs watcher started");
+
+        while rx.recv().await.is_some() {
+            match scanner::sync_from_apps_root(&watch_state) {
+                Ok(count) => {
+                    if let Err(err) = watch_state.reload_routes() {
+                        error!(error = %err, "failed to reload routes after fs event");
+                    } else {
+                        info!(scanned = count, "apps scan completed from fs event");
+                    }
+                }
+                Err(err) => error!(error = %err, "apps scan failed from fs event"),
+            }
+
+            sleep(Duration::from_millis(200)).await;
+            while rx.try_recv().is_ok() {}
+        }
+
+        drop(watcher);
+    });
+
     info!("bridgeheadd started");
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
@@ -140,8 +180,37 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     proxy_task.abort();
     control_task.abort();
     scan_task.abort();
+    watch_task.abort();
 
     Ok(())
+}
+
+fn build_watcher(
+    root: std::path::PathBuf,
+    tx: mpsc::UnboundedSender<()>,
+) -> anyhow::Result<RecommendedWatcher> {
+    let mut watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        if let Ok(event) = res {
+            use notify::event::{CreateKind, EventKind, ModifyKind, RemoveKind, RenameMode};
+            let interested = matches!(
+                event.kind,
+                EventKind::Create(CreateKind::Any)
+                    | EventKind::Create(CreateKind::File)
+                    | EventKind::Create(CreateKind::Folder)
+                    | EventKind::Modify(ModifyKind::Any)
+                    | EventKind::Modify(ModifyKind::Data(_))
+                    | EventKind::Modify(ModifyKind::Name(RenameMode::Any))
+                    | EventKind::Remove(RemoveKind::Any)
+                    | EventKind::Remove(RemoveKind::File)
+                    | EventKind::Remove(RemoveKind::Folder)
+            );
+            if interested {
+                let _ = tx.send(());
+            }
+        }
+    })?;
+    watcher.watch(&root, RecursiveMode::Recursive)?;
+    Ok(watcher)
 }
 
 #[tokio::main]

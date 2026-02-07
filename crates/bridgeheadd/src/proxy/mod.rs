@@ -44,7 +44,7 @@ impl ProxyHttp for BridgeProxy {
 
         let target = {
             let routes = self.shared.routes.read();
-            resolve_target(&routes, &host)
+            resolve_target(&routes, &host, &self.shared.domain_suffix)
         };
 
         let Some(target) = target else {
@@ -115,7 +115,11 @@ fn extract_host(raw: Option<&str>) -> Option<String> {
     Some(host)
 }
 
-fn resolve_target(routes: &HashMap<String, BackendTarget>, host: &str) -> Option<BackendTarget> {
+fn resolve_target(
+    routes: &HashMap<String, BackendTarget>,
+    host: &str,
+    domain_suffix: &str,
+) -> Option<BackendTarget> {
     if let Some(hit) = routes.get(host) {
         return Some(hit.clone());
     }
@@ -128,6 +132,12 @@ fn resolve_target(routes: &HashMap<String, BackendTarget>, host: &str) -> Option
             return Some(hit.clone());
         }
     }
+
+    let default_host = format!("default.{domain_suffix}");
+    if let Some(hit) = routes.get(&default_host) {
+        return Some(hit.clone());
+    }
+
     None
 }
 
@@ -151,11 +161,30 @@ mod tests {
                 port: 5006,
             },
         );
-        let out = resolve_target(&routes, "www.myapp.test").expect("fallback");
+        let out = resolve_target(&routes, "www.myapp.test", "test").expect("fallback");
         match out {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
                 assert_eq!(port, 5006);
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_host_falls_back_to_default() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "default.test".to_string(),
+            BackendTarget::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: 5007,
+            },
+        );
+        let out = resolve_target(&routes, "totally-unknown.test", "test").expect("default");
+        match out {
+            BackendTarget::Tcp { host, port } => {
+                assert_eq!(host, "127.0.0.1");
+                assert_eq!(port, 5007);
             }
         }
     }
