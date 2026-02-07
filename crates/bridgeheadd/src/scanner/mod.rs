@@ -78,7 +78,11 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
         skipped_manual,
         pruned,
         conflicts: discovered.conflicts.len(),
-        conflict_domains: discovered.conflicts,
+        conflict_domains: discovered
+            .conflicts
+            .into_iter()
+            .map(|k| humanize_route_conflict_key(&k))
+            .collect(),
     })
 }
 
@@ -515,6 +519,17 @@ fn insert_with_priority(
     }
 }
 
+fn humanize_route_conflict_key(key: &str) -> String {
+    let Some((domain, path_prefix)) = key.split_once('|') else {
+        return key.to_string();
+    };
+    if path_prefix.is_empty() {
+        domain.to_string()
+    } else {
+        format!("{domain} (path={path_prefix})")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +616,18 @@ mod tests {
         assert_eq!(routes[0].timeout_ms, Some(5000));
         assert_eq!(routes[1].path_prefix, None);
         assert_eq!(routes[1].target_port, 7002);
+    }
+
+    #[test]
+    fn humanize_conflict_key_default_route() {
+        assert_eq!(humanize_route_conflict_key("myapp.test|"), "myapp.test");
+    }
+
+    #[test]
+    fn humanize_conflict_key_path_route() {
+        assert_eq!(
+            humanize_route_conflict_key("myapp.test|/api"),
+            "myapp.test (path=/api)"
+        );
     }
 }
