@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,13 +19,15 @@ struct BridgeheadManifest {
     enabled: Option<bool>,
 }
 
-#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ScanStats {
     pub discovered: usize,
     pub inserted: usize,
     pub updated: usize,
     pub skipped_manual: usize,
     pub pruned: usize,
+    pub conflicts: usize,
+    pub conflict_domains: Vec<String>,
 }
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
@@ -33,7 +36,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let mut inserted = 0usize;
     let mut updated = 0usize;
     let mut skipped_manual = 0usize;
-    for app in &discovered {
+    for app in &discovered.apps {
         let (_, op) = state.store.upsert_scanned_static(
             &app.name,
             &app.domain,
@@ -53,11 +56,13 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
         .store
         .prune_scanned_not_in("apps_root", &active_domains)?;
     Ok(ScanStats {
-        discovered: discovered.len(),
+        discovered: discovered.apps.len(),
         inserted,
         updated,
         skipped_manual,
         pruned,
+        conflicts: discovered.conflicts.len(),
+        conflict_domains: discovered.conflicts,
     })
 }
 
@@ -68,14 +73,25 @@ struct DiscoveredStaticApp {
     target_host: String,
     target_port: u16,
     enabled: bool,
+    explicit_domain: bool,
 }
 
-fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp>> {
+struct DiscoverResult {
+    apps: Vec<DiscoveredStaticApp>,
+    conflicts: Vec<String>,
+}
+
+fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
     if !root.exists() {
-        return Ok(Vec::new());
+        return Ok(DiscoverResult {
+            apps: Vec::new(),
+            conflicts: Vec::new(),
+        });
     }
 
-    let mut apps = Vec::new();
+    let mut by_domain: HashMap<String, DiscoveredStaticApp> = HashMap::new();
+    let mut conflicts: Vec<String> = Vec::new();
+
     for entry in fs::read_dir(root)
         .with_context(|| format!("failed reading apps root: {}", root.display()))?
     {
@@ -88,7 +104,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
                 continue;
             }
             if let Some(app) = discover_from_symlink(entry.path(), &file_name, suffix)? {
-                apps.push(app);
+                insert_with_priority(&mut by_domain, &mut conflicts, app);
             }
             continue;
         }
@@ -109,13 +125,15 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
                     )
                 })?;
 
-                apps.push(DiscoveredStaticApp {
+                let app = DiscoveredStaticApp {
                     name: sanitize_name(&file_name),
                     domain,
                     target_host,
                     target_port,
                     enabled: true,
-                });
+                    explicit_domain: file_name.ends_with(&format!(".{suffix}")),
+                };
+                insert_with_priority(&mut by_domain, &mut conflicts, app);
             }
             continue;
         }
@@ -133,6 +151,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
                 .with_context(|| format!("invalid JSON in {}", manifest_path.display()))?;
 
             let name = manifest.name.unwrap_or_else(|| dir_name.clone());
+            let explicit_domain = manifest.domain.is_some();
             let domain = manifest
                 .domain
                 .unwrap_or_else(|| format!("{}.{}", sanitize_name(&dir_name), suffix));
@@ -144,17 +163,23 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<Vec<DiscoveredStaticApp
                 .target_host
                 .unwrap_or_else(|| "127.0.0.1".to_string());
 
-            apps.push(DiscoveredStaticApp {
+            let app = DiscoveredStaticApp {
                 name,
                 domain,
                 target_host,
                 target_port: manifest.target_port,
                 enabled: manifest.enabled.unwrap_or(true),
-            });
+                explicit_domain,
+            };
+            insert_with_priority(&mut by_domain, &mut conflicts, app);
         }
     }
 
-    Ok(apps)
+    let mut apps: Vec<DiscoveredStaticApp> = by_domain.into_values().collect();
+    apps.sort_by(|a, b| a.domain.0.cmp(&b.domain.0));
+    conflicts.sort();
+    conflicts.dedup();
+    Ok(DiscoverResult { apps, conflicts })
 }
 
 fn discover_from_symlink(
@@ -214,6 +239,7 @@ fn discover_from_symlink(
         target_host,
         target_port,
         enabled: true,
+        explicit_domain: file_name.ends_with(&format!(".{suffix}")),
     }))
 }
 
@@ -269,6 +295,26 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
+fn insert_with_priority(
+    by_domain: &mut HashMap<String, DiscoveredStaticApp>,
+    conflicts: &mut Vec<String>,
+    candidate: DiscoveredStaticApp,
+) {
+    let key = candidate.domain.0.clone();
+    match by_domain.get(&key) {
+        None => {
+            by_domain.insert(key, candidate);
+        }
+        Some(existing) => {
+            conflicts.push(key.clone());
+            // explicit domain beats inferred domain; otherwise keep first seen.
+            if candidate.explicit_domain && !existing.explicit_domain {
+                by_domain.insert(key, candidate);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,5 +346,38 @@ mod tests {
             file_name_to_domain("www.myapp.test", "test"),
             "www.myapp.test"
         );
+    }
+
+    #[test]
+    fn explicit_domain_wins_over_inferred() {
+        let mut map = HashMap::new();
+        let mut conflicts = Vec::new();
+        insert_with_priority(
+            &mut map,
+            &mut conflicts,
+            DiscoveredStaticApp {
+                name: "a".to_string(),
+                domain: DomainName("myapp.test".to_string()),
+                target_host: "127.0.0.1".to_string(),
+                target_port: 5006,
+                enabled: true,
+                explicit_domain: false,
+            },
+        );
+        insert_with_priority(
+            &mut map,
+            &mut conflicts,
+            DiscoveredStaticApp {
+                name: "b".to_string(),
+                domain: DomainName("myapp.test".to_string()),
+                target_host: "127.0.0.1".to_string(),
+                target_port: 5007,
+                enabled: true,
+                explicit_domain: true,
+            },
+        );
+        let winner = map.get("myapp.test").expect("winner");
+        assert_eq!(winner.target_port, 5007);
+        assert_eq!(conflicts.len(), 1);
     }
 }
