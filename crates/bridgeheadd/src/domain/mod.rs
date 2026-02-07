@@ -35,6 +35,7 @@ pub enum DomainError {
 
 impl DomainName {
     pub fn parse(input: &str, suffix: &str) -> Result<Self, DomainError> {
+        let input = input.trim().to_ascii_lowercase();
         if !input.ends_with(&format!(".{suffix}")) {
             return Err(DomainError::InvalidSuffix(suffix.to_string()));
         }
@@ -44,13 +45,25 @@ impl DomainName {
             return Err(DomainError::InvalidLabel);
         }
         let re = Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").expect("regex compile");
+        if let Some(rest) = labels.strip_prefix("*.") {
+            if rest.is_empty() {
+                return Err(DomainError::InvalidLabel);
+            }
+            for label in rest.split('.') {
+                if label.is_empty() || !re.is_match(label) {
+                    return Err(DomainError::InvalidLabel);
+                }
+            }
+            return Ok(Self(input));
+        }
+
         for label in labels.split('.') {
             if label.is_empty() || !re.is_match(label) {
                 return Err(DomainError::InvalidLabel);
             }
         }
 
-        Ok(Self(input.to_string()))
+        Ok(Self(input))
     }
 }
 
@@ -102,5 +115,17 @@ mod tests {
     fn accepts_subdomain_labels() {
         let domain = DomainName::parse("www.myapp.test", "test").expect("valid");
         assert_eq!(domain.0, "www.myapp.test");
+    }
+
+    #[test]
+    fn accepts_wildcard_subdomain() {
+        let domain = DomainName::parse("*.myapp.test", "test").expect("valid");
+        assert_eq!(domain.0, "*.myapp.test");
+    }
+
+    #[test]
+    fn wildcard_must_have_suffix_labels() {
+        let err = DomainName::parse("*.test", "test").expect_err("must fail");
+        assert!(matches!(err, DomainError::InvalidLabel));
     }
 }

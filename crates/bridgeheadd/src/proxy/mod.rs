@@ -136,6 +136,10 @@ fn resolve_target(
         return Some(hit);
     }
 
+    if let Some(hit) = select_wildcard_route(routes, host, path) {
+        return Some(hit);
+    }
+
     let mut parts: Vec<&str> = host.split('.').collect();
     while parts.len() > 2 {
         parts.remove(0);
@@ -150,6 +154,27 @@ fn resolve_target(
         return Some(hit);
     }
 
+    None
+}
+
+fn select_wildcard_route(
+    routes: &HashMap<String, Vec<RouteRule>>,
+    host: &str,
+    path: &str,
+) -> Option<RouteRule> {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    // Prefer the most specific wildcard: *.a.b.test before *.b.test
+    for i in 1..(parts.len() - 1) {
+        let suffix = parts[i..].join(".");
+        let candidate = format!("*.{suffix}");
+        if let Some(hit) = select_route(routes.get(&candidate), path) {
+            return Some(hit);
+        }
+    }
     None
 }
 
@@ -252,5 +277,73 @@ mod tests {
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5000),
         }
+    }
+
+    #[test]
+    fn wildcard_host_matches_subdomain() {
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        routes.insert(
+            "*.myapp.test".to_string(),
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5010,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
+        );
+        let out = resolve_target(&routes, "api.myapp.test", "test", "/").expect("wildcard");
+        match out.target {
+            BackendTarget::Tcp { port, .. } => assert_eq!(port, 5010),
+        }
+    }
+
+    #[test]
+    fn exact_host_beats_wildcard() {
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        routes.insert(
+            "api.myapp.test".to_string(),
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5001,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
+        );
+        routes.insert(
+            "*.myapp.test".to_string(),
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5002,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
+        );
+        let out = resolve_target(&routes, "api.myapp.test", "test", "/").expect("route");
+        match out.target {
+            BackendTarget::Tcp { port, .. } => assert_eq!(port, 5001),
+        }
+    }
+
+    #[test]
+    fn wildcard_requires_subdomain() {
+        let mut routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        routes.insert(
+            "*.myapp.test".to_string(),
+            vec![RouteRule {
+                target: BackendTarget::Tcp {
+                    host: "127.0.0.1".to_string(),
+                    port: 5002,
+                },
+                path_prefix: None,
+                timeout_ms: None,
+            }],
+        );
+        assert!(resolve_target(&routes, "myapp.test", "test", "/").is_none());
     }
 }
