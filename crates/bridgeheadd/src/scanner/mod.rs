@@ -7,7 +7,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::domain::DomainName;
-use crate::store::ScanUpsertResult;
+use crate::store::{route_key, ScanUpsertResult};
 use crate::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -16,7 +16,20 @@ struct BridgeheadManifest {
     domain: Option<String>,
     target_host: Option<String>,
     target_port: u16,
+    path_prefix: Option<String>,
+    timeout_ms: Option<u64>,
+    routes: Option<Vec<BridgeheadManifestRoute>>,
     enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BridgeheadManifestRoute {
+    #[serde(default)]
+    path_prefix: Option<String>,
+    target_host: String,
+    target_port: u16,
+    #[serde(default)]
+    timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -32,7 +45,7 @@ pub struct ScanStats {
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let discovered = discover(&state.apps_root, &state.domain_suffix)?;
-    let mut active_domains: HashSet<String> = HashSet::new();
+    let mut active_routes: HashSet<String> = HashSet::new();
     let mut inserted = 0usize;
     let mut updated = 0usize;
     let mut skipped_manual = 0usize;
@@ -40,8 +53,10 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
         let (_, op) = state.store.upsert_scanned_static(
             &app.name,
             &app.domain,
+            app.path_prefix.as_deref(),
             &app.target_host,
             app.target_port,
+            app.timeout_ms,
             app.enabled,
             "apps_root",
         )?;
@@ -50,11 +65,15 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             ScanUpsertResult::Updated => updated += 1,
             ScanUpsertResult::SkippedManual => skipped_manual += 1,
         }
-        active_domains.insert(app.domain.0.clone());
+        let route_key = route_key(
+            &app.domain.0,
+            app.path_prefix.as_deref().unwrap_or(""),
+        );
+        active_routes.insert(route_key);
     }
     let pruned = state
         .store
-        .prune_scanned_not_in("apps_root", &active_domains)?;
+        .prune_scanned_not_in("apps_root", &active_routes)?;
     Ok(ScanStats {
         discovered: discovered.apps.len(),
         inserted,
@@ -70,8 +89,10 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
 struct DiscoveredStaticApp {
     name: String,
     domain: DomainName,
+    path_prefix: Option<String>,
     target_host: String,
     target_port: u16,
+    timeout_ms: Option<u64>,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -89,7 +110,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
         });
     }
 
-    let mut by_domain: HashMap<String, DiscoveredStaticApp> = HashMap::new();
+    let mut by_route: HashMap<String, DiscoveredStaticApp> = HashMap::new();
     let mut conflicts: Vec<String> = Vec::new();
 
     for entry in fs::read_dir(root)
@@ -104,7 +125,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                 continue;
             }
             if let Some(app) = discover_from_symlink(entry.path(), &file_name, suffix)? {
-                insert_with_priority(&mut by_domain, &mut conflicts, app);
+                insert_with_priority(&mut by_route, &mut conflicts, app);
             }
             continue;
         }
@@ -115,7 +136,8 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             }
             let raw = fs::read_to_string(entry.path())
                 .with_context(|| format!("failed reading {}", entry.path().display()))?;
-            if let Some((target_host, target_port)) = parse_port_proxy_target(&raw) {
+            let routes = parse_pow_file_routes(&raw);
+            for route in routes {
                 let domain_text = file_name_to_domain(&file_name, suffix);
                 let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
                     format!(
@@ -128,12 +150,14 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                 let app = DiscoveredStaticApp {
                     name: sanitize_name(&file_name),
                     domain,
-                    target_host,
-                    target_port,
+                    path_prefix: route.path_prefix,
+                    target_host: route.target_host,
+                    target_port: route.target_port,
+                    timeout_ms: route.timeout_ms,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
-                insert_with_priority(&mut by_domain, &mut conflicts, app);
+                insert_with_priority(&mut by_route, &mut conflicts, app);
             }
             continue;
         }
@@ -159,24 +183,46 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                 format!("invalid domain '{}' in {}", domain, manifest_path.display())
             })?;
 
-            let target_host = manifest
-                .target_host
-                .unwrap_or_else(|| "127.0.0.1".to_string());
-
-            let app = DiscoveredStaticApp {
-                name,
-                domain,
-                target_host,
-                target_port: manifest.target_port,
-                enabled: manifest.enabled.unwrap_or(true),
-                explicit_domain,
-            };
-            insert_with_priority(&mut by_domain, &mut conflicts, app);
+            let enabled = manifest.enabled.unwrap_or(true);
+            if let Some(routes) = manifest.routes {
+                for route in routes {
+                    let app = DiscoveredStaticApp {
+                        name: name.clone(),
+                        domain: domain.clone(),
+                        path_prefix: normalize_path_prefix(route.path_prefix.as_deref()),
+                        target_host: route.target_host,
+                        target_port: route.target_port,
+                        timeout_ms: route.timeout_ms,
+                        enabled,
+                        explicit_domain,
+                    };
+                    insert_with_priority(&mut by_route, &mut conflicts, app);
+                }
+            } else {
+                let target_host = manifest
+                    .target_host
+                    .unwrap_or_else(|| "127.0.0.1".to_string());
+                let app = DiscoveredStaticApp {
+                    name,
+                    domain,
+                    path_prefix: normalize_path_prefix(manifest.path_prefix.as_deref()),
+                    target_host,
+                    target_port: manifest.target_port,
+                    timeout_ms: manifest.timeout_ms,
+                    enabled,
+                    explicit_domain,
+                };
+                insert_with_priority(&mut by_route, &mut conflicts, app);
+            }
         }
     }
 
-    let mut apps: Vec<DiscoveredStaticApp> = by_domain.into_values().collect();
-    apps.sort_by(|a, b| a.domain.0.cmp(&b.domain.0));
+    let mut apps: Vec<DiscoveredStaticApp> = by_route.into_values().collect();
+    apps.sort_by(|a, b| {
+        let p1 = a.path_prefix.as_deref().unwrap_or("");
+        let p2 = b.path_prefix.as_deref().unwrap_or("");
+        (a.domain.0.as_str(), p1).cmp(&(b.domain.0.as_str(), p2))
+    });
     conflicts.sort();
     conflicts.dedup();
     Ok(DiscoverResult { apps, conflicts })
@@ -220,7 +266,7 @@ fn discover_from_symlink(
         None
     };
 
-    let Some((target_host, target_port)) = target_spec else {
+    let Some((target_host, target_port, timeout_ms)) = target_spec else {
         return Ok(None);
     };
 
@@ -236,8 +282,10 @@ fn discover_from_symlink(
     Ok(Some(DiscoveredStaticApp {
         name: sanitize_name(file_name),
         domain,
+        path_prefix: None,
         target_host,
         target_port,
+        timeout_ms,
         enabled: true,
         explicit_domain: file_name.ends_with(&format!(".{suffix}")),
     }))
@@ -251,8 +299,70 @@ fn file_name_to_domain(file_name: &str, suffix: &str) -> String {
     }
 }
 
-fn parse_port_proxy_target(raw: &str) -> Option<(String, u16)> {
-    let value = raw.trim();
+#[derive(Debug)]
+struct PowRoute {
+    path_prefix: Option<String>,
+    target_host: String,
+    target_port: u16,
+    timeout_ms: Option<u64>,
+}
+
+fn parse_pow_file_routes(raw: &str) -> Vec<PowRoute> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(route) = parse_pow_route_line(trimmed) {
+            out.push(route);
+        }
+    }
+    if out.is_empty() {
+        if let Some(route) = parse_pow_route_line(raw.trim()) {
+            out.push(route);
+        }
+    }
+    out
+}
+
+fn parse_pow_route_line(line: &str) -> Option<PowRoute> {
+    if line.is_empty() {
+        return None;
+    }
+
+    let parts = line.split_whitespace().collect::<Vec<_>>();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let (path_prefix, target_token, timeout_token) = if parts[0].starts_with('/') {
+        if parts.len() < 2 {
+            return None;
+        }
+        let p = normalize_path_prefix(Some(parts[0]));
+        let t = parts[1];
+        let to = parts.get(2).copied();
+        (p, t, to)
+    } else {
+        let t = parts[0];
+        let to = parts.get(1).copied();
+        (None, t, to)
+    };
+
+    let (target_host, target_port) = parse_target_token(target_token)?;
+    let timeout_ms = timeout_token.and_then(|t| t.parse::<u64>().ok()).filter(|v| *v > 0);
+
+    Some(PowRoute {
+        path_prefix,
+        target_host,
+        target_port,
+        timeout_ms,
+    })
+}
+
+fn parse_target_token(token: &str) -> Option<(String, u16)> {
+    let value = token.trim();
     if value.is_empty() {
         return None;
     }
@@ -281,6 +391,14 @@ fn parse_port_proxy_target(raw: &str) -> Option<(String, u16)> {
     Some((host.to_string(), port))
 }
 
+fn parse_port_proxy_target(raw: &str) -> Option<(String, u16, Option<u64>)> {
+    let route = parse_pow_route_line(raw.trim())?;
+    if route.path_prefix.is_some() {
+        return None;
+    }
+    Some((route.target_host, route.target_port, route.timeout_ms))
+}
+
 fn sanitize_name(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
@@ -295,21 +413,38 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
+fn normalize_path_prefix(input: Option<&str>) -> Option<String> {
+    let Some(raw) = input else {
+        return None;
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed == "/" {
+        return None;
+    }
+    if !trimmed.starts_with('/') {
+        return None;
+    }
+    if trimmed.ends_with('/') {
+        return Some(trimmed.trim_end_matches('/').to_string());
+    }
+    Some(trimmed.to_string())
+}
+
 fn insert_with_priority(
-    by_domain: &mut HashMap<String, DiscoveredStaticApp>,
+    by_route: &mut HashMap<String, DiscoveredStaticApp>,
     conflicts: &mut Vec<String>,
     candidate: DiscoveredStaticApp,
 ) {
-    let key = candidate.domain.0.clone();
-    match by_domain.get(&key) {
+    let key = route_key(&candidate.domain.0, candidate.path_prefix.as_deref().unwrap_or(""));
+    match by_route.get(&key) {
         None => {
-            by_domain.insert(key, candidate);
+            by_route.insert(key, candidate);
         }
         Some(existing) => {
             conflicts.push(key.clone());
             // explicit domain beats inferred domain; otherwise keep first seen.
             if candidate.explicit_domain && !existing.explicit_domain {
-                by_domain.insert(key, candidate);
+                by_route.insert(key, candidate);
             }
         }
     }
@@ -330,6 +465,7 @@ mod tests {
         let out = parse_port_proxy_target("5006").expect("parse");
         assert_eq!(out.0, "127.0.0.1");
         assert_eq!(out.1, 5006);
+        assert_eq!(out.2, None);
     }
 
     #[test]
@@ -337,6 +473,7 @@ mod tests {
         let out = parse_port_proxy_target("http://1.2.3.4:8080").expect("parse");
         assert_eq!(out.0, "1.2.3.4");
         assert_eq!(out.1, 8080);
+        assert_eq!(out.2, None);
     }
 
     #[test]
@@ -358,8 +495,10 @@ mod tests {
             DiscoveredStaticApp {
                 name: "a".to_string(),
                 domain: DomainName("myapp.test".to_string()),
+                path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5006,
+                timeout_ms: None,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -370,13 +509,15 @@ mod tests {
             DiscoveredStaticApp {
                 name: "b".to_string(),
                 domain: DomainName("myapp.test".to_string()),
+                path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
                 target_port: 5007,
+                timeout_ms: None,
                 enabled: true,
                 explicit_domain: true,
             },
         );
-        let winner = map.get("myapp.test").expect("winner");
+        let winner = map.get("myapp.test|").expect("winner");
         assert_eq!(winner.target_port, 5007);
         assert_eq!(conflicts.len(), 1);
     }

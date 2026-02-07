@@ -228,18 +228,21 @@ impl AppRepository {
         &self,
         name: &str,
         domain: &DomainName,
+        path_prefix: Option<&str>,
         target_host: &str,
         target_port: u16,
+        timeout_ms: Option<u64>,
         enabled: bool,
         source: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
+        let path_prefix_db = path_prefix_to_db(path_prefix);
 
         let existing: Option<(String, i64)> = conn
             .query_row(
-                "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ''",
-                params![domain.0],
+                "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+                params![domain.0, path_prefix_db],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
@@ -248,11 +251,13 @@ impl AppRepository {
             Some((_id, scan_managed)) if scan_managed == 0 => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = '', target_host = ?2, target_port = ?3, timeout_ms = NULL, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8 WHERE id = ?9",
                     params![
                         name,
+                        path_prefix_db,
                         target_host,
                         i64::from(target_port),
+                        timeout_ms.map(|v| v as i64),
                         if enabled { 1 } else { 0 },
                         now,
                         source,
@@ -265,14 +270,16 @@ impl AppRepository {
                 let created = AppId::new().0;
                 conn.execute(
                     "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, NULL, ?7, 1, ?8, ?9, ?10)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12)",
                     params![
                         created,
                         name,
                         "static",
                         domain.0,
+                        path_prefix_db,
                         target_host,
                         i64::from(target_port),
+                        timeout_ms.map(|v| v as i64),
                         if enabled { 1 } else { 0 },
                         source,
                         now,
@@ -284,8 +291,8 @@ impl AppRepository {
         };
 
         let app = conn.query_row(
-            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps WHERE domain = ?1 AND path_prefix = ''",
-            params![domain.0],
+            "SELECT id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+            params![domain.0, path_prefix_db],
             |row| {
                 Ok(AppSpec {
                     id: AppId(row.get(0)?),
@@ -313,18 +320,21 @@ impl AppRepository {
     pub fn prune_scanned_not_in(
         &self,
         source: &str,
-        active_domains: &HashSet<String>,
+        active_routes: &HashSet<String>,
     ) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare("SELECT id, domain FROM apps WHERE scan_managed = 1 AND scan_source = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT id, domain, path_prefix FROM apps WHERE scan_managed = 1 AND scan_source = ?1",
+        )?;
         let mut rows = stmt.query(params![source])?;
         let mut delete_ids: Vec<String> = Vec::new();
 
         while let Some(row) = rows.next()? {
             let id: String = row.get(0)?;
             let domain: String = row.get(1)?;
-            if !active_domains.contains(&domain) {
+            let path_prefix: String = row.get(2)?;
+            let key = route_key(&domain, &path_prefix);
+            if !active_routes.contains(&key) {
                 delete_ids.push(id);
             }
         }
@@ -431,6 +441,10 @@ fn path_prefix_from_db(value: String) -> Option<String> {
     } else {
         Some(value)
     }
+}
+
+pub fn route_key(domain: &str, path_prefix_db: &str) -> String {
+    format!("{domain}|{path_prefix_db}")
 }
 
 fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Result<()> {
