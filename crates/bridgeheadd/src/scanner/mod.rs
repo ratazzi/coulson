@@ -43,6 +43,10 @@ pub struct ScanStats {
     pub conflict_domains: Vec<String>,
     #[serde(default)]
     pub parse_warnings: Vec<String>,
+    #[serde(default)]
+    pub warning_count: usize,
+    #[serde(default)]
+    pub has_issues: bool,
 }
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
@@ -73,19 +77,24 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let pruned = state
         .store
         .prune_scanned_not_in("apps_root", &active_routes)?;
+    let conflict_domains: Vec<String> = discovered
+        .conflicts
+        .into_iter()
+        .map(|k| humanize_route_conflict_key(&k))
+        .collect();
+    let parse_warnings = discovered.parse_warnings;
+    let warning_count = conflict_domains.len() + parse_warnings.len();
     Ok(ScanStats {
         discovered: discovered.apps.len(),
         inserted,
         updated,
         skipped_manual,
         pruned,
-        conflicts: discovered.conflicts.len(),
-        conflict_domains: discovered
-            .conflicts
-            .into_iter()
-            .map(|k| humanize_route_conflict_key(&k))
-            .collect(),
-        parse_warnings: discovered.parse_warnings,
+        conflicts: conflict_domains.len(),
+        conflict_domains,
+        parse_warnings,
+        warning_count,
+        has_issues: warning_count > 0,
     })
 }
 
