@@ -3,6 +3,7 @@ mod control;
 mod domain;
 mod proxy;
 mod runtime;
+mod scanner;
 mod store;
 
 use std::collections::HashMap;
@@ -23,6 +24,7 @@ pub struct SharedState {
     pub routes: Arc<RwLock<HashMap<String, BackendTarget>>>,
     pub route_tx: broadcast::Sender<()>,
     pub domain_suffix: String,
+    pub apps_root: std::path::PathBuf,
 }
 
 impl SharedState {
@@ -54,8 +56,10 @@ async fn main() -> anyhow::Result<()> {
         routes: Arc::new(RwLock::new(HashMap::new())),
         route_tx,
         domain_suffix: cfg.domain_suffix.clone(),
+        apps_root: cfg.apps_root.clone(),
     };
 
+    scanner::sync_from_apps_root(&state)?;
     state.reload_routes()?;
 
     let proxy_state = state.clone();

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use anyhow::Context;
 use parking_lot::Mutex;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -107,6 +107,81 @@ impl AppRepository {
             }
             Err(e) => Err(e.into()),
         }
+    }
+
+    pub fn upsert_static(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        target_host: &str,
+        target_port: u16,
+        enabled: bool,
+    ) -> anyhow::Result<AppSpec> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+
+        let existing_id: Option<String> = conn
+            .query_row(
+                "SELECT id FROM apps WHERE domain = ?1",
+                params![domain.0],
+                |row| row.get(0),
+            )
+            .optional()?;
+
+        if let Some(id) = existing_id {
+            conn.execute(
+                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5 WHERE id = ?6",
+                params![
+                    name,
+                    target_host,
+                    i64::from(target_port),
+                    if enabled { 1 } else { 0 },
+                    now,
+                    id
+                ],
+            )?;
+        } else {
+            let created = AppId::new().0;
+            conn.execute(
+                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    created,
+                    name,
+                    "static",
+                    domain.0,
+                    target_host,
+                    i64::from(target_port),
+                    if enabled { 1 } else { 0 },
+                    now,
+                    now,
+                ],
+            )?;
+        }
+
+        let app = conn.query_row(
+            "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE domain = ?1",
+            params![domain.0],
+            |row| {
+                Ok(AppSpec {
+                    id: AppId(row.get(0)?),
+                    name: row.get(1)?,
+                    kind: AppKind::Static,
+                    domain: DomainName(row.get(3)?),
+                    target: BackendTarget::Tcp {
+                        host: row.get(4)?,
+                        port: row.get::<_, i64>(5)? as u16,
+                    },
+                    enabled: row.get::<_, i64>(6)? == 1,
+                    created_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(7)?)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                    updated_at: OffsetDateTime::from_unix_timestamp(row.get::<_, i64>(8)?)
+                        .unwrap_or(OffsetDateTime::UNIX_EPOCH),
+                })
+            },
+        )?;
+
+        Ok(app)
     }
 
     pub fn delete(&self, app_id: &str) -> anyhow::Result<bool> {

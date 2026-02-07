@@ -8,6 +8,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{error, info};
 
 use crate::domain::DomainName;
+use crate::scanner;
 use crate::store::StoreError;
 use crate::SharedState;
 
@@ -236,6 +237,15 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "route.reload" => match state.reload_routes() {
             Ok(_) => Ok(json!({ "reloaded": true })),
+            Err(e) => return internal_error(req.request_id, e.to_string()),
+        },
+        "apps.scan" => match scanner::sync_from_apps_root(state) {
+            Ok(count) => {
+                if let Err(e) = state.reload_routes() {
+                    return internal_error(req.request_id, e.to_string());
+                }
+                Ok(json!({ "scanned": count }))
+            }
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
         _ => Err(ControlError::InvalidParams(format!(

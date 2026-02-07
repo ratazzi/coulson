@@ -55,7 +55,11 @@ impl ProxyHttp for BridgeProxy {
         Ok(false)
     }
 
-    async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
+    async fn upstream_peer(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
         let Some(target) = ctx.target.take() else {
             return Error::e_explain(ErrorType::InternalError, "missing upstream target");
         };
@@ -91,9 +95,7 @@ async fn write_json_error(session: &mut Session, status: u16, code: &str) -> Res
     let mut resp = ResponseHeader::build(status, None)?;
     resp.insert_header("content-type", "application/json")?;
 
-    session
-        .write_response_header(Box::new(resp), false)
-        .await?;
+    session.write_response_header(Box::new(resp), false).await?;
     let body = format!(r#"{{"error":"{code}"}}"#);
     session
         .write_response_body(Some(Bytes::from(body)), true)

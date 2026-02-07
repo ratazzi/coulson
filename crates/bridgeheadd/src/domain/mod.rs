@@ -39,10 +39,15 @@ impl DomainName {
             return Err(DomainError::InvalidSuffix(suffix.to_string()));
         }
 
-        let label = input.trim_end_matches(&format!(".{suffix}"));
-        let re = Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").expect("regex compile");
-        if !re.is_match(label) {
+        let labels = input.trim_end_matches(&format!(".{suffix}"));
+        if labels.is_empty() {
             return Err(DomainError::InvalidLabel);
+        }
+        let re = Regex::new(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$").expect("regex compile");
+        for label in labels.split('.') {
+            if label.is_empty() || !re.is_match(label) {
+                return Err(DomainError::InvalidLabel);
+            }
         }
 
         Ok(Self(input.to_string()))
@@ -89,5 +94,11 @@ mod tests {
     fn rejects_invalid_suffix() {
         let err = DomainName::parse("myapp.local", "test").expect_err("must fail");
         assert!(matches!(err, DomainError::InvalidSuffix(_)));
+    }
+
+    #[test]
+    fn accepts_subdomain_labels() {
+        let domain = DomainName::parse("www.myapp.test", "test").expect("valid");
+        assert_eq!(domain.0, "www.myapp.test");
     }
 }

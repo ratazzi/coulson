@@ -10,6 +10,7 @@ pub struct BridgeheadConfig {
     pub control_socket: PathBuf,
     pub sqlite_path: PathBuf,
     pub domain_suffix: String,
+    pub apps_root: PathBuf,
 }
 
 impl Default for BridgeheadConfig {
@@ -20,6 +21,7 @@ impl Default for BridgeheadConfig {
             control_socket: PathBuf::from("/tmp/bridgehead/bridgeheadd.sock"),
             sqlite_path: PathBuf::from(format!("{home}/.bridgehead/state.db")),
             domain_suffix: "test".to_string(),
+            apps_root: PathBuf::from(format!("{home}/Bridgehead/Apps")),
         }
     }
 }
@@ -44,6 +46,9 @@ impl BridgeheadConfig {
 
         if let Ok(suffix) = env::var("BRIDGEHEAD_DOMAIN_SUFFIX") {
             cfg.domain_suffix = suffix;
+        }
+        if let Ok(path) = env::var("BRIDGEHEAD_APPS_ROOT") {
+            cfg.apps_root = PathBuf::from(path);
         }
 
         Ok(cfg)
