@@ -6,6 +6,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::domain::DomainName;
+use crate::store::ScanUpsertResult;
 use crate::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -17,11 +18,23 @@ struct BridgeheadManifest {
     enabled: Option<bool>,
 }
 
-pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<usize> {
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct ScanStats {
+    pub discovered: usize,
+    pub inserted: usize,
+    pub updated: usize,
+    pub skipped_manual: usize,
+    pub pruned: usize,
+}
+
+pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let discovered = discover(&state.apps_root, &state.domain_suffix)?;
     let mut active_domains: HashSet<String> = HashSet::new();
+    let mut inserted = 0usize;
+    let mut updated = 0usize;
+    let mut skipped_manual = 0usize;
     for app in &discovered {
-        state.store.upsert_scanned_static(
+        let (_, op) = state.store.upsert_scanned_static(
             &app.name,
             &app.domain,
             &app.target_host,
@@ -29,12 +42,23 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<usize> {
             app.enabled,
             "apps_root",
         )?;
+        match op {
+            ScanUpsertResult::Inserted => inserted += 1,
+            ScanUpsertResult::Updated => updated += 1,
+            ScanUpsertResult::SkippedManual => skipped_manual += 1,
+        }
         active_domains.insert(app.domain.0.clone());
     }
-    let _ = state
+    let pruned = state
         .store
         .prune_scanned_not_in("apps_root", &active_domains)?;
-    Ok(discovered.len())
+    Ok(ScanStats {
+        discovered: discovered.len(),
+        inserted,
+        updated,
+        skipped_manual,
+        pruned,
+    })
 }
 
 #[derive(Debug)]

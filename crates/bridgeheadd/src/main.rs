@@ -78,9 +78,15 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
 
 fn run_scan_once(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
-    let count = scanner::sync_from_apps_root(&state)?;
+    let stats = scanner::sync_from_apps_root(&state)?;
     state.reload_routes()?;
-    println!("{{\"ok\":true,\"scanned\":{count}}}");
+    println!(
+        "{}",
+        serde_json::to_string(&serde_json::json!({
+            "ok": true,
+            "scan": stats
+        }))?
+    );
     Ok(())
 }
 
@@ -94,8 +100,16 @@ fn run_ls(cfg: BridgeheadConfig) -> anyhow::Result<()> {
 async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
 
-    scanner::sync_from_apps_root(&state)?;
+    let startup_scan = scanner::sync_from_apps_root(&state)?;
     state.reload_routes()?;
+    info!(
+        discovered = startup_scan.discovered,
+        inserted = startup_scan.inserted,
+        updated = startup_scan.updated,
+        skipped_manual = startup_scan.skipped_manual,
+        pruned = startup_scan.pruned,
+        "startup apps scan completed"
+    );
 
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
@@ -123,11 +137,18 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         loop {
             sleep(Duration::from_secs(scan_interval_secs)).await;
             match scanner::sync_from_apps_root(&scan_state) {
-                Ok(count) => {
+                Ok(stats) => {
                     if let Err(err) = scan_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after scan");
                     } else {
-                        info!(scanned = count, "apps scan completed");
+                        info!(
+                            discovered = stats.discovered,
+                            inserted = stats.inserted,
+                            updated = stats.updated,
+                            skipped_manual = stats.skipped_manual,
+                            pruned = stats.pruned,
+                            "apps scan completed"
+                        );
                     }
                 }
                 Err(err) => error!(error = %err, "apps scan failed"),
@@ -156,11 +177,18 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
 
         while rx.recv().await.is_some() {
             match scanner::sync_from_apps_root(&watch_state) {
-                Ok(count) => {
+                Ok(stats) => {
                     if let Err(err) = watch_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after fs event");
                     } else {
-                        info!(scanned = count, "apps scan completed from fs event");
+                        info!(
+                            discovered = stats.discovered,
+                            inserted = stats.inserted,
+                            updated = stats.updated,
+                            skipped_manual = stats.skipped_manual,
+                            pruned = stats.pruned,
+                            "apps scan completed from fs event"
+                        );
                     }
                 }
                 Err(err) => error!(error = %err, "apps scan failed from fs event"),

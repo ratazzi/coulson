@@ -240,11 +240,11 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
         "apps.scan" => match scanner::sync_from_apps_root(state) {
-            Ok(count) => {
+            Ok(stats) => {
                 if let Err(e) = state.reload_routes() {
                     return internal_error(req.request_id, e.to_string());
                 }
-                Ok(json!({ "scanned": count }))
+                Ok(json!({ "scan": stats }))
             }
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },

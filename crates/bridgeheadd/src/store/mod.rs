@@ -15,6 +15,13 @@ pub enum StoreError {
     DomainConflict,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanUpsertResult {
+    Inserted,
+    Updated,
+    SkippedManual,
+}
+
 pub struct AppRepository {
     conn: Mutex<Connection>,
 }
@@ -200,50 +207,56 @@ impl AppRepository {
         target_port: u16,
         enabled: bool,
         source: &str,
-    ) -> anyhow::Result<AppSpec> {
+    ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
 
-        let existing_id: Option<String> = conn
+        let existing: Option<(String, i64)> = conn
             .query_row(
-                "SELECT id FROM apps WHERE domain = ?1",
+                "SELECT id, scan_managed FROM apps WHERE domain = ?1",
                 params![domain.0],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
 
-        if let Some(id) = existing_id {
-            conn.execute(
-                "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
-                params![
-                    name,
-                    target_host,
-                    i64::from(target_port),
-                    if enabled { 1 } else { 0 },
-                    now,
-                    source,
-                    id
-                ],
-            )?;
-        } else {
-            let created = AppId::new().0;
-            conn.execute(
-                "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
-                params![
-                    created,
-                    name,
-                    "static",
-                    domain.0,
-                    target_host,
-                    i64::from(target_port),
-                    if enabled { 1 } else { 0 },
-                    source,
-                    now,
-                    now,
-                ],
-            )?;
-        }
+        let op = match existing {
+            Some((_id, scan_managed)) if scan_managed == 0 => ScanUpsertResult::SkippedManual,
+            Some((id, _)) => {
+                conn.execute(
+                    "UPDATE apps SET name = ?1, target_host = ?2, target_port = ?3, enabled = ?4, updated_at = ?5, scan_managed = 1, scan_source = ?6 WHERE id = ?7",
+                    params![
+                        name,
+                        target_host,
+                        i64::from(target_port),
+                        if enabled { 1 } else { 0 },
+                        now,
+                        source,
+                        id
+                    ],
+                )?;
+                ScanUpsertResult::Updated
+            }
+            None => {
+                let created = AppId::new().0;
+                conn.execute(
+                    "INSERT INTO apps (id, name, kind, domain, target_host, target_port, enabled, scan_managed, scan_source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10)",
+                    params![
+                        created,
+                        name,
+                        "static",
+                        domain.0,
+                        target_host,
+                        i64::from(target_port),
+                        if enabled { 1 } else { 0 },
+                        source,
+                        now,
+                        now,
+                    ],
+                )?;
+                ScanUpsertResult::Inserted
+            }
+        };
 
         let app = conn.query_row(
             "SELECT id,name,kind,domain,target_host,target_port,enabled,created_at,updated_at FROM apps WHERE domain = ?1",
@@ -267,7 +280,7 @@ impl AppRepository {
             },
         )?;
 
-        Ok(app)
+        Ok((app, op))
     }
 
     pub fn prune_scanned_not_in(
