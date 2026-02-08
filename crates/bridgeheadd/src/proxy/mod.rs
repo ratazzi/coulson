@@ -96,7 +96,7 @@ impl ProxyHttp for BridgeProxy {
                 .and_then(|v| v.to_str().ok()),
         );
         let Some(host) = host else {
-            write_json_error(session, 400, "missing_host").await?;
+            write_error_page(session, 400, "missing_host").await?;
             return Ok(true);
         };
         let req_path = session.req_header().uri.path().to_string();
@@ -107,7 +107,7 @@ impl ProxyHttp for BridgeProxy {
         };
 
         let Some(route) = route else {
-            write_json_error(session, 404, "route_not_found").await?;
+            write_error_page(session, 404, "route_not_found").await?;
             return Ok(true);
         };
 
@@ -293,7 +293,7 @@ impl ProxyHttp for DedicatedProxy {
         };
 
         let Some(route) = route else {
-            write_json_error(session, 502, "no_backend").await?;
+            write_error_page(session, 502, "no_backend").await?;
             return Ok(true);
         };
 
@@ -473,7 +473,7 @@ async fn serve_static(
     let canonical_root = match std::fs::canonicalize(root) {
         Ok(p) => p,
         Err(_) => {
-            write_json_error(session, 500, "static_root_missing").await?;
+            write_error_page(session, 500, "static_root_missing").await?;
             return Ok(());
         }
     };
@@ -519,7 +519,7 @@ async fn serve_file(session: &mut Session, path: &Path, cors: bool) -> Result<()
     let body = match std::fs::read(path) {
         Ok(b) => b,
         Err(_) => {
-            write_json_error(session, 500, "read_error").await?;
+            write_error_page(session, 500, "read_error").await?;
             return Ok(());
         }
     };
@@ -558,7 +558,7 @@ async fn serve_directory_listing(
     let read_dir = match std::fs::read_dir(dir) {
         Ok(rd) => rd,
         Err(_) => {
-            write_json_error(session, 500, "read_dir_error").await?;
+            write_error_page(session, 500, "read_dir_error").await?;
             return Ok(());
         }
     };
@@ -833,7 +833,7 @@ fn html_escape(s: &str) -> String {
 }
 
 async fn write_not_found(session: &mut Session) -> Result<()> {
-    write_json_error(session, 404, "not_found").await
+    write_error_page(session, 404, "not_found").await
 }
 
 // ---------------------------------------------------------------------------
@@ -953,10 +953,12 @@ async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: &str) {
 // Error / routing helpers
 // ---------------------------------------------------------------------------
 
-async fn write_json_error(session: &mut Session, status: u16, code: &str) -> Result<()> {
-    let body = format!(r#"{{"error":"{code}"}}"#);
+async fn write_error_page(session: &mut Session, status: u16, message: &str) -> Result<()> {
+    let body = format!(
+        "<html><head><title>{status}</title></head><body><h1>{status}</h1><p>{message}</p></body></html>"
+    );
     let mut resp = ResponseHeader::build(status, None)?;
-    resp.insert_header("content-type", "application/json")?;
+    resp.insert_header("content-type", "text/html; charset=utf-8")?;
     resp.insert_header("content-length", body.len().to_string())?;
     resp.insert_header("connection", "close")?;
 
