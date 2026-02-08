@@ -14,6 +14,7 @@ pub struct BridgeheadConfig {
     pub apps_root: PathBuf,
     pub scan_interval_secs: u64,
     pub watch_fs: bool,
+    pub idle_timeout_secs: u64,
 }
 
 impl Default for BridgeheadConfig {
@@ -34,6 +35,7 @@ impl Default for BridgeheadConfig {
             apps_root,
             scan_interval_secs: 2,
             watch_fs: true,
+            idle_timeout_secs: 900,
         }
     }
 }
@@ -73,6 +75,11 @@ impl BridgeheadConfig {
         if let Ok(raw) = env::var("BRIDGEHEAD_WATCH_FS") {
             cfg.watch_fs =
                 parse_bool(&raw).with_context(|| format!("invalid BRIDGEHEAD_WATCH_FS: {raw}"))?;
+        }
+        if let Ok(raw) = env::var("BRIDGEHEAD_IDLE_TIMEOUT_SECS") {
+            cfg.idle_timeout_secs = raw
+                .parse()
+                .with_context(|| format!("invalid BRIDGEHEAD_IDLE_TIMEOUT_SECS: {raw}"))?;
         }
 
         Ok(cfg)

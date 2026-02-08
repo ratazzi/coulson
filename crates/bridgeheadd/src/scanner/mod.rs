@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use serde::Deserialize;
 
-use crate::domain::DomainName;
+use crate::domain::{AppKind, DomainName};
 use crate::store::{domain_to_db, route_key, ScanUpsertResult};
 use crate::SharedState;
 
@@ -14,6 +14,11 @@ use crate::SharedState;
 struct BridgeheadManifest {
     name: Option<String>,
     domain: Option<String>,
+    kind: Option<String>,
+    #[allow(dead_code)]
+    module: Option<String>,
+    #[allow(dead_code)]
+    command: Option<String>,
     target_host: Option<String>,
     #[serde(default)]
     target_port: u16,
@@ -83,22 +88,32 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let mut updated = 0usize;
     let mut skipped_manual = 0usize;
     for app in &discovered.apps {
-        let (_, op) = state.store.upsert_scanned_static(
-            &app.name,
-            &app.domain,
-            app.path_prefix.as_deref(),
-            &app.target_host,
-            app.target_port,
-            app.socket_path.as_deref(),
-            app.timeout_ms,
-            app.cors_enabled,
-            app.basic_auth_user.as_deref(),
-            app.basic_auth_pass.as_deref(),
-            app.spa_rewrite,
-            app.listen_port,
-            app.enabled,
-            "apps_root",
-        )?;
+        let (_, op) = if app.kind == AppKind::Asgi {
+            state.store.upsert_scanned_asgi(
+                &app.name,
+                &app.domain,
+                app.app_root.as_deref().unwrap_or(""),
+                app.enabled,
+                "apps_root",
+            )?
+        } else {
+            state.store.upsert_scanned_static(
+                &app.name,
+                &app.domain,
+                app.path_prefix.as_deref(),
+                &app.target_host,
+                app.target_port,
+                app.socket_path.as_deref(),
+                app.timeout_ms,
+                app.cors_enabled,
+                app.basic_auth_user.as_deref(),
+                app.basic_auth_pass.as_deref(),
+                app.spa_rewrite,
+                app.listen_port,
+                app.enabled,
+                "apps_root",
+            )?
+        };
         match op {
             ScanUpsertResult::Inserted => inserted += 1,
             ScanUpsertResult::Updated => updated += 1,
@@ -135,6 +150,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
 #[derive(Debug)]
 struct DiscoveredStaticApp {
     name: String,
+    kind: AppKind,
     domain: DomainName,
     path_prefix: Option<String>,
     target_host: String,
@@ -146,6 +162,7 @@ struct DiscoveredStaticApp {
     basic_auth_pass: Option<String>,
     spa_rewrite: bool,
     listen_port: Option<u16>,
+    app_root: Option<String>,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -213,6 +230,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
 
                 let app = DiscoveredStaticApp {
                     name: sanitize_name(&file_name),
+                    kind: AppKind::Static,
                     domain,
                     path_prefix: route.path_prefix,
                     target_host: route.target_host,
@@ -224,6 +242,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
+                    app_root: None,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
@@ -258,6 +277,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                 for route in routes {
                     let app = DiscoveredStaticApp {
                         name: sanitize_name(&dir_name),
+                        kind: AppKind::Static,
                         domain: domain.clone(),
                         path_prefix: route.path_prefix,
                         target_host: route.target_host,
@@ -269,6 +289,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         basic_auth_pass: None,
                         spa_rewrite: false,
                         listen_port: None,
+                        app_root: None,
                         enabled: true,
                         explicit_domain,
                     };
@@ -279,6 +300,38 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
 
             let manifest_path = entry.path().join("bridgehead.json");
             if !manifest_path.exists() {
+                // Auto-detect ASGI app by convention
+                if detect_asgi_app(&entry.path()) {
+                    let domain_text = file_name_to_domain(&dir_name, suffix);
+                    let domain =
+                        DomainName::parse(&domain_text, suffix).with_context(|| {
+                            format!(
+                                "invalid domain '{}' in {}",
+                                domain_text,
+                                entry.path().display()
+                            )
+                        })?;
+                    let root_str = entry.path().to_string_lossy().to_string();
+                    let app = DiscoveredStaticApp {
+                        name: sanitize_name(&dir_name),
+                        kind: AppKind::Asgi,
+                        domain,
+                        path_prefix: None,
+                        target_host: String::new(),
+                        target_port: 0,
+                        socket_path: None,
+                        timeout_ms: None,
+                        cors_enabled: false,
+                        basic_auth_user: None,
+                        basic_auth_pass: None,
+                        spa_rewrite: false,
+                        listen_port: None,
+                        app_root: Some(root_str),
+                        enabled: true,
+                        explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
+                    };
+                    insert_with_priority(&mut by_route, &mut conflicts, app);
+                }
                 continue;
             }
 
@@ -297,10 +350,35 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             })?;
 
             let enabled = manifest.enabled.unwrap_or(true);
-            if let Some(routes) = manifest.routes {
+            let is_asgi = manifest.kind.as_deref() == Some("asgi");
+            let dir_path = entry.path();
+
+            if is_asgi {
+                let root_str = dir_path.to_string_lossy().to_string();
+                let app = DiscoveredStaticApp {
+                    name,
+                    kind: AppKind::Asgi,
+                    domain,
+                    path_prefix: None,
+                    target_host: String::new(),
+                    target_port: 0,
+                    socket_path: None,
+                    timeout_ms: None,
+                    cors_enabled: manifest.cors_enabled.unwrap_or(false),
+                    basic_auth_user: manifest.basic_auth_user,
+                    basic_auth_pass: manifest.basic_auth_pass,
+                    spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
+                    listen_port: manifest.listen_port,
+                    app_root: Some(root_str),
+                    enabled,
+                    explicit_domain,
+                };
+                insert_with_priority(&mut by_route, &mut conflicts, app);
+            } else if let Some(routes) = manifest.routes {
                 for route in routes {
                     let app = DiscoveredStaticApp {
                         name: name.clone(),
+                        kind: AppKind::Static,
                         domain: domain.clone(),
                         path_prefix: normalize_path_prefix(route.path_prefix.as_deref()),
                         target_host: route.target_host.unwrap_or_else(|| "127.0.0.1".to_string()),
@@ -312,6 +390,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         basic_auth_pass: route.basic_auth_pass.or_else(|| manifest.basic_auth_pass.clone()),
                         spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
                         listen_port: route.listen_port.or(manifest.listen_port),
+                        app_root: None,
                         enabled,
                         explicit_domain,
                     };
@@ -323,6 +402,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     .unwrap_or_else(|| "127.0.0.1".to_string());
                 let app = DiscoveredStaticApp {
                     name,
+                    kind: AppKind::Static,
                     domain,
                     path_prefix: normalize_path_prefix(manifest.path_prefix.as_deref()),
                     target_host,
@@ -334,6 +414,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     listen_port: manifest.listen_port,
+                    app_root: None,
                     enabled,
                     explicit_domain,
                 };
@@ -398,6 +479,7 @@ fn discover_from_symlink(
         for route in parse_pow_file_routes(&raw).routes {
             out.push(DiscoveredStaticApp {
                 name: name.clone(),
+                kind: AppKind::Static,
                 domain: domain.clone(),
                 path_prefix: route.path_prefix,
                 target_host: route.target_host,
@@ -409,6 +491,7 @@ fn discover_from_symlink(
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                app_root: None,
                 enabled: true,
                 explicit_domain,
             });
@@ -425,6 +508,7 @@ fn discover_from_symlink(
             for route in parse_pow_file_routes(&raw).routes {
                 out.push(DiscoveredStaticApp {
                     name: name.clone(),
+                    kind: AppKind::Static,
                     domain: domain.clone(),
                     path_prefix: route.path_prefix,
                     target_host: route.target_host,
@@ -436,6 +520,7 @@ fn discover_from_symlink(
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
+                    app_root: None,
                     enabled: true,
                     explicit_domain,
                 });
@@ -445,6 +530,28 @@ fn discover_from_symlink(
 
         let port_file = resolved_target.join("bridgehead.port");
         if !port_file.exists() {
+            // Auto-detect ASGI app
+            if detect_asgi_app(&resolved_target) {
+                let root_str = resolved_target.to_string_lossy().to_string();
+                return Ok(vec![DiscoveredStaticApp {
+                    name,
+                    kind: AppKind::Asgi,
+                    domain,
+                    path_prefix: None,
+                    target_host: String::new(),
+                    target_port: 0,
+                    socket_path: None,
+                    timeout_ms: None,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
+                    listen_port: None,
+                    app_root: Some(root_str),
+                    enabled: true,
+                    explicit_domain,
+                }]);
+            }
             return Ok(Vec::new());
         }
         let raw = fs::read_to_string(&port_file)
@@ -452,6 +559,7 @@ fn discover_from_symlink(
         if let Some((target_host, target_port, timeout_ms)) = parse_port_proxy_target(&raw) {
             return Ok(vec![DiscoveredStaticApp {
                 name,
+                kind: AppKind::Static,
                 domain,
                 path_prefix: None,
                 target_host,
@@ -463,6 +571,7 @@ fn discover_from_symlink(
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                app_root: None,
                 enabled: true,
                 explicit_domain,
             }]);
@@ -624,6 +733,15 @@ fn normalize_path_prefix(input: Option<&str>) -> Option<String> {
     Some(trimmed.to_string())
 }
 
+/// Detect an ASGI app in a directory.
+/// Returns true if the directory looks like a Python ASGI project:
+/// has (app.py or main.py) AND (pyproject.toml or requirements.txt).
+fn detect_asgi_app(dir: &Path) -> bool {
+    let has_entry = dir.join("app.py").exists() || dir.join("main.py").exists();
+    let has_deps = dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists();
+    has_entry && has_deps
+}
+
 fn insert_with_priority(
     by_route: &mut HashMap<String, DiscoveredStaticApp>,
     conflicts: &mut Vec<String>,
@@ -705,6 +823,7 @@ mod tests {
             &mut conflicts,
             DiscoveredStaticApp {
                 name: "a".to_string(),
+                kind: AppKind::Static,
                 domain: DomainName("myapp.bridgehead.local".to_string()),
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
@@ -716,6 +835,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                app_root: None,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -725,6 +845,7 @@ mod tests {
             &mut conflicts,
             DiscoveredStaticApp {
                 name: "b".to_string(),
+                kind: AppKind::Static,
                 domain: DomainName("myapp.bridgehead.local".to_string()),
                 path_prefix: None,
                 target_host: "127.0.0.1".to_string(),
@@ -736,6 +857,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                app_root: None,
                 enabled: true,
                 explicit_domain: true,
             },

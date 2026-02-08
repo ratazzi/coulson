@@ -14,11 +14,13 @@ use tracing::info;
 use parking_lot::RwLock;
 
 use crate::domain::BackendTarget;
+use crate::process::ProcessManagerHandle;
 use crate::{RouteRule, SharedState};
 
 #[derive(Clone)]
 struct BridgeProxy {
     shared: SharedState,
+    process_manager: ProcessManagerHandle,
 }
 
 #[derive(Default)]
@@ -91,12 +93,36 @@ impl ProxyHttp for BridgeProxy {
             return Ok(true);
         }
 
+        // --- Managed process (ASGI) ---
+        let resolved_target = if let BackendTarget::Managed { ref app_id, ref root } = route.target
+        {
+            let root_path = std::path::PathBuf::from(root);
+            let port = {
+                let mut pm = self.process_manager.lock().await;
+                pm.ensure_running(app_id, &root_path)
+                    .await
+                    .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
+            };
+            BackendTarget::Tcp {
+                host: "127.0.0.1".to_string(),
+                port,
+            }
+        } else {
+            route.target.clone()
+        };
+
+        // Mark active for managed processes (for idle reaper)
+        if let BackendTarget::Managed { ref app_id, .. } = route.target {
+            let mut pm = self.process_manager.lock().await;
+            pm.mark_active(app_id);
+        }
+
         // --- SPA Rewrite ---
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
             let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
         }
 
-        ctx.target = Some(route.target);
+        ctx.target = Some(resolved_target);
         ctx.timeout_ms = route.timeout_ms;
         ctx.cors_enabled = route.cors_enabled;
         ctx.spa_rewrite = route.spa_rewrite;
@@ -135,9 +161,9 @@ impl ProxyHttp for BridgeProxy {
                 }
                 Ok(Box::new(peer))
             }
-            BackendTarget::StaticDir { .. } => {
-                // Should never reach here — static dirs are handled in request_filter
-                Error::e_explain(ErrorType::InternalError, "static dir has no upstream")
+            BackendTarget::StaticDir { .. } | BackendTarget::Managed { .. } => {
+                // Should never reach here — handled in request_filter
+                Error::e_explain(ErrorType::InternalError, "non-proxy target has no upstream")
             }
         }
     }
@@ -170,19 +196,34 @@ impl ProxyHttp for BridgeProxy {
     }
 }
 
-pub async fn run_proxy(addr: SocketAddr, state: SharedState) -> anyhow::Result<()> {
+pub async fn run_proxy(
+    addr: SocketAddr,
+    state: SharedState,
+    process_manager: ProcessManagerHandle,
+) -> anyhow::Result<()> {
     let bind = addr.to_string();
     info!(%bind, "proxy listening");
 
-    tokio::task::spawn_blocking(move || run_proxy_blocking(&bind, state)).await??;
+    tokio::task::spawn_blocking(move || run_proxy_blocking(&bind, state, process_manager))
+        .await??;
     Ok(())
 }
 
-fn run_proxy_blocking(bind: &str, state: SharedState) -> anyhow::Result<()> {
+fn run_proxy_blocking(
+    bind: &str,
+    state: SharedState,
+    process_manager: ProcessManagerHandle,
+) -> anyhow::Result<()> {
     let mut server = Server::new(None)?;
     server.bootstrap();
 
-    let mut service = http_proxy_service(&server.configuration, BridgeProxy { shared: state });
+    let mut service = http_proxy_service(
+        &server.configuration,
+        BridgeProxy {
+            shared: state,
+            process_manager,
+        },
+    );
     service.add_tcp(bind);
     // Also listen on IPv6 loopback so mDNS-resolved AAAA connections work
     if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
@@ -298,8 +339,8 @@ impl ProxyHttp for DedicatedProxy {
                 }
                 Ok(Box::new(peer))
             }
-            BackendTarget::StaticDir { .. } => {
-                Error::e_explain(ErrorType::InternalError, "static dir has no upstream")
+            BackendTarget::StaticDir { .. } | BackendTarget::Managed { .. } => {
+                Error::e_explain(ErrorType::InternalError, "non-proxy target has no upstream")
             }
         }
     }

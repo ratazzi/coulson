@@ -113,6 +113,7 @@ impl AppRepository {
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_root TEXT")?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -519,6 +520,62 @@ impl AppRepository {
         Ok((app, op))
     }
 
+    pub fn upsert_scanned_asgi(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        app_root: &str,
+        enabled: bool,
+        source: &str,
+    ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let path_prefix_db = "";
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+
+        let existing: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+                params![domain_db, path_prefix_db],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let op = match existing {
+            Some((_id, 0)) => ScanUpsertResult::SkippedManual,
+            Some((id, _)) => {
+                conn.execute(
+                    "UPDATE apps SET name = ?1, kind = 'asgi', target_host = '', target_port = 0, enabled = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = ?5 WHERE id = ?6",
+                    params![name, if enabled { 1 } else { 0 }, now, source, app_root, id],
+                )?;
+                ScanUpsertResult::Updated
+            }
+            None => {
+                let created = AppId::new().0;
+                conn.execute(
+                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, app_root)
+                     VALUES (?1, ?2, 'asgi', ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
+                    params![
+                        created,
+                        name,
+                        domain_db,
+                        path_prefix_db,
+                        if enabled { 1 } else { 0 },
+                        source,
+                        now,
+                        now,
+                        app_root,
+                    ],
+                )?;
+                ScanUpsertResult::Inserted
+            }
+        };
+
+        let suffix = &self.domain_suffix;
+        let app = Self::read_app_by_route(&conn, &domain_db, path_prefix_db, suffix)?;
+        Ok((app, op))
+    }
+
     pub fn prune_scanned_not_in(
         &self,
         source: &str,
@@ -830,7 +887,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -846,8 +903,15 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let updated_ts: i64 = row.get(10)?;
     let static_root: Option<String> = row.get::<_, Option<String>>(15).unwrap_or(None);
     let socket_path: Option<String> = row.get::<_, Option<String>>(16).unwrap_or(None);
+    let app_root: Option<String> = row.get::<_, Option<String>>(25).unwrap_or(None);
 
-    let target = if let Some(root) = static_root {
+    let id_str: String = row.get(0)?;
+    let target = if let Some(root) = app_root {
+        BackendTarget::Managed {
+            app_id: id_str.clone(),
+            root,
+        }
+    } else if let Some(root) = static_root {
         BackendTarget::StaticDir { root }
     } else if let Some(path) = socket_path {
         BackendTarget::UnixSocket { path }
@@ -862,7 +926,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let full_domain = domain_from_db(&domain_prefix, suffix);
 
     Ok(AppSpec {
-        id: AppId(row.get(0)?),
+        id: AppId(id_str),
         name: row.get(1)?,
         kind,
         domain: DomainName(full_domain),

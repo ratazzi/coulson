@@ -2,6 +2,7 @@ mod config;
 mod control;
 mod domain;
 mod mdns;
+mod process;
 mod proxy;
 mod runtime;
 mod scanner;
@@ -24,6 +25,7 @@ use tracing::{debug, error, info};
 
 use crate::config::BridgeheadConfig;
 use crate::domain::BackendTarget;
+use crate::process::ProcessManagerHandle;
 use crate::store::AppRepository;
 
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
@@ -53,6 +55,7 @@ pub struct SharedState {
     pub named_tunnel: Arc<Mutex<Option<tunnel::NamedTunnelHandle>>>,
     pub app_tunnels: tunnel::AppNamedTunnelManager,
     pub listen_http: std::net::SocketAddr,
+    pub process_manager: ProcessManagerHandle,
 }
 
 impl SharedState {
@@ -180,6 +183,8 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
     store.migrate_domain_to_prefix()?;
 
     let (route_tx, _rx) = broadcast::channel(32);
+    let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
+    let process_manager = process::new_process_manager(idle_timeout);
     Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
@@ -192,6 +197,7 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         named_tunnel: Arc::new(Mutex::new(None)),
         app_tunnels: tunnel::new_app_tunnel_manager(),
         listen_http: cfg.listen_http,
+        process_manager,
     })
 }
 
@@ -366,8 +372,9 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
 
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
+    let proxy_pm = state.process_manager.clone();
     let proxy_task = tokio::spawn(async move {
-        if let Err(err) = proxy::run_proxy(proxy_addr, proxy_state).await {
+        if let Err(err) = proxy::run_proxy(proxy_addr, proxy_state, proxy_pm).await {
             error!(error = %err, "proxy exited with error");
         }
     });
@@ -476,10 +483,26 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         }
     });
 
+    let reaper_pm = state.process_manager.clone();
+    let reaper_task = tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(30)).await;
+            let mut pm = reaper_pm.lock().await;
+            let reaped = pm.reap_idle();
+            if reaped > 0 {
+                info!(reaped, "reaped idle managed processes");
+            }
+        }
+    });
+
     info!("bridgeheadd started");
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
 
+    {
+        let mut pm = state.process_manager.lock().await;
+        pm.shutdown_all();
+    }
     tunnel::shutdown_all(&state.tunnels);
     tunnel::shutdown_all_app_tunnels(&state.app_tunnels);
     if let Some(handle) = state.named_tunnel.lock().take() {
@@ -493,6 +516,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     watch_task.abort();
     dedicated_task.abort();
     mdns_task.abort();
+    reaper_task.abort();
 
     Ok(())
 }

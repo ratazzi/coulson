@@ -79,6 +79,7 @@ pub enum BackendTarget {
     Tcp { host: String, port: u16 },
     UnixSocket { path: String },
     StaticDir { root: String },
+    Managed { app_id: String, root: String },
 }
 
 impl BackendTarget {
@@ -87,6 +88,7 @@ impl BackendTarget {
             Self::Tcp { host, port } => format!("http://{host}:{port}"),
             Self::UnixSocket { path } => format!("unix://{path}"),
             Self::StaticDir { root } => format!("file://{root}"),
+            Self::Managed { root, .. } => format!("managed://{root}"),
         }
     }
 }
