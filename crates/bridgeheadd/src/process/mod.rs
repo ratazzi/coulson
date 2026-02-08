@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context};
 use tokio::process::{Child, Command};
 use tracing::{debug, info, warn};
+
+const SOCKETS_DIR_RAW: &str = "/tmp/bridgehead/managed";
 
 pub type ProcessManagerHandle = std::sync::Arc<tokio::sync::Mutex<ProcessManager>>;
 
@@ -20,7 +21,7 @@ pub struct ProcessManager {
 
 struct ManagedProcess {
     child: Child,
-    port: u16,
+    socket_path: PathBuf,
     last_active: Instant,
 }
 
@@ -32,32 +33,41 @@ impl ProcessManager {
         }
     }
 
-    /// Returns the port for the managed app, starting the process if needed.
-    pub async fn ensure_running(&mut self, app_id: &str, root: &Path) -> anyhow::Result<u16> {
+    /// Returns the UDS path for the managed app, starting the process if needed.
+    pub async fn ensure_running(
+        &mut self,
+        app_id: &str,
+        root: &Path,
+    ) -> anyhow::Result<String> {
         // Check if already running and alive
         if let Some(proc) = self.processes.get_mut(app_id) {
             match proc.child.try_wait() {
                 Ok(None) => {
-                    // Still running
                     proc.last_active = Instant::now();
-                    return Ok(proc.port);
+                    return Ok(proc.socket_path.to_string_lossy().to_string());
                 }
                 _ => {
-                    // Process exited, remove and re-spawn
                     info!(app_id, "managed process exited, will restart");
-                    self.processes.remove(app_id);
+                    let removed = self.processes.remove(app_id).unwrap();
+                    cleanup_socket(&removed.socket_path);
                 }
             }
         }
 
-        // Spawn new process
-        let port = allocate_port()?;
+        std::fs::create_dir_all(SOCKETS_DIR_RAW)
+            .with_context(|| format!("failed to create {SOCKETS_DIR_RAW}"))?;
+        // On macOS /tmp → /private/tmp; canonicalize so pingora's peer address matches.
+        let sockets_dir = std::fs::canonicalize(SOCKETS_DIR_RAW)
+            .unwrap_or_else(|_| PathBuf::from(SOCKETS_DIR_RAW));
+        let socket_path = sockets_dir.join(format!("{app_id}.sock"));
+        cleanup_socket(&socket_path);
+
         let module = detect_module(root)?;
         let granian = find_granian(root)?;
 
         info!(
             app_id,
-            port,
+            socket = %socket_path.display(),
             module = %module,
             granian = %granian.display(),
             root = %root.display(),
@@ -66,10 +76,8 @@ impl ProcessManager {
 
         let child = Command::new(&granian)
             .arg(&module)
-            .arg("--host")
-            .arg("127.0.0.1")
-            .arg("--port")
-            .arg(port.to_string())
+            .arg("--uds")
+            .arg(&socket_path)
             .arg("--interface")
             .arg("asgi")
             .current_dir(root)
@@ -79,18 +87,19 @@ impl ProcessManager {
             .spawn()
             .with_context(|| format!("failed to spawn granian for {app_id}"))?;
 
-        wait_for_health(port, Duration::from_secs(30)).await?;
+        wait_for_uds_health(&socket_path, Duration::from_secs(30)).await?;
 
+        let path_str = socket_path.to_string_lossy().to_string();
         self.processes.insert(
             app_id.to_string(),
             ManagedProcess {
                 child,
-                port,
+                socket_path,
                 last_active: Instant::now(),
             },
         );
 
-        Ok(port)
+        Ok(path_str)
     }
 
     pub fn mark_active(&mut self, app_id: &str) {
@@ -113,9 +122,13 @@ impl ProcessManager {
 
         for app_id in &to_remove {
             if let Some(mut proc) = self.processes.remove(app_id) {
-                info!(app_id, port = proc.port, "reaping idle managed process");
-                // kill_on_drop will handle cleanup, but let's be explicit
+                info!(
+                    app_id,
+                    socket = %proc.socket_path.display(),
+                    "reaping idle managed process"
+                );
                 let _ = proc.child.start_kill();
+                cleanup_socket(&proc.socket_path);
             }
         }
 
@@ -125,23 +138,24 @@ impl ProcessManager {
     /// Kill all managed processes (called on daemon shutdown).
     pub fn shutdown_all(&mut self) {
         for (app_id, mut proc) in self.processes.drain() {
-            info!(app_id, port = proc.port, "shutting down managed process");
+            info!(
+                app_id,
+                socket = %proc.socket_path.display(),
+                "shutting down managed process"
+            );
             let _ = proc.child.start_kill();
+            cleanup_socket(&proc.socket_path);
         }
     }
 }
 
-fn allocate_port() -> anyhow::Result<u16> {
-    let listener = TcpListener::bind("127.0.0.1:0").context("failed to bind ephemeral port")?;
-    let port = listener.local_addr()?.port();
-    drop(listener);
-    Ok(port)
+fn cleanup_socket(path: &Path) {
+    let _ = std::fs::remove_file(path);
 }
 
 /// Detect the ASGI module to pass to granian.
 /// Priority: bridgehead.json `module` field > app.py > main.py
 fn detect_module(root: &Path) -> anyhow::Result<String> {
-    // Check bridgehead.json for explicit module
     let manifest_path = root.join("bridgehead.json");
     if manifest_path.exists() {
         if let Ok(raw) = std::fs::read_to_string(&manifest_path) {
@@ -168,7 +182,6 @@ fn detect_module(root: &Path) -> anyhow::Result<String> {
 
 /// Find granian binary: .venv/bin/ → venv/bin/ → PATH
 fn find_granian(root: &Path) -> anyhow::Result<PathBuf> {
-    // Check bridgehead.json for explicit command
     let manifest_path = root.join("bridgehead.json");
     if manifest_path.exists() {
         if let Ok(raw) = std::fs::read_to_string(&manifest_path) {
@@ -194,7 +207,6 @@ fn find_granian(root: &Path) -> anyhow::Result<PathBuf> {
         }
     }
 
-    // Fall back to PATH
     if let Ok(output) = std::process::Command::new("which")
         .arg("granian")
         .output()
@@ -213,19 +225,21 @@ fn find_granian(root: &Path) -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Poll TCP connect until the port accepts connections or timeout.
-async fn wait_for_health(port: u16, timeout: Duration) -> anyhow::Result<()> {
+/// Poll Unix socket connect until it accepts connections or timeout.
+async fn wait_for_uds_health(path: &Path, timeout: Duration) -> anyhow::Result<()> {
     let start = Instant::now();
-    let addr = format!("127.0.0.1:{port}");
     loop {
-        match tokio::net::TcpStream::connect(&addr).await {
+        match tokio::net::UnixStream::connect(path).await {
             Ok(_) => {
-                debug!(port, "managed process health check passed");
+                debug!(socket = %path.display(), "managed process health check passed");
                 return Ok(());
             }
             Err(_) => {
                 if start.elapsed() > timeout {
-                    bail!("managed process on port {port} failed to start within {timeout:?}");
+                    bail!(
+                        "managed process at {} failed to start within {timeout:?}",
+                        path.display()
+                    );
                 }
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }

@@ -97,16 +97,13 @@ impl ProxyHttp for BridgeProxy {
         let resolved_target = if let BackendTarget::Managed { ref app_id, ref root } = route.target
         {
             let root_path = std::path::PathBuf::from(root);
-            let port = {
+            let socket_path = {
                 let mut pm = self.process_manager.lock().await;
                 pm.ensure_running(app_id, &root_path)
                     .await
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
-            BackendTarget::Tcp {
-                host: "127.0.0.1".to_string(),
-                port,
-            }
+            BackendTarget::UnixSocket { path: socket_path }
         } else {
             route.target.clone()
         };
