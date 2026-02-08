@@ -6,14 +6,35 @@ final class BridgeheadViewModel: ObservableObject {
     @Published var apps: [AppRecord] = []
     @Published var warnings: ScanWarningsFile?
     @Published var isHealthy = false
+    @Published var namedTunnelDomain: String?
 
     private let client: UDSControlClient
+    let domainSuffix: String
+    let proxyPort: Int?
     private var autoRefreshTask: Task<Void, Never>?
 
     init() {
         let socket = ProcessInfo.processInfo.environment["BRIDGEHEAD_CONTROL_SOCKET"]
             ?? "/tmp/bridgehead/bridgeheadd.sock"
         self.client = UDSControlClient(socketPath: socket)
+        self.domainSuffix = ProcessInfo.processInfo.environment["BRIDGEHEAD_DOMAIN_SUFFIX"]
+            ?? "bridgehead.local"
+        if let listen = ProcessInfo.processInfo.environment["BRIDGEHEAD_LISTEN_HTTP"],
+           let portStr = listen.split(separator: ":").last,
+           let port = Int(portStr) {
+            self.proxyPort = port
+        } else {
+            self.proxyPort = 80
+        }
+    }
+
+    func tunnelURL(for app: AppRecord) -> String? {
+        guard app.tunnelExposed, let tunnelDomain = namedTunnelDomain else { return nil }
+        let dotSuffix = ".\(domainSuffix)"
+        let prefix = app.domain.hasSuffix(dotSuffix)
+            ? String(app.domain.dropLast(dotSuffix.count))
+            : app.domain
+        return "https://\(prefix).\(tunnelDomain)"
     }
 
     // MARK: - Computed
@@ -65,7 +86,8 @@ final class BridgeheadViewModel: ObservableObject {
         async let a: Void = refreshApps()
         async let w: Void = refreshWarnings()
         async let h: Void = refreshHealth()
-        _ = await (a, w, h)
+        async let t: Void = refreshNamedTunnel()
+        _ = await (a, w, h, t)
     }
 
     func refreshApps() async {
@@ -99,12 +121,35 @@ final class BridgeheadViewModel: ObservableObject {
         }
     }
 
+    func refreshNamedTunnel() async {
+        do {
+            let response = try client.request(method: "named_tunnel.status", params: [:])
+            if let domain = response["domain"] as? String {
+                namedTunnelDomain = domain
+            } else {
+                namedTunnelDomain = nil
+            }
+        } catch {
+            namedTunnelDomain = nil
+        }
+    }
+
     // MARK: - Actions
 
     func setEnabled(app: AppRecord, enabled: Bool) async {
         let method = enabled ? "app.start" : "app.stop"
         do {
             _ = try client.request(method: method, params: ["app_id": app.id])
+            await refreshAll()
+        } catch {}
+    }
+
+    func setTunnelExposed(app: AppRecord, exposed: Bool) async {
+        do {
+            _ = try client.request(method: "app.update", params: [
+                "app_id": app.id,
+                "tunnel_exposed": exposed,
+            ])
             await refreshAll()
         } catch {}
     }

@@ -13,6 +13,7 @@ struct AppDetailView: View {
                 statusBanner
                 urlsSection
                 infoSection
+                tunnelSection
                 warningsSection
                 dangerSection
             }
@@ -71,9 +72,9 @@ struct AppDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("URLs")
             VStack(spacing: 0) {
-                ForEach(Array(app.dashboardURLs.enumerated()), id: \.offset) { index, url in
+                ForEach(Array(app.dashboardURLs(proxyPort: vm.proxyPort).enumerated()), id: \.offset) { index, url in
                     urlRow(url)
-                    if index < app.dashboardURLs.count - 1 {
+                    if index < app.dashboardURLs(proxyPort: vm.proxyPort).count - 1 {
                         Divider().padding(.leading, 12)
                     }
                 }
@@ -85,11 +86,27 @@ struct AppDetailView: View {
 
     private func urlRow(_ url: String) -> some View {
         HStack {
-            Text(url)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.blue)
-                .lineLimit(1)
-                .truncationMode(.middle)
+            if let u = URL(string: url) {
+                Button {
+                    NSWorkspace.shared.open(u)
+                } label: {
+                    Text(url)
+                        .font(.system(size: 13, design: .monospaced))
+                        .foregroundStyle(.blue)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                .buttonStyle(.plain)
+                .onHover { inside in
+                    if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
+            } else {
+                Text(url)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.blue)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
 
             Spacer(minLength: 8)
 
@@ -103,18 +120,6 @@ struct AppDetailView: View {
             }
             .buttonStyle(.plain)
             .help("Copy URL")
-
-            if let u = URL(string: url) {
-                Button {
-                    NSWorkspace.shared.open(u)
-                } label: {
-                    Image(systemName: "arrow.up.right.square")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Open in browser")
-            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
@@ -126,7 +131,7 @@ struct AppDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("Info")
             VStack(spacing: 0) {
-                infoRow("Kind", app.kind)
+                infoRow("Kind", app.kindLabel)
                 Divider().padding(.leading, 12)
                 infoRow("Port", app.target.port.map { "\($0)" } ?? "—")
                 Divider().padding(.leading, 12)
@@ -141,6 +146,46 @@ struct AppDetailView: View {
             .background(.quaternary.opacity(0.3))
             .clipShape(RoundedRectangle(cornerRadius: 8))
         }
+    }
+
+    // MARK: - Tunnel
+
+    private var tunnelSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Tunnel")
+            VStack(spacing: 0) {
+                HStack {
+                    Text("Expose via tunnel")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { app.tunnelExposed },
+                        set: { exposed in
+                            Task { await vm.setTunnelExposed(app: app, exposed: exposed) }
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                if let url = vm.tunnelURL(for: app) {
+                    Divider().padding(.leading, 12)
+                    tunnelURLRow(url)
+                } else if let url = app.tunnelUrl {
+                    Divider().padding(.leading, 12)
+                    tunnelURLRow(url)
+                }
+            }
+            .background(.quaternary.opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func tunnelURLRow(_ url: String) -> some View {
+        urlRow(url)
     }
 
     // MARK: - Warnings

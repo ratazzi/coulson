@@ -8,12 +8,25 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     let pathPrefix: String?
     let target: Target
     let timeoutMs: UInt64?
+    let tunnelExposed: Bool
+    let tunnelUrl: String?
     let enabled: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, domain, target, enabled
         case pathPrefix = "path_prefix"
         case timeoutMs = "timeout_ms"
+        case tunnelExposed = "tunnel_exposed"
+        case tunnelUrl = "tunnel_url"
+    }
+
+    var kindLabel: String {
+        switch target.type {
+        case "tcp": return "proxy"
+        case "unix_socket": return "unix socket"
+        case "static_dir": return "static"
+        default: return kind
+        }
     }
 
     var targetLabel: String {
@@ -29,19 +42,17 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         }
     }
 
-    var primaryURL: String {
-        "http://\(domain)/"
+    func primaryURL(proxyPort: Int?) -> String {
+        let portSuffix = (proxyPort != nil && proxyPort != 80) ? ":\(proxyPort!)" : ""
+        return "http://\(domain)\(portSuffix)/"
     }
 
-    var dashboardURLs: [String] {
-        var out = ["http://\(domain)/"]
+    func dashboardURLs(proxyPort: Int?) -> [String] {
+        var out = [primaryURL(proxyPort: proxyPort)]
         if let host = target.host, let port = target.port {
             out.append("http://\(host):\(port)/")
         }
-        if domain != "localhost" {
-            out.append("http://www.\(domain)/")
-        }
-        return Array(NSOrderedSet(array: out)) as? [String] ?? out
+        return out
     }
 }
 

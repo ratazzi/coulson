@@ -32,7 +32,7 @@ struct MenuPanel: View {
                 Divider()
                 ForEach(vm.sortedApps.prefix(5)) { app in
                     Button {
-                        if let url = URL(string: app.primaryURL) {
+                        if let url = URL(string: app.primaryURL(proxyPort: vm.proxyPort)) {
                             NSWorkspace.shared.open(url)
                         }
                     } label: {

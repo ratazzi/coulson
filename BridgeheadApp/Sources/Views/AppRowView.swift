@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 
 struct AppRowView: View {
+    @EnvironmentObject var vm: BridgeheadViewModel
     let app: AppRecord
     let onToggle: (Bool) -> Void
     @State private var isHovered = false
@@ -46,7 +47,7 @@ struct AppRowView: View {
 
             // Open in browser
             Button {
-                if let url = URL(string: app.primaryURL) {
+                if let url = URL(string: app.primaryURL(proxyPort: vm.proxyPort)) {
                     NSWorkspace.shared.open(url)
                 }
             } label: {
