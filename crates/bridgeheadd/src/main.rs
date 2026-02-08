@@ -326,6 +326,44 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         }
     }
 
+    // Auto-reconnect quick tunnels
+    {
+        match state.store.list_quick_tunnels() {
+            Ok(apps) => {
+                for app in apps {
+                    let port = match &app.target {
+                        BackendTarget::Tcp { port, .. } => *port,
+                        _ => continue,
+                    };
+                    info!(
+                        app_id = %app.id.0,
+                        port,
+                        "auto-reconnecting quick tunnel"
+                    );
+                    match tunnel::start_quick_tunnel(
+                        state.tunnels.clone(),
+                        app.id.0.clone(),
+                        port,
+                    )
+                    .await
+                    {
+                        Ok(hostname) => {
+                            let url = format!("https://{hostname}");
+                            let _ = state.store.update_tunnel_url(&app.id.0, Some(&url));
+                            info!(app_id = %app.id.0, tunnel_url = %url, "quick tunnel auto-reconnected");
+                        }
+                        Err(err) => {
+                            error!(error = %err, app_id = %app.id.0, "failed to auto-reconnect quick tunnel");
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!(error = %err, "failed to list quick tunnels for auto-reconnect");
+            }
+        }
+    }
+
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
     let proxy_task = tokio::spawn(async move {

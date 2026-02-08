@@ -137,6 +137,10 @@ struct UpdateSettingsParams {
     spa_rewrite: Option<bool>,
     listen_port: Option<Option<u16>>,
     tunnel_exposed: Option<bool>,
+    tunnel_mode: Option<String>,
+    app_tunnel_domain: Option<String>,
+    #[serde(default)]
+    app_tunnel_auto_dns: Option<bool>,
 }
 
 pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
@@ -413,10 +417,228 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());
                     }
-                    Ok(json!({ "updated": true }))
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             }
+
+            // Handle tunnel_mode change
+            if let Some(new_mode) = &params.tunnel_mode {
+                if !matches!(new_mode.as_str(), "none" | "quick" | "named") {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(format!(
+                            "invalid tunnel_mode: {new_mode}, must be none/quick/named"
+                        )),
+                    );
+                }
+
+                let app = match state.store.get_by_id(&params.app_id) {
+                    Ok(Some(app)) => app,
+                    Ok(None) => {
+                        return render_err(req.request_id, ControlError::NotFound);
+                    }
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+
+                let old_mode = &app.tunnel_mode;
+
+                // Check if named mode has required params
+                if new_mode == "named" && params.app_tunnel_domain.is_none() && app.app_tunnel_domain.is_none() {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "app_tunnel_domain is required for named tunnel mode".to_string(),
+                        ),
+                    );
+                }
+
+                // Check if named mode needs re-setup (domain changed)
+                let named_domain_changed = new_mode == "named"
+                    && old_mode == "named"
+                    && params.app_tunnel_domain.is_some()
+                    && params.app_tunnel_domain.as_deref() != app.app_tunnel_domain.as_deref();
+
+                if old_mode != new_mode || named_domain_changed {
+                    let local_port = match &app.target {
+                        crate::domain::BackendTarget::Tcp { port, .. } => *port,
+                        _ => {
+                            return render_err(
+                                req.request_id,
+                                ControlError::InvalidParams(
+                                    "tunnel only supports TCP backend targets".to_string(),
+                                ),
+                            );
+                        }
+                    };
+
+                    // Teardown old mode
+                    match old_mode.as_str() {
+                        "quick" => {
+                            let _ = tunnel::stop_tunnel(&state.tunnels, &params.app_id);
+                            let _ = state.store.update_tunnel_url(&params.app_id, None);
+                            let _ = state.store.set_tunnel_mode(&params.app_id, "none");
+                        }
+                        "named" => {
+                            // Teardown named tunnel (inline logic from tunnel.app_teardown)
+                            let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
+
+                            let api_token = state.store.get_setting("cf.api_token").ok().flatten();
+                            let account_id = state.store.get_setting("cf.account_id").ok().flatten();
+
+                            if let (Some(api_token), Some(account_id)) = (&api_token, &account_id) {
+                                if let Some(dns_id) = &app.app_tunnel_dns_id {
+                                    if let Some(domain) = &app.app_tunnel_domain {
+                                        if let Ok(zone_id) = tunnel::named::find_zone_id(api_token, domain).await {
+                                            let _ = tunnel::named::delete_dns_record(api_token, &zone_id, dns_id).await;
+                                        }
+                                    }
+                                }
+                                if let Some(tunnel_id) = &app.app_tunnel_id {
+                                    let _ = tunnel::named::delete_named_tunnel(api_token, account_id, tunnel_id).await;
+                                }
+                            }
+
+                            let _ = state.store.update_app_tunnel(&params.app_id, None, None, None, None);
+                            let _ = state.store.set_tunnel_mode(&params.app_id, "none");
+                        }
+                        _ => {}
+                    }
+
+                    // Setup new mode
+                    match new_mode.as_str() {
+                        "quick" => {
+                            match tunnel::start_quick_tunnel(
+                                state.tunnels.clone(),
+                                params.app_id.clone(),
+                                local_port,
+                            )
+                            .await
+                            {
+                                Ok(hostname) => {
+                                    let url = format!("https://{hostname}");
+                                    let _ = state.store.update_tunnel_url(&params.app_id, Some(&url));
+                                    let _ = state.store.set_tunnel_mode(&params.app_id, "quick");
+                                    return ok_response(
+                                        req.request_id,
+                                        json!({ "updated": true, "tunnel_mode": "quick", "tunnel_url": url }),
+                                    );
+                                }
+                                Err(e) => return internal_error(req.request_id, e.to_string()),
+                            }
+                        }
+                        "named" => {
+                            let tunnel_domain = params
+                                .app_tunnel_domain
+                                .as_deref()
+                                .or(app.app_tunnel_domain.as_deref())
+                                .unwrap()
+                                .to_string();
+                            let auto_dns = params.app_tunnel_auto_dns.unwrap_or(false);
+
+                            // Check CF credentials
+                            let api_token = match state.store.get_setting("cf.api_token") {
+                                Ok(Some(v)) => v,
+                                _ => {
+                                    return render_err(
+                                        req.request_id,
+                                        ControlError::InvalidParams(
+                                            "CF credentials not configured, run tunnel.configure first".to_string(),
+                                        ),
+                                    );
+                                }
+                            };
+                            let account_id = match state.store.get_setting("cf.account_id") {
+                                Ok(Some(v)) => v,
+                                _ => {
+                                    return render_err(
+                                        req.request_id,
+                                        ControlError::InvalidParams(
+                                            "cf.account_id not configured".to_string(),
+                                        ),
+                                    );
+                                }
+                            };
+
+                            let tunnel_name = format!("bridgehead-{}", params.app_id);
+                            let (credentials, tunnel_id) =
+                                match tunnel::named::create_named_tunnel(&api_token, &account_id, &tunnel_name).await {
+                                    Ok(v) => v,
+                                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                                };
+
+                            let mut dns_record_id: Option<String> = None;
+                            let mut zone_id_used: Option<String> = None;
+                            if auto_dns {
+                                match tunnel::named::find_zone_id(&api_token, &tunnel_domain).await {
+                                    Ok(zid) => {
+                                        zone_id_used = Some(zid.clone());
+                                        match tunnel::named::create_dns_cname(&api_token, &zid, &tunnel_domain, &tunnel_id).await {
+                                            Ok(rid) => dns_record_id = Some(rid),
+                                            Err(e) => {
+                                                let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
+                                                return internal_error(req.request_id, format!("failed to create DNS CNAME: {e}"));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
+                                        return internal_error(req.request_id, format!("failed to find zone for domain: {e}"));
+                                    }
+                                }
+                            }
+
+                            if let Err(e) = tunnel::start_app_named_tunnel(
+                                state.app_tunnels.clone(),
+                                params.app_id.clone(),
+                                credentials.clone(),
+                                tunnel_domain.clone(),
+                                local_port,
+                            )
+                            .await
+                            {
+                                if let (Some(rid), Some(zid)) = (&dns_record_id, &zone_id_used) {
+                                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid).await;
+                                }
+                                let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
+                                return internal_error(req.request_id, e.to_string());
+                            }
+
+                            let creds_json = match serde_json::to_string(&credentials) {
+                                Ok(v) => v,
+                                Err(e) => return internal_error(req.request_id, e.to_string()),
+                            };
+                            let _ = state.store.update_app_tunnel(
+                                &params.app_id,
+                                Some(&tunnel_id),
+                                Some(&tunnel_domain),
+                                dns_record_id.as_deref(),
+                                Some(&creds_json),
+                            );
+                            let _ = state.store.set_tunnel_mode(&params.app_id, "named");
+
+                            return ok_response(
+                                req.request_id,
+                                json!({
+                                    "updated": true,
+                                    "tunnel_mode": "named",
+                                    "tunnel_id": tunnel_id,
+                                    "tunnel_domain": tunnel_domain,
+                                    "dns_record_id": dns_record_id,
+                                }),
+                            );
+                        }
+                        // "none" — teardown already done above
+                        _ => {
+                            return ok_response(
+                                req.request_id,
+                                json!({ "updated": true, "tunnel_mode": "none" }),
+                            );
+                        }
+                    }
+                }
+            }
+
+            Ok(json!({ "updated": true }))
         }
         "app.delete" => {
             let params: AppIdParams = match serde_json::from_value(req.params) {
@@ -541,6 +763,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     if let Err(e) = state.store.update_tunnel_url(&params.app_id, Some(&url)) {
                         return internal_error(req.request_id, e.to_string());
                     }
+                    let _ = state.store.set_tunnel_mode(&params.app_id, "quick");
                     Ok(json!({ "tunnel_url": url, "hostname": hostname }))
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
@@ -559,6 +782,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
                         return internal_error(req.request_id, e.to_string());
                     }
+                    let _ = state.store.set_tunnel_mode(&params.app_id, "none");
                     Ok(json!({ "stopped": true }))
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
@@ -999,6 +1223,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             ) {
                 return internal_error(req.request_id, e.to_string());
             }
+            let _ = state.store.set_tunnel_mode(&params.app_id, "named");
 
             let cname_target = format!("{tunnel_id}.cfargotunnel.com");
             Ok(json!({
@@ -1091,6 +1316,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             {
                 return internal_error(req.request_id, e.to_string());
             }
+            let _ = state.store.set_tunnel_mode(&params.app_id, "none");
 
             Ok(json!({ "torn_down": true }))
         }
@@ -1155,6 +1381,15 @@ fn render_err(request_id: String, err: ControlError) -> ResponseEnvelope {
             message,
             details: None,
         }),
+    }
+}
+
+fn ok_response(request_id: String, result: serde_json::Value) -> ResponseEnvelope {
+    ResponseEnvelope {
+        request_id,
+        ok: true,
+        result: Some(result),
+        error: None,
     }
 }
 

@@ -105,6 +105,10 @@ impl AppRepository {
             &conn,
             "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN tunnel_mode TEXT NOT NULL DEFAULT 'none'",
+        )?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_id TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT")?;
@@ -162,6 +166,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            tunnel_mode: "none".to_string(),
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -232,6 +237,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            tunnel_mode: "none".to_string(),
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -301,6 +307,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            tunnel_mode: "none".to_string(),
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -698,10 +705,31 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
+    pub fn set_tunnel_mode(&self, app_id: &str, mode: &str) -> anyhow::Result<bool> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE apps SET tunnel_mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![mode, now, app_id],
+        )?;
+        Ok(changed > 0)
+    }
+
     pub fn list_app_tunnels(&self) -> anyhow::Result<Vec<AppSpec>> {
         let conn = self.conn.lock();
         let sql = format!(
-            "SELECT {} FROM apps WHERE app_tunnel_id IS NOT NULL AND enabled = 1",
+            "SELECT {} FROM apps WHERE tunnel_mode = 'named' AND enabled = 1",
+            COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        Self::collect_rows(&mut rows, &self.domain_suffix)
+    }
+
+    pub fn list_quick_tunnels(&self) -> anyhow::Result<Vec<AppSpec>> {
+        let conn = self.conn.lock();
+        let sql = format!(
+            "SELECT {} FROM apps WHERE tunnel_mode = 'quick' AND enabled = 1",
             COLS
         );
         let mut stmt = conn.prepare(&sql)?;
@@ -802,7 +830,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -856,10 +884,11 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .map(|v| v as u16),
         tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
         tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
-        app_tunnel_id: row.get::<_, Option<String>>(20).unwrap_or(None),
-        app_tunnel_domain: row.get::<_, Option<String>>(21).unwrap_or(None),
-        app_tunnel_dns_id: row.get::<_, Option<String>>(22).unwrap_or(None),
-        app_tunnel_creds: row.get::<_, Option<String>>(23).unwrap_or(None),
+        tunnel_mode: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
+        app_tunnel_id: row.get::<_, Option<String>>(21).unwrap_or(None),
+        app_tunnel_domain: row.get::<_, Option<String>>(22).unwrap_or(None),
+        app_tunnel_dns_id: row.get::<_, Option<String>>(23).unwrap_or(None),
+        app_tunnel_creds: row.get::<_, Option<String>>(24).unwrap_or(None),
     })
 }
 

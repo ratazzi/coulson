@@ -107,6 +107,7 @@ pub struct AppSpec {
     pub listen_port: Option<u16>,
     pub tunnel_url: Option<String>,
     pub tunnel_exposed: bool,
+    pub tunnel_mode: String,
     pub app_tunnel_id: Option<String>,
     pub app_tunnel_domain: Option<String>,
     pub app_tunnel_dns_id: Option<String>,
