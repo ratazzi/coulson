@@ -5,7 +5,7 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::domain::DomainName;
 use crate::scanner;
@@ -158,7 +158,13 @@ pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> any
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_client(stream, state).await {
-                error!(error = %err, "control client failed");
+                let is_broken_pipe = err.downcast_ref::<std::io::Error>()
+                    .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe);
+                if is_broken_pipe {
+                    debug!(error = %err, "control client disconnected");
+                } else {
+                    error!(error = %err, "control client failed");
+                }
             }
         });
     }
