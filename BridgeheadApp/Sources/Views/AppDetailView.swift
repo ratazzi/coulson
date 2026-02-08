@@ -159,6 +159,14 @@ struct AppDetailView: View {
                 }
                 Divider().padding(.leading, 12)
                 infoRow("Timeout", app.timeoutMs.map { "\($0) ms" } ?? "default")
+                if let root = app.target.root {
+                    Divider().padding(.leading, 12)
+                    pathRow("Root", root)
+                }
+                if app.target.type == "managed" {
+                    Divider().padding(.leading, 12)
+                    pathRow("Log", "/tmp/bridgehead/managed/\(app.id).log")
+                }
             }
             .background(.quaternary.opacity(0.3))
             .clipShape(RoundedRectangle(cornerRadius: 8))
@@ -429,6 +437,42 @@ struct AppDetailView: View {
             .foregroundStyle(.secondary)
             .textCase(.uppercase)
             .padding(.leading, 2)
+    }
+
+    private func pathRow(_ key: String, _ path: String) -> some View {
+        HStack {
+            Text(key)
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            Button {
+                let url = URL(fileURLWithPath: path)
+                NSWorkspace.shared.activateFileViewerSelecting([url])
+            } label: {
+                Text(path)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.blue)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .buttonStyle(.plain)
+            .onHover { inside in
+                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            }
+            Spacer(minLength: 8)
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(path, forType: .string)
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Copy path")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
     }
 
     private func infoRow(_ key: String, _ value: String) -> some View {
