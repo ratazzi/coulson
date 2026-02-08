@@ -6,6 +6,9 @@ struct AppDetailView: View {
     let app: AppRecord
     @Binding var path: NavigationPath
     @State private var showDeleteConfirm = false
+    @State private var customTunnelTokenInput = ""
+    @State private var customTunnelDomainInput = ""
+    @State private var showCustomForm = false
 
     var body: some View {
         ScrollView {
@@ -44,6 +47,11 @@ struct AppDetailView: View {
             Button("OK") { vm.errorMessage = nil }
         } message: {
             Text(vm.errorMessage ?? "")
+        }
+        .onChange(of: app.tunnelMode) { newMode in
+            if newMode != "named" {
+                showCustomForm = false
+            }
         }
     }
 
@@ -222,48 +230,42 @@ struct AppDetailView: View {
 
     // MARK: - Tunnel
 
+    // Picker visual state: stays on "named" while custom form is open
+    private var pickerSelection: String {
+        if showCustomForm { return "named" }
+        return app.tunnelMode
+    }
+
     private var tunnelSection: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("Tunnel")
             VStack(spacing: 0) {
-                // Tunnel mode picker
-                HStack {
-                    Text("Mode")
-                        .font(.system(size: 13))
-                    Spacer()
-                    Picker("", selection: Binding(
-                        get: { app.tunnelMode },
-                        set: { mode in
-                            Task { await vm.updateApp(app: app, params: ["tunnel_mode": mode]) }
-                        }
-                    )) {
-                        Text("None").tag("none")
-                        Text("Quick").tag("quick")
-                        Text("Named").tag("named")
+                tunnelURLDisplay
+                tunnelModePicker
+
+                // Global mode hint when tunnel not connected
+                if app.tunnelMode == "global" && !vm.globalTunnelConnected {
+                    Divider().padding(.leading, 12)
+                    HStack {
+                        Text("Global tunnel not connected. Set up in Settings.")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                        Spacer()
                     }
-                    .labelsHidden()
-                    .pickerStyle(.segmented)
-                    .frame(width: 200)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-
-                // Per-app tunnel URL (quick/named) takes priority
-                if app.tunnelMode == "quick", let url = app.tunnelUrl {
-                    Divider().padding(.leading, 12)
-                    tunnelURLRow(url)
-                } else if app.tunnelMode == "named", let domain = app.appTunnelDomain {
-                    Divider().padding(.leading, 12)
-                    tunnelURLRow("https://\(domain)")
-                } else if let url = vm.tunnelURL(for: app) {
-                    // Global named tunnel URL
-                    Divider().padding(.leading, 12)
-                    tunnelURLRow(url)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
                 }
 
-                if let domain = app.appTunnelDomain {
+                // Custom tunnel form
+                if showCustomForm {
                     Divider().padding(.leading, 12)
-                    infoRow("Tunnel domain", domain)
+                    customTunnelForm
+                }
+
+                // Existing custom domain info
+                if !showCustomForm && app.tunnelMode == "named", let domain = app.appTunnelDomain {
+                    Divider().padding(.leading, 12)
+                    infoRow("Domain", domain)
                 }
             }
             .background(.quaternary.opacity(0.3))
@@ -271,8 +273,94 @@ struct AppDetailView: View {
         }
     }
 
-    private func tunnelURLRow(_ url: String) -> some View {
-        urlRow(url)
+    @ViewBuilder
+    private var tunnelURLDisplay: some View {
+        if !showCustomForm {
+            if app.tunnelMode == "global", vm.globalTunnelConnected,
+               let url = vm.globalTunnelURL(for: app) {
+                urlRow(url)
+                Divider().padding(.leading, 12)
+            } else if app.tunnelMode == "quick", let url = app.tunnelUrl {
+                urlRow(url)
+                Divider().padding(.leading, 12)
+            } else if app.tunnelMode == "named", let domain = app.appTunnelDomain {
+                urlRow("https://\(domain)")
+                Divider().padding(.leading, 12)
+            }
+        }
+    }
+
+    private var tunnelModePicker: some View {
+        HStack {
+            Text("Mode")
+                .font(.system(size: 13))
+            Spacer()
+            Picker("", selection: Binding(
+                get: { pickerSelection },
+                set: { mode in
+                    if mode == "named" {
+                        showCustomForm = true
+                        customTunnelTokenInput = ""
+                        customTunnelDomainInput = ""
+                    } else {
+                        showCustomForm = false
+                        Task { await vm.updateApp(app: app, params: ["tunnel_mode": mode]) }
+                    }
+                }
+            )) {
+                Text("Off").tag("none")
+                Text("Global").tag("global")
+                Text("Quick").tag("quick")
+                Text("Custom").tag("named")
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .frame(width: 280)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var customTunnelForm: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Token")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            SecureField("eyJh...  (from CF tunnel install command)", text: $customTunnelTokenInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12, design: .monospaced))
+
+            Text("Domain")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+            TextField("myapp.example.com", text: $customTunnelDomainInput)
+                .textFieldStyle(.roundedBorder)
+                .font(.system(size: 12))
+
+            HStack {
+                Button("Cancel") {
+                    showCustomForm = false
+                }
+                .controlSize(.small)
+                Button("Connect") {
+                    let token = customTunnelTokenInput.trimmingCharacters(in: .whitespaces)
+                    let domain = customTunnelDomainInput.trimmingCharacters(in: .whitespaces)
+                    guard !token.isEmpty, !domain.isEmpty else { return }
+                    Task {
+                        await vm.updateApp(app: app, params: [
+                            "tunnel_mode": "named",
+                            "app_tunnel_domain": domain,
+                            "app_tunnel_token": token,
+                        ])
+                        showCustomForm = false
+                    }
+                }
+                .controlSize(.small)
+                .disabled(customTunnelTokenInput.isEmpty || customTunnelDomainInput.isEmpty)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Warnings

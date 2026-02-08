@@ -7,6 +7,9 @@ final class BridgeheadViewModel: ObservableObject {
     @Published var warnings: ScanWarningsFile?
     @Published var isHealthy = false
     @Published var namedTunnelDomain: String?
+    @Published var globalTunnelConnected = false
+    @Published var globalTunnelConfigured = false
+    @Published var globalTunnelCnameTarget: String?
     @Published var errorMessage: String?
 
     private let client: UDSControlClient
@@ -31,6 +34,15 @@ final class BridgeheadViewModel: ObservableObject {
 
     func tunnelURL(for app: AppRecord) -> String? {
         guard app.tunnelMode != "none", let tunnelDomain = namedTunnelDomain else { return nil }
+        let dotSuffix = ".\(domainSuffix)"
+        let prefix = app.domain.hasSuffix(dotSuffix)
+            ? String(app.domain.dropLast(dotSuffix.count))
+            : app.domain
+        return "https://\(prefix).\(tunnelDomain)"
+    }
+
+    func globalTunnelURL(for app: AppRecord) -> String? {
+        guard globalTunnelConnected, let tunnelDomain = namedTunnelDomain else { return nil }
         let dotSuffix = ".\(domainSuffix)"
         let prefix = app.domain.hasSuffix(dotSuffix)
             ? String(app.domain.dropLast(dotSuffix.count))
@@ -122,12 +134,20 @@ final class BridgeheadViewModel: ObservableObject {
     func refreshNamedTunnel() async {
         do {
             let response = try client.request(method: "named_tunnel.status", params: [:])
+            let connected = response["connected"] as? Bool ?? false
+            let configured = response["configured"] as? Bool ?? connected
+            globalTunnelConnected = connected
+            globalTunnelConfigured = configured
+            globalTunnelCnameTarget = response["cname_target"] as? String
             if let domain = response["domain"] as? String {
                 namedTunnelDomain = domain
             } else {
                 namedTunnelDomain = nil
             }
         } catch {
+            globalTunnelConnected = false
+            globalTunnelConfigured = false
+            globalTunnelCnameTarget = nil
             namedTunnelDomain = nil
         }
     }
@@ -165,6 +185,39 @@ final class BridgeheadViewModel: ObservableObject {
         } catch {
             errorMessage = error.localizedDescription
             return false
+        }
+    }
+
+    func connectGlobalTunnel(token: String, domain: String) async {
+        do {
+            _ = try client.request(method: "named_tunnel.connect", params: [
+                "token": token,
+                "domain": domain,
+            ])
+            await refreshNamedTunnel()
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshNamedTunnel()
+        }
+    }
+
+    func disconnectGlobalTunnel() async {
+        do {
+            _ = try client.request(method: "named_tunnel.disconnect", params: [:])
+            await refreshNamedTunnel()
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshNamedTunnel()
+        }
+    }
+
+    func reconnectGlobalTunnel() async {
+        do {
+            _ = try client.request(method: "named_tunnel.connect", params: [:])
+            await refreshNamedTunnel()
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshNamedTunnel()
         }
     }
 

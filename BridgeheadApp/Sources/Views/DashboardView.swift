@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum DashboardDestination: Hashable {
+    case appDetail(String)
+    case settings
+}
+
 struct DashboardView: View {
     @EnvironmentObject var vm: BridgeheadViewModel
     @State private var path = NavigationPath()
@@ -8,9 +13,14 @@ struct DashboardView: View {
     var body: some View {
         NavigationStack(path: $path) {
             AppListView(path: $path, searchText: $searchText)
-                .navigationDestination(for: String.self) { appId in
-                    if let app = vm.app(byId: appId) {
-                        AppDetailView(app: app, path: $path)
+                .navigationDestination(for: DashboardDestination.self) { dest in
+                    switch dest {
+                    case .appDetail(let appId):
+                        if let app = vm.app(byId: appId) {
+                            AppDetailView(app: app, path: $path)
+                        }
+                    case .settings:
+                        SettingsView()
                     }
                 }
         }
@@ -47,6 +57,15 @@ struct AppListView: View {
         }
         .navigationTitle("Bridgehead")
         .navigationSubtitle(vm.subtitle)
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    path.append(DashboardDestination.settings)
+                } label: {
+                    Image(systemName: "gearshape")
+                }
+            }
+        }
     }
 
     // MARK: - App List
@@ -90,7 +109,7 @@ struct AppListView: View {
                         Task { await vm.setEnabled(app: app, enabled: enabled) }
                     }
                     .contentShape(Rectangle())
-                    .onTapGesture { path.append(app.id) }
+                    .onTapGesture { path.append(DashboardDestination.appDetail(app.id)) }
                 }
             }
             .padding(.horizontal, 12)
