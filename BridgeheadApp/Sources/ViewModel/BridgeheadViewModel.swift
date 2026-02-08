@@ -55,10 +55,7 @@ final class BridgeheadViewModel: ObservableObject {
     }
 
     var sortedApps: [AppRecord] {
-        apps.sorted { lhs, rhs in
-            if lhs.enabled != rhs.enabled { return lhs.enabled }
-            return lhs.domain < rhs.domain
-        }
+        apps.sorted { $0.name < $1.name }
     }
 
     // MARK: - Auto Refresh
