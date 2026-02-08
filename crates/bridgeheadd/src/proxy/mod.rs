@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -9,6 +10,8 @@ use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::http_proxy_service;
 use tracing::info;
+
+use parking_lot::RwLock;
 
 use crate::domain::BackendTarget;
 use crate::{RouteRule, SharedState};
@@ -188,6 +191,156 @@ fn run_proxy_blocking(bind: &str, state: SharedState) -> anyhow::Result<()> {
             service.add_tcp(&v6_bind);
         }
     }
+    server.add_service(service);
+    server.run_forever();
+}
+
+// ---------------------------------------------------------------------------
+// Dedicated per-app proxy (listen_port)
+// ---------------------------------------------------------------------------
+
+#[derive(Clone)]
+struct DedicatedProxy {
+    rules: Arc<RwLock<Vec<RouteRule>>>,
+}
+
+#[async_trait]
+impl ProxyHttp for DedicatedProxy {
+    type CTX = ProxyCtx;
+
+    fn new_ctx(&self) -> Self::CTX {
+        ProxyCtx::default()
+    }
+
+    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let req_path = session.req_header().uri.path().to_string();
+
+        let route = {
+            let rules = self.rules.read();
+            select_route(Some(&rules), &req_path)
+        };
+
+        let Some(route) = route else {
+            write_json_error(session, 502, "no_backend").await?;
+            return Ok(true);
+        };
+
+        // Basic Auth
+        if let (Some(expected_user), Some(expected_pass)) =
+            (&route.basic_auth_user, &route.basic_auth_pass)
+        {
+            if !check_basic_auth(session, expected_user, expected_pass) {
+                write_auth_required(session).await?;
+                return Ok(true);
+            }
+        }
+
+        // CORS Preflight
+        if route.cors_enabled {
+            let method = session.req_header().method.as_str();
+            let has_origin = session.req_header().headers.get("origin").is_some();
+            if method == "OPTIONS" && has_origin {
+                write_cors_preflight(session).await?;
+                return Ok(true);
+            }
+        }
+
+        // Static directory serving
+        if let BackendTarget::StaticDir { ref root } = route.target {
+            serve_static(session, root, &req_path, route.cors_enabled).await?;
+            return Ok(true);
+        }
+
+        // SPA Rewrite
+        if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
+            let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
+        }
+
+        ctx.target = Some(route.target);
+        ctx.timeout_ms = route.timeout_ms;
+        ctx.cors_enabled = route.cors_enabled;
+        ctx.spa_rewrite = route.spa_rewrite;
+        Ok(false)
+    }
+
+    async fn upstream_peer(
+        &self,
+        _session: &mut Session,
+        ctx: &mut Self::CTX,
+    ) -> Result<Box<HttpPeer>> {
+        let Some(target) = ctx.target.take() else {
+            return Error::e_explain(ErrorType::InternalError, "missing upstream target");
+        };
+
+        match target {
+            BackendTarget::Tcp { host, port } => {
+                let mut peer = Box::new(HttpPeer::new(format!("{host}:{port}"), false, host));
+                if let Some(timeout_ms) = ctx.timeout_ms {
+                    let timeout = Duration::from_millis(timeout_ms);
+                    peer.options.connection_timeout = Some(timeout);
+                    peer.options.total_connection_timeout = Some(timeout);
+                    peer.options.read_timeout = Some(timeout);
+                    peer.options.idle_timeout = Some(timeout);
+                }
+                Ok(peer)
+            }
+            BackendTarget::UnixSocket { path } => {
+                let mut peer = HttpPeer::new_uds(&path, false, String::new())?;
+                if let Some(timeout_ms) = ctx.timeout_ms {
+                    let timeout = Duration::from_millis(timeout_ms);
+                    peer.options.connection_timeout = Some(timeout);
+                    peer.options.total_connection_timeout = Some(timeout);
+                    peer.options.read_timeout = Some(timeout);
+                    peer.options.idle_timeout = Some(timeout);
+                }
+                Ok(Box::new(peer))
+            }
+            BackendTarget::StaticDir { .. } => {
+                Error::e_explain(ErrorType::InternalError, "static dir has no upstream")
+            }
+        }
+    }
+
+    fn upstream_response_filter(
+        &self,
+        _session: &mut Session,
+        upstream_response: &mut ResponseHeader,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        if ctx.cors_enabled {
+            upstream_response
+                .insert_header("access-control-allow-origin", "*")
+                .ok();
+            upstream_response
+                .insert_header(
+                    "access-control-allow-methods",
+                    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
+                )
+                .ok();
+            upstream_response
+                .insert_header("access-control-allow-headers", "*")
+                .ok();
+            upstream_response
+                .insert_header("access-control-expose-headers", "*")
+                .ok();
+        }
+        Ok(())
+    }
+}
+
+pub fn run_dedicated_proxy_blocking(
+    port: u16,
+    rules: Arc<RwLock<Vec<RouteRule>>>,
+) -> anyhow::Result<()> {
+    let bind = format!("0.0.0.0:{port}");
+    let mut server = Server::new(None)?;
+    server.bootstrap();
+
+    let mut service = http_proxy_service(&server.configuration, DedicatedProxy { rules });
+    service.add_tcp(&bind);
     server.add_service(service);
     server.run_forever();
 }
@@ -798,6 +951,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         let out = resolve_target(&routes, "www.myapp.bridgehead.local", "bridgehead.local", "/").expect("fallback");
@@ -826,6 +980,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         let out = resolve_target(&routes, "totally-unknown.bridgehead.local", "bridgehead.local", "/").expect("default");
@@ -855,6 +1010,7 @@ mod tests {
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
+                    listen_port: None,
                 },
                 RouteRule {
                     target: BackendTarget::Tcp {
@@ -867,6 +1023,7 @@ mod tests {
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
+                    listen_port: None,
                 },
             ],
         );
@@ -893,6 +1050,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("wildcard");
@@ -918,6 +1076,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         routes.insert(
@@ -933,6 +1092,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("route");
@@ -958,6 +1118,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
             }],
         );
         assert!(resolve_target(&routes, "myapp.bridgehead.local", "bridgehead.local", "/").is_none());

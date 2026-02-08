@@ -93,6 +93,7 @@ impl AppRepository {
         )?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN static_root TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN socket_path TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN listen_port INTEGER")?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -123,6 +124,7 @@ impl AppRepository {
         basic_auth_user: Option<&str>,
         basic_auth_pass: Option<&str>,
         spa_rewrite: bool,
+        listen_port: Option<u16>,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(path_prefix);
@@ -142,6 +144,7 @@ impl AppRepository {
             basic_auth_user: basic_auth_user.map(ToOwned::to_owned),
             basic_auth_pass: basic_auth_pass.map(ToOwned::to_owned),
             spa_rewrite,
+            listen_port,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -149,8 +152,8 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 app.id.0,
                 app.name,
@@ -167,6 +170,7 @@ impl AppRepository {
                 basic_auth_user,
                 basic_auth_pass,
                 if spa_rewrite { 1 } else { 0 },
+                listen_port.map(|v| v as i64),
             ],
         );
 
@@ -186,6 +190,7 @@ impl AppRepository {
         name: &str,
         domain: &DomainName,
         static_root: &str,
+        listen_port: Option<u16>,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
@@ -203,6 +208,7 @@ impl AppRepository {
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
+            listen_port,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -210,8 +216,8 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, static_root)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 0, NULL, ?9, ?10, 0, NULL, NULL, 0, ?11)",
+            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, static_root, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 0, NULL, ?9, ?10, 0, NULL, NULL, 0, ?11, ?12)",
             params![
                 app.id.0,
                 app.name,
@@ -224,6 +230,7 @@ impl AppRepository {
                 app.created_at.unix_timestamp(),
                 app.updated_at.unix_timestamp(),
                 static_root,
+                listen_port.map(|v| v as i64),
             ],
         );
 
@@ -245,6 +252,7 @@ impl AppRepository {
         path_prefix: Option<&str>,
         socket_path: &str,
         timeout_ms: Option<u64>,
+        listen_port: Option<u16>,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(path_prefix);
@@ -263,6 +271,7 @@ impl AppRepository {
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
+            listen_port,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -270,8 +279,8 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, 0, NULL, NULL, 0, ?12)",
+            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, 0, NULL, NULL, 0, ?12, ?13)",
             params![
                 app.id.0,
                 app.name,
@@ -285,6 +294,7 @@ impl AppRepository {
                 app.created_at.unix_timestamp(),
                 app.updated_at.unix_timestamp(),
                 socket_path,
+                listen_port.map(|v| v as i64),
             ],
         );
 
@@ -312,6 +322,7 @@ impl AppRepository {
         basic_auth_user: Option<&str>,
         basic_auth_pass: Option<&str>,
         spa_rewrite: bool,
+        listen_port: Option<u16>,
         enabled: bool,
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -329,7 +340,7 @@ impl AppRepository {
 
         if let Some(id) = existing_id {
             conn.execute(
-                "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 0, scan_source = NULL, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11 WHERE id = ?12",
+                "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 0, scan_source = NULL, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12 WHERE id = ?13",
                 params![
                     name,
                     path_prefix_db,
@@ -342,14 +353,15 @@ impl AppRepository {
                     basic_auth_user,
                     basic_auth_pass,
                     if spa_rewrite { 1 } else { 0 },
+                    listen_port.map(|v| v as i64),
                     id
                 ],
             )?;
         } else {
             let created = AppId::new().0;
             conn.execute(
-                "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15)",
+                "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     created,
                     name,
@@ -366,6 +378,7 @@ impl AppRepository {
                     basic_auth_user,
                     basic_auth_pass,
                     if spa_rewrite { 1 } else { 0 },
+                    listen_port.map(|v| v as i64),
                 ],
             )?;
         }
@@ -389,6 +402,7 @@ impl AppRepository {
         basic_auth_user: Option<&str>,
         basic_auth_pass: Option<&str>,
         spa_rewrite: bool,
+        listen_port: Option<u16>,
         enabled: bool,
         source: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
@@ -409,7 +423,7 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8, cors_enabled = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12, socket_path = ?13 WHERE id = ?14",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8, cors_enabled = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12, socket_path = ?13, listen_port = ?14 WHERE id = ?15",
                     params![
                         name,
                         path_prefix_db,
@@ -424,6 +438,7 @@ impl AppRepository {
                         basic_auth_pass,
                         if spa_rewrite { 1 } else { 0 },
                         socket_path,
+                        listen_port.map(|v| v as i64),
                         id
                     ],
                 )?;
@@ -432,8 +447,8 @@ impl AppRepository {
             None => {
                 let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     params![
                         created,
                         name,
@@ -452,6 +467,7 @@ impl AppRepository {
                         basic_auth_pass,
                         if spa_rewrite { 1 } else { 0 },
                         socket_path,
+                        listen_port.map(|v| v as i64),
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -536,6 +552,7 @@ impl AppRepository {
         basic_auth_user: Option<Option<&str>>,
         basic_auth_pass: Option<Option<&str>>,
         spa_rewrite: Option<bool>,
+        listen_port: Option<Option<u16>>,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -562,6 +579,11 @@ impl AppRepository {
         if let Some(v) = spa_rewrite {
             sets.push(format!("spa_rewrite = ?{idx}"));
             values.push(Box::new(if v { 1i64 } else { 0 }));
+            idx += 1;
+        }
+        if let Some(v) = listen_port {
+            sets.push(format!("listen_port = ?{idx}"));
+            values.push(Box::new(v.map(|p| p as i64)));
             idx += 1;
         }
 
@@ -644,7 +666,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -692,6 +714,10 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         basic_auth_user: row.get::<_, Option<String>>(12).unwrap_or(None),
         basic_auth_pass: row.get::<_, Option<String>>(13).unwrap_or(None),
         spa_rewrite: row.get::<_, i64>(14).unwrap_or(0) == 1,
+        listen_port: row
+            .get::<_, Option<i64>>(17)
+            .unwrap_or(None)
+            .map(|v| v as u16),
     })
 }
 
@@ -804,7 +830,7 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.bridgehead.local".to_string());
 
-        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false)
+        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false, None)
             .expect("insert");
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
@@ -820,7 +846,7 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.bridgehead.local".to_string());
 
-        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false)
+        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false, None)
             .expect("insert");
 
         // Verify raw DB stores only prefix

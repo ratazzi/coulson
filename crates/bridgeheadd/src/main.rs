@@ -7,7 +7,7 @@ mod runtime;
 mod scanner;
 mod store;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
@@ -22,6 +22,8 @@ use crate::config::BridgeheadConfig;
 use crate::domain::BackendTarget;
 use crate::store::AppRepository;
 
+type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
+
 #[derive(Clone)]
 pub struct RouteRule {
     pub target: BackendTarget,
@@ -31,12 +33,14 @@ pub struct RouteRule {
     pub basic_auth_user: Option<String>,
     pub basic_auth_pass: Option<String>,
     pub spa_rewrite: bool,
+    pub listen_port: Option<u16>,
 }
 
 #[derive(Clone)]
 pub struct SharedState {
     pub store: Arc<AppRepository>,
     pub routes: Arc<RwLock<HashMap<String, Vec<RouteRule>>>>,
+    pub dedicated_ports: Arc<RwLock<DedicatedPortMap>>,
     pub route_tx: broadcast::Sender<()>,
     pub domain_suffix: String,
     pub apps_root: std::path::PathBuf,
@@ -47,8 +51,9 @@ impl SharedState {
     pub fn reload_routes(&self) -> anyhow::Result<()> {
         let enabled_apps = self.store.list_enabled()?;
         let mut table: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        let mut port_rules: HashMap<u16, Vec<RouteRule>> = HashMap::new();
         for app in enabled_apps {
-            table.entry(app.domain.0).or_default().push(RouteRule {
+            let rule = RouteRule {
                 target: app.target,
                 path_prefix: app.path_prefix,
                 timeout_ms: app.timeout_ms,
@@ -56,16 +61,46 @@ impl SharedState {
                 basic_auth_user: app.basic_auth_user,
                 basic_auth_pass: app.basic_auth_pass,
                 spa_rewrite: app.spa_rewrite,
-            });
+                listen_port: app.listen_port,
+            };
+            if let Some(port) = app.listen_port {
+                port_rules.entry(port).or_default().push(rule.clone());
+            }
+            table.entry(app.domain.0).or_default().push(rule);
         }
-        for rules in table.values_mut() {
+        let sort_rules = |rules: &mut Vec<RouteRule>| {
             rules.sort_by(|a, b| {
                 let a_len = a.path_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
                 let b_len = b.path_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
                 b_len.cmp(&a_len)
             });
+        };
+        for rules in table.values_mut() {
+            sort_rules(rules);
+        }
+        for rules in port_rules.values_mut() {
+            sort_rules(rules);
         }
         *self.routes.write() = table;
+
+        // Update dedicated port rule sets
+        {
+            let mut dp = self.dedicated_ports.write();
+            // Remove ports no longer needed
+            dp.retain(|port, _| port_rules.contains_key(port));
+            // Add or update
+            for (port, rules) in port_rules {
+                match dp.get(&port) {
+                    Some(existing) => {
+                        *existing.write() = rules;
+                    }
+                    None => {
+                        dp.insert(port, Arc::new(RwLock::new(rules)));
+                    }
+                }
+            }
+        }
+
         let _ = self.route_tx.send(());
         Ok(())
     }
@@ -140,6 +175,7 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
     Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
+        dedicated_ports: Arc::new(RwLock::new(HashMap::new())),
         route_tx,
         domain_suffix: cfg.domain_suffix.clone(),
         apps_root: cfg.apps_root.clone(),
@@ -295,6 +331,11 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         drop(watcher);
     });
 
+    let dedicated_state = state.clone();
+    let dedicated_task = tokio::spawn(async move {
+        run_dedicated_port_manager(dedicated_state).await;
+    });
+
     let mdns_state = state.clone();
     let mdns_task = tokio::spawn(async move {
         if let Err(err) = mdns::run_mdns_responder(mdns_state).await {
@@ -310,9 +351,70 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     control_task.abort();
     scan_task.abort();
     watch_task.abort();
+    dedicated_task.abort();
     mdns_task.abort();
 
     Ok(())
+}
+
+async fn run_dedicated_port_manager(state: SharedState) {
+    let mut rx = state.route_tx.subscribe();
+    let mut running: HashMap<u16, tokio::task::JoinHandle<()>> = HashMap::new();
+
+    // Start initial dedicated proxies
+    sync_dedicated_proxies(&state, &mut running);
+
+    loop {
+        match rx.recv().await {
+            Ok(()) => sync_dedicated_proxies(&state, &mut running),
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                sync_dedicated_proxies(&state, &mut running);
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    for (_, handle) in running.drain() {
+        handle.abort();
+    }
+}
+
+fn sync_dedicated_proxies(
+    state: &SharedState,
+    running: &mut HashMap<u16, tokio::task::JoinHandle<()>>,
+) {
+    let wanted: HashSet<u16> = {
+        let dp = state.dedicated_ports.read();
+        dp.keys().copied().collect()
+    };
+
+    // Stop proxies for removed ports
+    let current: HashSet<u16> = running.keys().copied().collect();
+    for port in current.difference(&wanted) {
+        if let Some(handle) = running.remove(port) {
+            info!(port, "stopping dedicated proxy");
+            handle.abort();
+        }
+    }
+
+    // Start proxies for new ports
+    for port in wanted.difference(&current) {
+        let rules = {
+            let dp = state.dedicated_ports.read();
+            match dp.get(port) {
+                Some(r) => Arc::clone(r),
+                None => continue,
+            }
+        };
+        let port = *port;
+        info!(port, "starting dedicated proxy");
+        let handle = tokio::task::spawn_blocking(move || {
+            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, rules) {
+                error!(error = %err, port, "dedicated proxy exited with error");
+            }
+        });
+        running.insert(port, handle);
+    }
 }
 
 fn build_watcher(

@@ -68,6 +68,8 @@ struct CreateStaticParams {
     basic_auth_pass: Option<String>,
     #[serde(default)]
     spa_rewrite: bool,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +77,8 @@ struct CreateStaticDirParams {
     name: String,
     domain: String,
     static_root: String,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +90,8 @@ struct CreateUnixSocketParams {
     socket_path: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -100,6 +106,7 @@ struct UpdateSettingsParams {
     basic_auth_user: Option<Option<String>>,
     basic_auth_pass: Option<Option<String>>,
     spa_rewrite: Option<bool>,
+    listen_port: Option<Option<u16>>,
 }
 
 pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
@@ -200,6 +207,15 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
+            if let Some(port) = params.listen_port {
+                if port == 0 {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("listen_port must be > 0".to_string()),
+                    );
+                }
+            }
+
             let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
                 Ok(v) => v,
                 Err(msg) => {
@@ -218,6 +234,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.basic_auth_user.as_deref(),
                 params.basic_auth_pass.as_deref(),
                 params.spa_rewrite,
+                params.listen_port,
             ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
@@ -266,7 +283,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            match state.store.insert_static_dir(&params.name, &domain, &params.static_root) {
+            match state.store.insert_static_dir(&params.name, &domain, &params.static_root, params.listen_port) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());
@@ -327,6 +344,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 path_prefix.as_deref(),
                 &params.socket_path,
                 params.timeout_ms,
+                params.listen_port,
             ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
@@ -355,6 +373,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.basic_auth_user.as_ref().map(|v| v.as_deref()),
                 params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
                 params.spa_rewrite,
+                params.listen_port,
             ) {
                 Ok(found) => {
                     if !found {

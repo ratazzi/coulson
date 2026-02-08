@@ -31,6 +31,8 @@ struct BridgeheadManifest {
     basic_auth_pass: Option<String>,
     #[serde(default)]
     spa_rewrite: Option<bool>,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +55,8 @@ struct BridgeheadManifestRoute {
     basic_auth_pass: Option<String>,
     #[serde(default)]
     spa_rewrite: Option<bool>,
+    #[serde(default)]
+    listen_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -91,6 +95,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             app.basic_auth_user.as_deref(),
             app.basic_auth_pass.as_deref(),
             app.spa_rewrite,
+            app.listen_port,
             app.enabled,
             "apps_root",
         )?;
@@ -140,6 +145,7 @@ struct DiscoveredStaticApp {
     basic_auth_user: Option<String>,
     basic_auth_pass: Option<String>,
     spa_rewrite: bool,
+    listen_port: Option<u16>,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -217,6 +223,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
+                    listen_port: None,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
@@ -261,6 +268,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
+                        listen_port: None,
                         enabled: true,
                         explicit_domain,
                     };
@@ -303,6 +311,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         basic_auth_user: route.basic_auth_user.or_else(|| manifest.basic_auth_user.clone()),
                         basic_auth_pass: route.basic_auth_pass.or_else(|| manifest.basic_auth_pass.clone()),
                         spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
+                        listen_port: route.listen_port.or(manifest.listen_port),
                         enabled,
                         explicit_domain,
                     };
@@ -324,6 +333,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     basic_auth_user: manifest.basic_auth_user,
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
+                    listen_port: manifest.listen_port,
                     enabled,
                     explicit_domain,
                 };
@@ -398,6 +408,7 @@ fn discover_from_symlink(
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
                 enabled: true,
                 explicit_domain,
             });
@@ -424,6 +435,7 @@ fn discover_from_symlink(
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
+                    listen_port: None,
                     enabled: true,
                     explicit_domain,
                 });
@@ -450,6 +462,7 @@ fn discover_from_symlink(
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
                 enabled: true,
                 explicit_domain,
             }]);
@@ -702,6 +715,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -721,6 +735,7 @@ mod tests {
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
+                listen_port: None,
                 enabled: true,
                 explicit_domain: true,
             },
