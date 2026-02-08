@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use bytes::Bytes;
 use h2::RecvStream;
 use http::Request;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
 use tracing::{debug, info, warn};
+
+use crate::store::{self, AppRepository};
 
 /// Proxy an HTTP request from the Cloudflare edge to a local service.
 /// For HTTP/2 transport, responses use real HTTP status codes and headers
@@ -138,6 +142,7 @@ pub async fn proxy_by_host(
     tunnel_domain: &str,
     local_suffix: &str,
     local_proxy_port: u16,
+    app_store: &Arc<AppRepository>,
 ) -> anyhow::Result<()> {
     let (parts, mut body) = request.into_parts();
 
@@ -148,6 +153,24 @@ pub async fn proxy_by_host(
         .unwrap_or(tunnel_domain);
 
     let local_host = map_tunnel_host_to_local(original_host, tunnel_domain, local_suffix);
+
+    // Check tunnel_exposed: extract domain prefix and verify it's allowed
+    let domain_prefix = store::domain_to_db(&local_host, local_suffix);
+    let exposed = app_store.is_tunnel_exposed(&domain_prefix).unwrap_or(false);
+    if !exposed {
+        warn!(
+            original_host = %original_host,
+            domain_prefix = %domain_prefix,
+            "tunnel access denied: app not exposed"
+        );
+        let response = http::Response::builder()
+            .status(403)
+            .body(())
+            .unwrap();
+        let mut send_stream = send_response.send_response(response, false)?;
+        send_stream.send_data(Bytes::from("Forbidden: app not exposed via tunnel"), true)?;
+        return Ok(());
+    }
 
     let uri = format!(
         "http://127.0.0.1:{}{}",

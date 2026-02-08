@@ -101,6 +101,10 @@ impl AppRepository {
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN socket_path TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN listen_port INTEGER")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN tunnel_url TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
+        )?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -153,6 +157,7 @@ impl AppRepository {
             spa_rewrite,
             listen_port,
             tunnel_url: None,
+            tunnel_exposed: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -218,6 +223,7 @@ impl AppRepository {
             spa_rewrite: false,
             listen_port,
             tunnel_url: None,
+            tunnel_exposed: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -282,6 +288,7 @@ impl AppRepository {
             spa_rewrite: false,
             listen_port,
             tunnel_url: None,
+            tunnel_exposed: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -555,6 +562,7 @@ impl AppRepository {
         Self::query_apps(&conn, true, &self.domain_suffix)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_settings(
         &self,
         app_id: &str,
@@ -563,6 +571,7 @@ impl AppRepository {
         basic_auth_pass: Option<Option<&str>>,
         spa_rewrite: Option<bool>,
         listen_port: Option<Option<u16>>,
+        tunnel_exposed: Option<bool>,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -594,6 +603,11 @@ impl AppRepository {
         if let Some(v) = listen_port {
             sets.push(format!("listen_port = ?{idx}"));
             values.push(Box::new(v.map(|p| p as i64)));
+            idx += 1;
+        }
+        if let Some(v) = tunnel_exposed {
+            sets.push(format!("tunnel_exposed = ?{idx}"));
+            values.push(Box::new(if v { 1i64 } else { 0 }));
             idx += 1;
         }
 
@@ -649,6 +663,19 @@ impl AppRepository {
             params![tunnel_url, now, app_id],
         )?;
         Ok(changed > 0)
+    }
+
+    pub fn is_tunnel_exposed(&self, domain_prefix: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let exposed: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(tunnel_exposed) FROM apps WHERE domain = ?1 AND enabled = 1",
+                params![domain_prefix],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        Ok(exposed == Some(1))
     }
 
     pub fn get_by_id(&self, app_id: &str) -> anyhow::Result<Option<AppSpec>> {
@@ -731,7 +758,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -784,6 +811,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .unwrap_or(None)
             .map(|v| v as u16),
         tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
+        tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
     })
 }
 

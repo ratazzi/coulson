@@ -63,6 +63,7 @@ pub async fn start_named_tunnel(
     tunnel_domain: String,
     local_suffix: String,
     local_proxy_port: u16,
+    store: Arc<crate::store::AppRepository>,
 ) -> anyhow::Result<NamedTunnelHandle> {
     let creds = credentials.clone();
     let td = tunnel_domain.clone();
@@ -74,6 +75,7 @@ pub async fn start_named_tunnel(
                 tunnel_domain: td.clone(),
                 local_suffix: local_suffix.clone(),
                 local_proxy_port,
+                store: store.clone(),
             };
             let h = tokio::spawn(async move {
                 if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {

@@ -122,6 +122,7 @@ struct UpdateSettingsParams {
     basic_auth_pass: Option<Option<String>>,
     spa_rewrite: Option<bool>,
     listen_port: Option<Option<u16>>,
+    tunnel_exposed: Option<bool>,
 }
 
 pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
@@ -389,6 +390,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
                 params.spa_rewrite,
                 params.listen_port,
+                params.tunnel_exposed,
             ) {
                 Ok(found) => {
                     if !found {
@@ -618,6 +620,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.domain.clone(),
                 local_suffix,
                 local_proxy_port,
+                state.store.clone(),
             )
             .await
             {
@@ -739,6 +742,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 tunnel_domain.clone(),
                 local_suffix,
                 local_proxy_port,
+                state.store.clone(),
             )
             .await
             {

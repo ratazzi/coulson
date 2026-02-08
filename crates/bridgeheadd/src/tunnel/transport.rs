@@ -13,6 +13,7 @@ use super::edge;
 use super::proxy;
 use super::rpc;
 use super::TunnelCredentials;
+use crate::store::AppRepository;
 
 /// Determines how incoming HTTP requests from the tunnel are routed locally.
 #[derive(Clone)]
@@ -24,6 +25,7 @@ pub enum TunnelRouting {
         tunnel_domain: String,
         local_suffix: String,
         local_proxy_port: u16,
+        store: Arc<AppRepository>,
     },
 }
 
@@ -273,6 +275,7 @@ async fn try_connect(
                             tunnel_domain,
                             local_suffix,
                             local_proxy_port,
+                            store,
                         } => {
                             proxy::proxy_by_host(
                                 request,
@@ -280,6 +283,7 @@ async fn try_connect(
                                 tunnel_domain,
                                 local_suffix,
                                 *local_proxy_port,
+                                store,
                             )
                             .await
                         }

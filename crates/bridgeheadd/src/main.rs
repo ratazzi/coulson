@@ -260,6 +260,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                         tunnel_domain,
                         local_suffix,
                         local_proxy_port,
+                        state.store.clone(),
                     )
                     .await
                     {
