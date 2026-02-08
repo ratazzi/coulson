@@ -221,6 +221,29 @@ final class BridgeheadViewModel: ObservableObject {
         }
     }
 
+    func createApp(params: [String: Any]) async -> Bool {
+        let type = params["type"] as? String ?? "tcp"
+        let method: String
+        switch type {
+        case "static_dir":
+            method = "app.create_static_dir"
+        case "unix_socket":
+            method = "app.create_unix_socket"
+        default:
+            method = "app.create_static"
+        }
+        var rpcParams = params
+        rpcParams.removeValue(forKey: "type")
+        do {
+            _ = try client.request(method: method, params: rpcParams)
+            await refreshAll()
+            return true
+        } catch {
+            errorMessage = error.localizedDescription
+            return false
+        }
+    }
+
     func app(byId id: String) -> AppRecord? {
         apps.first { $0.id == id }
     }

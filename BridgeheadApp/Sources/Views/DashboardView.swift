@@ -2,6 +2,7 @@ import SwiftUI
 
 enum DashboardDestination: Hashable {
     case appDetail(String)
+    case addApp
     case settings
 }
 
@@ -19,6 +20,8 @@ struct DashboardView: View {
                         if let app = vm.app(byId: appId) {
                             AppDetailView(app: app, path: $path)
                         }
+                    case .addApp:
+                        AddAppView(path: $path)
                     case .settings:
                         SettingsView()
                     }
@@ -59,10 +62,17 @@ struct AppListView: View {
         .navigationSubtitle(vm.subtitle)
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button {
-                    path.append(DashboardDestination.settings)
-                } label: {
-                    Image(systemName: "gearshape")
+                HStack(spacing: 8) {
+                    Button {
+                        path.append(DashboardDestination.addApp)
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    Button {
+                        path.append(DashboardDestination.settings)
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
                 }
             }
         }
