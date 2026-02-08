@@ -464,14 +464,13 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 1, scan_source = ?8, cors_enabled = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12, socket_path = ?13, listen_port = ?14 WHERE id = ?15",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, socket_path = ?12, listen_port = ?13 WHERE id = ?14",
                     params![
                         name,
                         path_prefix_db,
                         target_host,
                         i64::from(target_port),
                         timeout_ms.map(|v| v as i64),
-                        if enabled { 1 } else { 0 },
                         now,
                         source,
                         if cors_enabled { 1 } else { 0 },
@@ -545,8 +544,8 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = 'asgi', target_host = '', target_port = 0, enabled = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = ?5 WHERE id = ?6",
-                    params![name, if enabled { 1 } else { 0 }, now, source, app_root, id],
+                    "UPDATE apps SET name = ?1, kind = 'asgi', target_host = '', target_port = 0, updated_at = ?2, scan_managed = 1, scan_source = ?3, app_root = ?4 WHERE id = ?5",
+                    params![name, now, source, app_root, id],
                 )?;
                 ScanUpsertResult::Updated
             }
@@ -601,8 +600,8 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = 'static', target_host = '', target_port = 0, static_root = ?2, enabled = ?3, updated_at = ?4, scan_managed = 1, scan_source = ?5, app_root = NULL WHERE id = ?6",
-                    params![name, static_root, if enabled { 1 } else { 0 }, now, source, id],
+                    "UPDATE apps SET name = ?1, kind = 'static', target_host = '', target_port = 0, static_root = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = NULL WHERE id = ?5",
+                    params![name, static_root, now, source, id],
                 )?;
                 ScanUpsertResult::Updated
             }
@@ -895,9 +894,9 @@ impl AppRepository {
         suffix: &str,
     ) -> anyhow::Result<Vec<AppSpec>> {
         let sql = if enabled_only {
-            format!("SELECT {} FROM apps WHERE enabled = 1 ORDER BY domain ASC, LENGTH(path_prefix) DESC", COLS)
+            format!("SELECT {} FROM apps WHERE enabled = 1 ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC", COLS)
         } else {
-            format!("SELECT {} FROM apps ORDER BY domain ASC, LENGTH(path_prefix) DESC", COLS)
+            format!("SELECT {} FROM apps ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC", COLS)
         };
 
         let mut stmt = conn.prepare(&sql)?;
@@ -927,7 +926,7 @@ impl AppRepository {
             sql.push_str(" WHERE ");
             sql.push_str(&clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY domain ASC, LENGTH(path_prefix) DESC");
+        sql.push_str(" ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let mut rows = stmt.query(params_from_iter(values.iter()))?;
