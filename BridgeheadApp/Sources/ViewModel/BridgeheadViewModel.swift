@@ -139,7 +139,10 @@ final class BridgeheadViewModel: ObservableObject {
         do {
             _ = try client.request(method: method, params: ["app_id": app.id])
             await refreshAll()
-        } catch {}
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshAll()
+        }
     }
 
     func updateApp(app: AppRecord, params: [String: Any]) async {
@@ -160,6 +163,7 @@ final class BridgeheadViewModel: ObservableObject {
             await refreshAll()
             return true
         } catch {
+            errorMessage = error.localizedDescription
             return false
         }
     }
