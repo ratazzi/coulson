@@ -20,7 +20,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 use crate::config::BridgeheadConfig;
 use crate::domain::BackendTarget;
@@ -399,7 +399,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                     if let Err(err) = scan_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after scan");
                     } else {
-                        info!(
+                        debug!(
                             discovered = stats.discovered,
                             inserted = stats.inserted,
                             updated = stats.updated,
@@ -444,7 +444,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                     if let Err(err) = watch_state.reload_routes() {
                         error!(error = %err, "failed to reload routes after fs event");
                     } else {
-                        info!(
+                        debug!(
                             discovered = stats.discovered,
                             inserted = stats.inserted,
                             updated = stats.updated,

@@ -7,7 +7,7 @@ use http::Request;
 use rustls::ClientConfig;
 use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::edge;
 use super::proxy;
@@ -255,7 +255,7 @@ async fn try_connect(
             }
             StreamType::UpdateConfiguration => {
                 // CF edge pushes config updates; acknowledge and ignore.
-                info!("received update-configuration stream, acknowledging");
+                debug!("received update-configuration stream, acknowledging");
                 let response = http::Response::builder()
                     .status(200)
                     .body(())
