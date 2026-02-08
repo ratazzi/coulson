@@ -230,7 +230,7 @@ final class BridgeheadViewModel: ObservableObject {
         case "unix_socket":
             method = "app.create_unix_socket"
         default:
-            method = "app.create_static"
+            method = "app.create_tcp"
         }
         var rpcParams = params
         rpcParams.removeValue(forKey: "type")

@@ -52,7 +52,7 @@ enum ControlError {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateStaticParams {
+struct CreateTcpParams {
     name: String,
     domain: String,
     #[serde(default)]
@@ -220,8 +220,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             };
             Ok(json!({ "apps": apps }))
         }
-        "app.create_static" => {
-            let params: CreateStaticParams = match serde_json::from_value(req.params) {
+        "app.create_tcp" | "app.create_static" => {
+            let params: CreateTcpParams = match serde_json::from_value(req.params) {
                 Ok(v) => v,
                 Err(e) => {
                     return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
