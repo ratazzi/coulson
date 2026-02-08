@@ -74,6 +74,13 @@ impl ProcessManager {
             "starting managed ASGI process"
         );
 
+        let log_path = sockets_dir.join(format!("{app_id}.log"));
+        let log_file = std::fs::File::create(&log_path)
+            .with_context(|| format!("failed to create log file {}", log_path.display()))?;
+        let stderr_file = log_file
+            .try_clone()
+            .with_context(|| "failed to clone log file handle")?;
+
         let child = Command::new(&granian)
             .arg(&module)
             .arg("--uds")
@@ -82,8 +89,8 @@ impl ProcessManager {
             .arg("asgi")
             .current_dir(root)
             .kill_on_drop(true)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(stderr_file)
+            .stderr(log_file)
             .spawn()
             .with_context(|| format!("failed to spawn granian for {app_id}"))?;
 
