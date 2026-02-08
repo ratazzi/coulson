@@ -9,19 +9,19 @@ use tracing::{debug, info, warn};
 
 use crate::store::{self, AppRepository};
 
-/// Proxy an HTTP request from the Cloudflare edge to a local service.
-/// For HTTP/2 transport, responses use real HTTP status codes and headers
-/// (not the base64 serialized format used by the older h2mux protocol).
-pub async fn proxy_to_local(
+/// Proxy an HTTP request to the local Pingora proxy with a fixed Host header.
+/// Used for per-app tunnels where the backend is not a TCP port (e.g. static_dir, managed).
+pub async fn proxy_to_local_with_host(
     request: Request<RecvStream>,
     mut send_response: h2::server::SendResponse<Bytes>,
-    local_port: u16,
+    local_proxy_port: u16,
+    local_host: &str,
 ) -> anyhow::Result<()> {
     let (parts, mut body) = request.into_parts();
 
     let uri = format!(
         "http://127.0.0.1:{}{}",
-        local_port,
+        local_proxy_port,
         parts
             .uri
             .path_and_query()
@@ -29,20 +29,22 @@ pub async fn proxy_to_local(
             .unwrap_or("/")
     );
 
-    info!(uri = %uri, method = %parts.method, "proxying request to local");
+    info!(
+        local_host = %local_host,
+        uri = %uri,
+        method = %parts.method,
+        "proxying tunnel request with fixed host"
+    );
 
-    // Build the request to local service
     let mut local_req = http::Request::builder()
         .method(parts.method.clone())
         .uri(&uri);
 
-    // Forward relevant headers; skip hop-by-hop, CF internal, and HTTP/2 pseudo-headers.
-    // content-length/transfer-encoding are set by hyper from the actual body.
     for (name, value) in &parts.headers {
         let name_str = name.as_str();
         if matches!(
             name_str,
-            "content-length" | "transfer-encoding" | "connection"
+            "host" | "content-length" | "transfer-encoding" | "connection"
         ) || name_str.starts_with(':')
             || name_str.starts_with("cf-cloudflared-")
             || name_str == "cf-ray"
@@ -59,8 +61,8 @@ pub async fn proxy_to_local(
         }
         local_req = local_req.header(name, value);
     }
+    local_req = local_req.header("host", local_host);
 
-    // Collect body from h2 stream
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.data().await {
         let chunk = chunk?;
@@ -70,13 +72,24 @@ pub async fn proxy_to_local(
 
     let local_req = local_req.body(http_body_util::Full::new(Bytes::from(body_bytes)))?;
 
-    // Send to local service
     let client = Client::builder(TokioExecutor::new()).build_http();
-    let local_resp = client.request(local_req).await?;
+    let local_resp = match client.request(local_req).await {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(error = %err, local_host = %local_host, "local proxy request failed");
+            let response = http::Response::builder()
+                .status(502)
+                .body(())
+                .unwrap();
+            let mut send_stream = send_response.send_response(response, false)?;
+            let msg = format!("Bad Gateway: {err}");
+            send_stream.send_data(Bytes::from(msg), true)?;
+            return Ok(());
+        }
+    };
 
     let (resp_parts, resp_body) = local_resp.into_parts();
 
-    // Filter HTTP/1.1 hop-by-hop headers forbidden in HTTP/2, then forward
     let mut response = http::Response::builder().status(resp_parts.status);
     for (name, value) in &resp_parts.headers {
         let n = name.as_str();
@@ -96,7 +109,6 @@ pub async fn proxy_to_local(
     let response = response.body(()).unwrap();
     let mut send_stream = send_response.send_response(response, false)?;
 
-    // Stream response body
     use http_body_util::BodyExt;
     let mut body_stream = resp_body;
     while let Some(frame) = body_stream.frame().await {
@@ -106,10 +118,9 @@ pub async fn proxy_to_local(
         }
     }
 
-    // End stream
     send_stream.send_data(Bytes::new(), true)?;
 
-    info!(status = %resp_parts.status, "proxy response sent");
+    info!(status = %resp_parts.status, local_host = %local_host, "fixed-host tunnel response sent");
     Ok(())
 }
 

@@ -311,9 +311,9 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                     if let (Some(creds_json), Some(domain)) =
                         (&app.app_tunnel_creds, &app.app_tunnel_domain)
                     {
-                        let port = match &app.target {
-                            BackendTarget::Tcp { port, .. } => *port,
-                            _ => continue,
+                        let routing = tunnel::transport::TunnelRouting::FixedHost {
+                            local_host: app.domain.0.clone(),
+                            local_proxy_port: state.listen_http.port(),
                         };
                         match serde_json::from_str::<tunnel::TunnelCredentials>(creds_json) {
                             Ok(credentials) => {
@@ -327,7 +327,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                                     app.id.0.clone(),
                                     credentials,
                                     domain.clone(),
-                                    port,
+                                    routing,
                                 )
                                 .await
                                 {
@@ -352,19 +352,18 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         match state.store.list_quick_tunnels() {
             Ok(apps) => {
                 for app in apps {
-                    let port = match &app.target {
-                        BackendTarget::Tcp { port, .. } => *port,
-                        _ => continue,
+                    let routing = tunnel::transport::TunnelRouting::FixedHost {
+                        local_host: app.domain.0.clone(),
+                        local_proxy_port: state.listen_http.port(),
                     };
                     info!(
                         app_id = %app.id.0,
-                        port,
                         "auto-reconnecting quick tunnel"
                     );
                     match tunnel::start_quick_tunnel(
                         state.tunnels.clone(),
                         app.id.0.clone(),
-                        port,
+                        routing,
                     )
                     .await
                     {

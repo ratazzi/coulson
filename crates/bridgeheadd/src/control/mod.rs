@@ -136,7 +136,6 @@ struct UpdateSettingsParams {
     basic_auth_pass: Option<Option<String>>,
     spa_rewrite: Option<bool>,
     listen_port: Option<Option<u16>>,
-    tunnel_exposed: Option<bool>,
     tunnel_mode: Option<String>,
     app_tunnel_domain: Option<String>,
     #[serde(default)]
@@ -408,7 +407,6 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
                 params.spa_rewrite,
                 params.listen_port,
-                params.tunnel_exposed,
             ) {
                 Ok(found) => {
                     if !found {
@@ -459,17 +457,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     && params.app_tunnel_domain.as_deref() != app.app_tunnel_domain.as_deref();
 
                 if old_mode != new_mode || named_domain_changed {
-                    let local_port = match &app.target {
-                        crate::domain::BackendTarget::Tcp { port, .. } => *port,
-                        _ => {
-                            return render_err(
-                                req.request_id,
-                                ControlError::InvalidParams(
-                                    "tunnel only supports TCP backend targets".to_string(),
-                                ),
-                            );
-                        }
-                    };
+                    let routing = routing_for_app(&app, state.listen_http.port());
 
                     // Teardown old mode
                     match old_mode.as_str() {
@@ -510,7 +498,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             match tunnel::start_quick_tunnel(
                                 state.tunnels.clone(),
                                 params.app_id.clone(),
-                                local_port,
+                                routing.clone(),
                             )
                             .await
                             {
@@ -592,7 +580,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 params.app_id.clone(),
                                 credentials.clone(),
                                 tunnel_domain.clone(),
-                                local_port,
+                                routing.clone(),
                             )
                             .await
                             {
@@ -739,22 +727,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
 
-            let local_port = match &app.target {
-                crate::domain::BackendTarget::Tcp { port, .. } => *port,
-                _ => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams(
-                            "tunnel only supports TCP backend targets".to_string(),
-                        ),
-                    );
-                }
-            };
+            let routing = routing_for_app(&app, state.listen_http.port());
 
             match tunnel::start_quick_tunnel(
                 state.tunnels.clone(),
                 params.app_id.clone(),
-                local_port,
+                routing,
             )
             .await
             {
@@ -1112,17 +1090,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
 
-            let local_port = match &app.target {
-                crate::domain::BackendTarget::Tcp { port, .. } => *port,
-                _ => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams(
-                            "app tunnel only supports TCP backend targets".to_string(),
-                        ),
-                    );
-                }
-            };
+            let routing = routing_for_app(&app, state.listen_http.port());
 
             // Check if app already has a tunnel
             if app.app_tunnel_id.is_some() {
@@ -1196,7 +1164,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.app_id.clone(),
                 credentials.clone(),
                 params.domain.clone(),
-                local_port,
+                routing,
             )
             .await
             {
@@ -1395,6 +1363,17 @@ fn ok_response(request_id: String, result: serde_json::Value) -> ResponseEnvelop
 
 fn internal_error(request_id: String, message: String) -> ResponseEnvelope {
     render_err(request_id, ControlError::Internal(message))
+}
+
+/// Build the appropriate tunnel routing for an app based on its backend type.
+fn routing_for_app(
+    app: &crate::domain::AppSpec,
+    proxy_port: u16,
+) -> tunnel::transport::TunnelRouting {
+    tunnel::transport::TunnelRouting::FixedHost {
+        local_host: app.domain.0.clone(),
+        local_proxy_port: proxy_port,
+    }
 }
 
 fn normalize_path_prefix(input: Option<&str>) -> Result<Option<String>, String> {

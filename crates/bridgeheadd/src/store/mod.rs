@@ -706,7 +706,6 @@ impl AppRepository {
         basic_auth_pass: Option<Option<&str>>,
         spa_rewrite: Option<bool>,
         listen_port: Option<Option<u16>>,
-        tunnel_exposed: Option<bool>,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -738,11 +737,6 @@ impl AppRepository {
         if let Some(v) = listen_port {
             sets.push(format!("listen_port = ?{idx}"));
             values.push(Box::new(v.map(|p| p as i64)));
-            idx += 1;
-        }
-        if let Some(v) = tunnel_exposed {
-            sets.push(format!("tunnel_exposed = ?{idx}"));
-            values.push(Box::new(if v { 1i64 } else { 0 }));
             idx += 1;
         }
 
@@ -819,10 +813,11 @@ impl AppRepository {
 
     pub fn set_tunnel_mode(&self, app_id: &str, mode: &str) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
+        let exposed = if mode != "none" { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
         let changed = conn.execute(
-            "UPDATE apps SET tunnel_mode = ?1, updated_at = ?2 WHERE id = ?3",
-            params![mode, now, app_id],
+            "UPDATE apps SET tunnel_mode = ?1, tunnel_exposed = ?2, updated_at = ?3 WHERE id = ?4",
+            params![mode, exposed, now, app_id],
         )?;
         Ok(changed > 0)
     }
@@ -851,15 +846,12 @@ impl AppRepository {
 
     pub fn is_tunnel_exposed(&self, domain_prefix: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock();
-        let exposed: Option<i64> = conn
-            .query_row(
-                "SELECT MAX(tunnel_exposed) FROM apps WHERE domain = ?1 AND enabled = 1",
-                params![domain_prefix],
-                |row| row.get(0),
-            )
-            .optional()?
-            .flatten();
-        Ok(exposed == Some(1))
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM apps WHERE domain = ?1 AND enabled = 1 AND tunnel_mode != 'none'",
+            params![domain_prefix],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
     }
 
     pub fn get_by_id(&self, app_id: &str) -> anyhow::Result<Option<AppSpec>> {

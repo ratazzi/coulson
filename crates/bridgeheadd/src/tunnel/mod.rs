@@ -42,7 +42,6 @@ mod base64_serde {
 pub struct TunnelHandle {
     pub task: JoinHandle<()>,
     pub credentials: TunnelCredentials,
-    pub local_port: u16,
 }
 
 pub type TunnelManager = Arc<Mutex<HashMap<String, TunnelHandle>>>;
@@ -96,11 +95,11 @@ pub async fn start_named_tunnel(
     })
 }
 
-/// Start a quick tunnel for a local port. Returns the public hostname.
+/// Start a quick tunnel with the given routing. Returns the public hostname.
 pub async fn start_quick_tunnel(
     manager: TunnelManager,
     app_id: String,
-    local_port: u16,
+    routing: transport::TunnelRouting,
 ) -> anyhow::Result<String> {
     // Check if already running
     {
@@ -122,9 +121,9 @@ pub async fn start_quick_tunnel(
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
             let c = creds.clone();
-            let routing = transport::TunnelRouting::FixedPort(local_port);
+            let r = routing.clone();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
+                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index).await {
                     error!(error = ?err, conn_index, "tunnel connection failed");
                 }
             });
@@ -142,7 +141,6 @@ pub async fn start_quick_tunnel(
         TunnelHandle {
             task,
             credentials,
-            local_port,
         },
     );
 
@@ -170,7 +168,6 @@ pub fn tunnel_status(manager: &TunnelManager) -> Vec<serde_json::Value> {
                 "app_id": app_id,
                 "hostname": handle.credentials.hostname,
                 "tunnel_id": handle.credentials.tunnel_id,
-                "local_port": handle.local_port,
             })
         })
         .collect()
@@ -196,7 +193,7 @@ pub async fn start_app_named_tunnel(
     app_id: String,
     credentials: TunnelCredentials,
     tunnel_domain: String,
-    local_port: u16,
+    routing: transport::TunnelRouting,
 ) -> anyhow::Result<()> {
     {
         let tunnels = manager.lock();
@@ -214,9 +211,9 @@ pub async fn start_app_named_tunnel(
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
             let c = creds.clone();
-            let routing = transport::TunnelRouting::FixedPort(local_port);
+            let r = routing.clone();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
+                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index).await {
                     error!(error = ?err, conn_index, "app named tunnel connection failed");
                 }
             });

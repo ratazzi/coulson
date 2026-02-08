@@ -18,8 +18,12 @@ use crate::store::AppRepository;
 /// Determines how incoming HTTP requests from the tunnel are routed locally.
 #[derive(Clone)]
 pub enum TunnelRouting {
-    /// Quick Tunnel: all requests go to a fixed local port.
-    FixedPort(u16),
+    /// Per-app tunnel: rewrite Host header to app domain,
+    /// forward to the local Pingora proxy.
+    FixedHost {
+        local_host: String,
+        local_proxy_port: u16,
+    },
     /// Named Tunnel: extract app from Host header, rewrite Host, forward to Pingora.
     HostBased {
         tunnel_domain: String,
@@ -268,8 +272,17 @@ async fn try_connect(
                 let routing = routing.clone();
                 tokio::spawn(async move {
                     let result = match &routing {
-                        TunnelRouting::FixedPort(port) => {
-                            proxy::proxy_to_local(request, send_response, *port).await
+                        TunnelRouting::FixedHost {
+                            local_host,
+                            local_proxy_port,
+                        } => {
+                            proxy::proxy_to_local_with_host(
+                                request,
+                                send_response,
+                                *local_proxy_port,
+                                local_host,
+                            )
+                            .await
                         }
                         TunnelRouting::HostBased {
                             tunnel_domain,
