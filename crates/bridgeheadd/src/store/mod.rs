@@ -105,6 +105,10 @@ impl AppRepository {
             &conn,
             "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_id TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT")?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -158,6 +162,10 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            app_tunnel_id: None,
+            app_tunnel_domain: None,
+            app_tunnel_dns_id: None,
+            app_tunnel_creds: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -224,6 +232,10 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            app_tunnel_id: None,
+            app_tunnel_domain: None,
+            app_tunnel_dns_id: None,
+            app_tunnel_creds: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -289,6 +301,10 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
+            app_tunnel_id: None,
+            app_tunnel_domain: None,
+            app_tunnel_dns_id: None,
+            app_tunnel_creds: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -665,6 +681,34 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
+    pub fn update_app_tunnel(
+        &self,
+        app_id: &str,
+        tunnel_id: Option<&str>,
+        tunnel_domain: Option<&str>,
+        dns_id: Option<&str>,
+        creds_json: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, updated_at = ?5 WHERE id = ?6",
+            params![tunnel_id, tunnel_domain, dns_id, creds_json, now, app_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn list_app_tunnels(&self) -> anyhow::Result<Vec<AppSpec>> {
+        let conn = self.conn.lock();
+        let sql = format!(
+            "SELECT {} FROM apps WHERE app_tunnel_id IS NOT NULL AND enabled = 1",
+            COLS
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let mut rows = stmt.query([])?;
+        Self::collect_rows(&mut rows, &self.domain_suffix)
+    }
+
     pub fn is_tunnel_exposed(&self, domain_prefix: &str) -> anyhow::Result<bool> {
         let conn = self.conn.lock();
         let exposed: Option<i64> = conn
@@ -758,7 +802,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -812,6 +856,10 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .map(|v| v as u16),
         tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
         tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
+        app_tunnel_id: row.get::<_, Option<String>>(20).unwrap_or(None),
+        app_tunnel_domain: row.get::<_, Option<String>>(21).unwrap_or(None),
+        app_tunnel_dns_id: row.get::<_, Option<String>>(22).unwrap_or(None),
+        app_tunnel_creds: row.get::<_, Option<String>>(23).unwrap_or(None),
     })
 }
 

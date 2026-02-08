@@ -51,6 +51,7 @@ pub struct SharedState {
     pub scan_warnings_path: std::path::PathBuf,
     pub tunnels: tunnel::TunnelManager,
     pub named_tunnel: Arc<Mutex<Option<tunnel::NamedTunnelHandle>>>,
+    pub app_tunnels: tunnel::AppNamedTunnelManager,
     pub listen_http: std::net::SocketAddr,
 }
 
@@ -189,6 +190,7 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         scan_warnings_path: cfg.scan_warnings_path.clone(),
         tunnels: tunnel::new_tunnel_manager(),
         named_tunnel: Arc::new(Mutex::new(None)),
+        app_tunnels: tunnel::new_app_tunnel_manager(),
         listen_http: cfg.listen_http,
     })
 }
@@ -276,6 +278,50 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
                 Err(err) => {
                     error!(error = %err, "failed to parse saved named tunnel credentials");
                 }
+            }
+        }
+    }
+
+    // Auto-reconnect per-app named tunnels
+    {
+        match state.store.list_app_tunnels() {
+            Ok(apps) => {
+                for app in apps {
+                    if let (Some(creds_json), Some(domain)) =
+                        (&app.app_tunnel_creds, &app.app_tunnel_domain)
+                    {
+                        let port = match &app.target {
+                            BackendTarget::Tcp { port, .. } => *port,
+                            _ => continue,
+                        };
+                        match serde_json::from_str::<tunnel::TunnelCredentials>(creds_json) {
+                            Ok(credentials) => {
+                                info!(
+                                    app_id = %app.id.0,
+                                    domain = %domain,
+                                    "auto-reconnecting per-app named tunnel"
+                                );
+                                if let Err(err) = tunnel::start_app_named_tunnel(
+                                    state.app_tunnels.clone(),
+                                    app.id.0.clone(),
+                                    credentials,
+                                    domain.clone(),
+                                    port,
+                                )
+                                .await
+                                {
+                                    error!(error = %err, app_id = %app.id.0, "failed to auto-reconnect app tunnel");
+                                }
+                            }
+                            Err(err) => {
+                                error!(error = %err, app_id = %app.id.0, "failed to parse app tunnel credentials");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                error!(error = %err, "failed to list app tunnels for auto-reconnect");
             }
         }
     }
@@ -397,6 +443,7 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     info!("shutdown signal received");
 
     tunnel::shutdown_all(&state.tunnels);
+    tunnel::shutdown_all_app_tunnels(&state.app_tunnels);
     if let Some(handle) = state.named_tunnel.lock().take() {
         info!("shutting down named tunnel");
         handle.task.abort();

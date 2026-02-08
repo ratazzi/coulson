@@ -176,6 +176,104 @@ pub fn tunnel_status(manager: &TunnelManager) -> Vec<serde_json::Value> {
         .collect()
 }
 
+// Per-app named tunnel management
+
+pub struct AppNamedTunnelHandle {
+    pub task: JoinHandle<()>,
+    pub credentials: TunnelCredentials,
+    pub tunnel_domain: String,
+    pub tunnel_id: String,
+}
+
+pub type AppNamedTunnelManager = Arc<Mutex<HashMap<String, AppNamedTunnelHandle>>>;
+
+pub fn new_app_tunnel_manager() -> AppNamedTunnelManager {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub async fn start_app_named_tunnel(
+    manager: AppNamedTunnelManager,
+    app_id: String,
+    credentials: TunnelCredentials,
+    tunnel_domain: String,
+    local_port: u16,
+) -> anyhow::Result<()> {
+    {
+        let tunnels = manager.lock();
+        if tunnels.contains_key(&app_id) {
+            anyhow::bail!("app tunnel already running for app {}", app_id);
+        }
+    }
+
+    let tunnel_id = credentials.tunnel_id.clone();
+    let creds = credentials.clone();
+    let td = tunnel_domain.clone();
+    let mgr = manager.clone();
+    let aid = app_id.clone();
+    let task = tokio::spawn(async move {
+        let mut handles = Vec::new();
+        for conn_index in 0..4u8 {
+            let c = creds.clone();
+            let routing = transport::TunnelRouting::FixedPort(local_port);
+            let h = tokio::spawn(async move {
+                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
+                    error!(error = ?err, conn_index, "app named tunnel connection failed");
+                }
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+        mgr.lock().remove(&aid);
+    });
+
+    manager.lock().insert(
+        app_id,
+        AppNamedTunnelHandle {
+            task,
+            credentials,
+            tunnel_domain: td,
+            tunnel_id,
+        },
+    );
+
+    Ok(())
+}
+
+pub fn stop_app_named_tunnel(manager: &AppNamedTunnelManager, app_id: &str) -> anyhow::Result<()> {
+    let handle = manager
+        .lock()
+        .remove(app_id)
+        .ok_or_else(|| anyhow::anyhow!("no app tunnel running for app {}", app_id))?;
+    handle.task.abort();
+    info!(app_id = %app_id, "app named tunnel stopped");
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn app_tunnel_status(manager: &AppNamedTunnelManager) -> Vec<serde_json::Value> {
+    let tunnels = manager.lock();
+    tunnels
+        .iter()
+        .map(|(app_id, handle)| {
+            serde_json::json!({
+                "app_id": app_id,
+                "tunnel_id": handle.tunnel_id,
+                "tunnel_domain": handle.tunnel_domain,
+            })
+        })
+        .collect()
+}
+
+pub fn shutdown_all_app_tunnels(manager: &AppNamedTunnelManager) {
+    let mut tunnels = manager.lock();
+    for (app_id, handle) in tunnels.drain() {
+        info!(app_id = %app_id, "shutting down app named tunnel");
+        handle.task.abort();
+    }
+}
+
 /// Shutdown all tunnels (called during daemon shutdown).
 pub fn shutdown_all(manager: &TunnelManager) {
     let mut tunnels = manager.lock();

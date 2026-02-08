@@ -121,6 +121,148 @@ pub async fn delete_named_tunnel(
     Ok(())
 }
 
+/// Find the Cloudflare zone_id for a domain by matching the longest zone suffix.
+pub async fn find_zone_id(api_token: &str, domain: &str) -> anyhow::Result<String> {
+    #[derive(Debug, Deserialize)]
+    struct Zone {
+        id: String,
+        name: String,
+    }
+
+    let client = reqwest::Client::new();
+    let mut page = 1u32;
+    let mut best: Option<(String, usize)> = None; // (zone_id, zone_name_len)
+
+    loop {
+        let url = format!("{CF_API_BASE}/zones?per_page=50&page={page}");
+        let resp = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_token}"))
+            .send()
+            .await
+            .context("failed to contact Cloudflare zones API")?;
+
+        let body: CfApiResponse<Vec<Zone>> = resp
+            .json()
+            .await
+            .context("failed to parse CF zones response")?;
+
+        if !body.success {
+            let msg = if body.errors.is_empty() {
+                "unknown error".to_string()
+            } else {
+                cf_error_message(&body.errors)
+            };
+            anyhow::bail!("failed to list zones: {msg}");
+        }
+
+        let zones = body.result.unwrap_or_default();
+        if zones.is_empty() {
+            break;
+        }
+
+        for zone in &zones {
+            // domain must equal zone name or end with .zone_name
+            let is_match = domain == zone.name
+                || domain.ends_with(&format!(".{}", zone.name));
+            if is_match {
+                let len = zone.name.len();
+                if best.as_ref().is_none_or(|(_, best_len)| len > *best_len) {
+                    best = Some((zone.id.clone(), len));
+                }
+            }
+        }
+
+        page += 1;
+    }
+
+    best.map(|(id, _)| id)
+        .ok_or_else(|| anyhow::anyhow!("no zone found matching domain: {domain}"))
+}
+
+/// Create a CNAME DNS record pointing `name` to `{tunnel_id}.cfargotunnel.com`.
+/// Returns the DNS record ID.
+pub async fn create_dns_cname(
+    api_token: &str,
+    zone_id: &str,
+    name: &str,
+    tunnel_id: &str,
+) -> anyhow::Result<String> {
+    #[derive(Debug, Deserialize)]
+    struct DnsRecord {
+        id: String,
+    }
+
+    let client = reqwest::Client::new();
+    let url = format!("{CF_API_BASE}/zones/{zone_id}/dns_records");
+    let content = format!("{tunnel_id}.cfargotunnel.com");
+
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {api_token}"))
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "type": "CNAME",
+            "name": name,
+            "content": content,
+            "proxied": true,
+        }))
+        .send()
+        .await
+        .context("failed to contact CF DNS API")?;
+
+    let status = resp.status();
+    let body: CfApiResponse<DnsRecord> = resp
+        .json()
+        .await
+        .context("failed to parse CF DNS create response")?;
+
+    if !body.success || body.result.is_none() {
+        let msg = if body.errors.is_empty() {
+            format!("CF API returned {status}")
+        } else {
+            cf_error_message(&body.errors)
+        };
+        anyhow::bail!("failed to create DNS CNAME: {msg}");
+    }
+
+    Ok(body.result.unwrap().id)
+}
+
+/// Delete a DNS record by zone_id and record_id.
+pub async fn delete_dns_record(
+    api_token: &str,
+    zone_id: &str,
+    record_id: &str,
+) -> anyhow::Result<()> {
+    let client = reqwest::Client::new();
+    let url = format!("{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}");
+
+    let resp = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {api_token}"))
+        .send()
+        .await
+        .context("failed to contact CF DNS API for record deletion")?;
+
+    let status = resp.status();
+    let body: CfApiResponse<serde_json::Value> = resp
+        .json()
+        .await
+        .context("failed to parse CF DNS delete response")?;
+
+    if !body.success {
+        let msg = if body.errors.is_empty() {
+            format!("CF API returned {status}")
+        } else {
+            cf_error_message(&body.errors)
+        };
+        anyhow::bail!("failed to delete DNS record: {msg}");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -115,6 +115,20 @@ struct NamedTunnelTeardownParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct TunnelConfigureParams {
+    api_token: String,
+    account_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppTunnelSetupParams {
+    app_id: String,
+    domain: String,
+    #[serde(default)]
+    auto_dns: bool,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateSettingsParams {
     app_id: String,
     cors_enabled: Option<bool>,
@@ -799,6 +813,313 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     "domain": domain,
                 }))
             }
+        }
+        "tunnel.configure" => {
+            let params: TunnelConfigureParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+            if params.api_token.trim().is_empty() || params.account_id.trim().is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("api_token and account_id are required".to_string()),
+                );
+            }
+            if let Err(e) = state.store.set_setting("cf.api_token", &params.api_token) {
+                return internal_error(req.request_id, e.to_string());
+            }
+            if let Err(e) = state.store.set_setting("cf.account_id", &params.account_id) {
+                return internal_error(req.request_id, e.to_string());
+            }
+            Ok(json!({ "configured": true }))
+        }
+        "tunnel.configure_status" => {
+            let has_token = matches!(state.store.get_setting("cf.api_token"), Ok(Some(_)));
+            let has_account = matches!(state.store.get_setting("cf.account_id"), Ok(Some(_)));
+            Ok(json!({ "configured": has_token && has_account }))
+        }
+        "tunnel.app_setup" => {
+            let params: AppTunnelSetupParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            if params.domain.trim().is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("domain cannot be empty".to_string()),
+                );
+            }
+
+            // Read CF credentials from settings
+            let api_token = match state.store.get_setting("cf.api_token") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "CF credentials not configured, run tunnel.configure first".to_string(),
+                        ),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let account_id = match state.store.get_setting("cf.account_id") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("cf.account_id not configured".to_string()),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            // Look up app and get target port
+            let app = match state.store.get_by_id(&params.app_id) {
+                Ok(Some(app)) => app,
+                Ok(None) => {
+                    return render_err(req.request_id, ControlError::NotFound);
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            let local_port = match &app.target {
+                crate::domain::BackendTarget::Tcp { port, .. } => *port,
+                _ => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "app tunnel only supports TCP backend targets".to_string(),
+                        ),
+                    );
+                }
+            };
+
+            // Check if app already has a tunnel
+            if app.app_tunnel_id.is_some() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams(
+                        "app already has a tunnel configured, teardown first".to_string(),
+                    ),
+                );
+            }
+
+            // Create CF named tunnel
+            let tunnel_name = format!("bridgehead-{}", params.app_id);
+            let (credentials, tunnel_id) =
+                match tunnel::named::create_named_tunnel(&api_token, &account_id, &tunnel_name)
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+
+            // Auto DNS if requested
+            let mut dns_record_id: Option<String> = None;
+            let mut zone_id_used: Option<String> = None;
+            if params.auto_dns {
+                match tunnel::named::find_zone_id(&api_token, &params.domain).await {
+                    Ok(zid) => {
+                        zone_id_used = Some(zid.clone());
+                        match tunnel::named::create_dns_cname(
+                            &api_token,
+                            &zid,
+                            &params.domain,
+                            &tunnel_id,
+                        )
+                        .await
+                        {
+                            Ok(rid) => dns_record_id = Some(rid),
+                            Err(e) => {
+                                // Best effort: delete the tunnel we just created
+                                let _ = tunnel::named::delete_named_tunnel(
+                                    &api_token,
+                                    &account_id,
+                                    &tunnel_id,
+                                )
+                                .await;
+                                return internal_error(
+                                    req.request_id,
+                                    format!("failed to create DNS CNAME: {e}"),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tunnel::named::delete_named_tunnel(
+                            &api_token,
+                            &account_id,
+                            &tunnel_id,
+                        )
+                        .await;
+                        return internal_error(
+                            req.request_id,
+                            format!("failed to find zone for domain: {e}"),
+                        );
+                    }
+                }
+            }
+
+            // Start tunnel connection
+            if let Err(e) = tunnel::start_app_named_tunnel(
+                state.app_tunnels.clone(),
+                params.app_id.clone(),
+                credentials.clone(),
+                params.domain.clone(),
+                local_port,
+            )
+            .await
+            {
+                // Cleanup on failure
+                if let (Some(rid), Some(zid)) = (&dns_record_id, &zone_id_used) {
+                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid).await;
+                }
+                let _ =
+                    tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
+                return internal_error(req.request_id, e.to_string());
+            }
+
+            // Persist tunnel info
+            let creds_json = match serde_json::to_string(&credentials) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            if let Err(e) = state.store.update_app_tunnel(
+                &params.app_id,
+                Some(&tunnel_id),
+                Some(&params.domain),
+                dns_record_id.as_deref(),
+                Some(&creds_json),
+            ) {
+                return internal_error(req.request_id, e.to_string());
+            }
+
+            let cname_target = format!("{tunnel_id}.cfargotunnel.com");
+            Ok(json!({
+                "tunnel_id": tunnel_id,
+                "domain": params.domain,
+                "cname_target": cname_target,
+                "dns_record_id": dns_record_id,
+            }))
+        }
+        "tunnel.app_teardown" => {
+            let params: AppIdParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            // Read CF credentials
+            let api_token = match state.store.get_setting("cf.api_token") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "CF credentials not configured".to_string(),
+                        ),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let account_id = match state.store.get_setting("cf.account_id") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("cf.account_id not configured".to_string()),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            // Get app info
+            let app = match state.store.get_by_id(&params.app_id) {
+                Ok(Some(app)) => app,
+                Ok(None) => {
+                    return render_err(req.request_id, ControlError::NotFound);
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            let tunnel_id = match &app.app_tunnel_id {
+                Some(id) => id.clone(),
+                None => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("app has no tunnel configured".to_string()),
+                    );
+                }
+            };
+
+            // Stop running tunnel connection (ignore if not running)
+            let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
+
+            // Delete DNS record if auto-created
+            if let Some(dns_id) = &app.app_tunnel_dns_id {
+                // Find zone_id from the domain
+                if let Some(domain) = &app.app_tunnel_domain {
+                    if let Ok(zone_id) = tunnel::named::find_zone_id(&api_token, domain).await {
+                        if let Err(e) =
+                            tunnel::named::delete_dns_record(&api_token, &zone_id, dns_id).await
+                        {
+                            error!(error = %e, "failed to delete DNS record, continuing teardown");
+                        }
+                    }
+                }
+            }
+
+            // Delete CF tunnel
+            if let Err(e) =
+                tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await
+            {
+                error!(error = %e, "failed to delete CF tunnel, continuing teardown");
+            }
+
+            // Clear tunnel fields in DB
+            if let Err(e) =
+                state
+                    .store
+                    .update_app_tunnel(&params.app_id, None, None, None, None)
+            {
+                return internal_error(req.request_id, e.to_string());
+            }
+
+            Ok(json!({ "torn_down": true }))
+        }
+        "tunnel.app_status" => {
+            let params: AppIdParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            let app = match state.store.get_by_id(&params.app_id) {
+                Ok(Some(app)) => app,
+                Ok(None) => {
+                    return render_err(req.request_id, ControlError::NotFound);
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            let connected = state.app_tunnels.lock().contains_key(&params.app_id);
+            let configured = app.app_tunnel_id.is_some();
+
+            Ok(json!({
+                "configured": configured,
+                "connected": connected,
+                "tunnel_id": app.app_tunnel_id,
+                "tunnel_domain": app.app_tunnel_domain,
+                "dns_record_id": app.app_tunnel_dns_id,
+            }))
         }
         _ => Err(ControlError::InvalidParams(format!(
             "unknown method: {}",
