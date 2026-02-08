@@ -121,6 +121,14 @@ struct TunnelConfigureParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct NamedTunnelConnectParams {
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    domain: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AppTunnelSetupParams {
     app_id: String,
     domain: String,
@@ -138,6 +146,7 @@ struct UpdateSettingsParams {
     listen_port: Option<Option<u16>>,
     tunnel_mode: Option<String>,
     app_tunnel_domain: Option<String>,
+    app_tunnel_token: Option<String>,
     #[serde(default)]
     app_tunnel_auto_dns: Option<bool>,
 }
@@ -427,11 +436,11 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             // Handle tunnel_mode change
             if let Some(new_mode) = &params.tunnel_mode {
-                if !matches!(new_mode.as_str(), "none" | "quick" | "named") {
+                if !matches!(new_mode.as_str(), "none" | "global" | "quick" | "named") {
                     return render_err(
                         req.request_id,
                         ControlError::InvalidParams(format!(
-                            "invalid tunnel_mode: {new_mode}, must be none/quick/named"
+                            "invalid tunnel_mode: {new_mode}, must be none/global/quick/named"
                         )),
                     );
                 }
@@ -527,9 +536,54 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 .or(app.app_tunnel_domain.as_deref())
                                 .unwrap()
                                 .to_string();
+
+                            // Token-based: decode token and connect directly
+                            if let Some(token) = &params.app_tunnel_token {
+                                let credentials = match tunnel::decode_tunnel_token(token) {
+                                    Ok(v) => v,
+                                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                                };
+                                let tunnel_id = credentials.tunnel_id.clone();
+
+                                if let Err(e) = tunnel::start_app_named_tunnel(
+                                    state.app_tunnels.clone(),
+                                    params.app_id.clone(),
+                                    credentials.clone(),
+                                    tunnel_domain.clone(),
+                                    routing.clone(),
+                                )
+                                .await
+                                {
+                                    return internal_error(req.request_id, e.to_string());
+                                }
+
+                                let creds_json = match serde_json::to_string(&credentials) {
+                                    Ok(v) => v,
+                                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                                };
+                                let _ = state.store.update_app_tunnel(
+                                    &params.app_id,
+                                    Some(&tunnel_id),
+                                    Some(&tunnel_domain),
+                                    None,
+                                    Some(&creds_json),
+                                );
+                                let _ = state.store.set_tunnel_mode(&params.app_id, "named");
+
+                                return ok_response(
+                                    req.request_id,
+                                    json!({
+                                        "updated": true,
+                                        "tunnel_mode": "named",
+                                        "tunnel_id": tunnel_id,
+                                        "tunnel_domain": tunnel_domain,
+                                    }),
+                                );
+                            }
+
+                            // API-based: create tunnel via CF API
                             let auto_dns = params.app_tunnel_auto_dns.unwrap_or(false);
 
-                            // Check CF credentials
                             let api_token = match state.store.get_setting("cf.api_token") {
                                 Ok(Some(v)) => v,
                                 _ => {
@@ -621,11 +675,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 }),
                             );
                         }
-                        // "none" — teardown already done above
+                        // "none" / "global" — teardown already done above, just set mode
                         _ => {
+                            let _ = state.store.set_tunnel_mode(&params.app_id, new_mode);
                             return ok_response(
                                 req.request_id,
-                                json!({ "updated": true, "tunnel_mode": "none" }),
+                                json!({ "updated": true, "tunnel_mode": new_mode }),
                             );
                         }
                     }
@@ -930,13 +985,47 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
+            let params: NamedTunnelConnectParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            // If token+domain provided, decode and persist before connecting
+            if let (Some(token), Some(domain)) = (&params.token, &params.domain) {
+                if token.trim().is_empty() || domain.trim().is_empty() {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "token and domain must not be empty".to_string(),
+                        ),
+                    );
+                }
+                let credentials = match tunnel::decode_tunnel_token(token) {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+                let creds_json = match serde_json::to_string(&credentials) {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+                if let Err(e) = state.store.set_setting("named_tunnel.credentials", &creds_json) {
+                    return internal_error(req.request_id, e.to_string());
+                }
+                if let Err(e) = state.store.set_setting("named_tunnel.domain", domain) {
+                    return internal_error(req.request_id, e.to_string());
+                }
+            }
+
+            // Load credentials from settings
             let creds_str = match state.store.get_setting("named_tunnel.credentials") {
                 Ok(Some(v)) => v,
                 Ok(None) => {
                     return render_err(
                         req.request_id,
                         ControlError::InvalidParams(
-                            "no saved credentials, run named_tunnel.setup first".to_string(),
+                            "no saved credentials, provide token+domain or run named_tunnel.setup first".to_string(),
                         ),
                     );
                 }

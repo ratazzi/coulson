@@ -8,6 +8,7 @@ pub mod transport;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use base64::Engine;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
@@ -37,6 +38,34 @@ mod base64_serde {
             .decode(&encoded)
             .map_err(serde::de::Error::custom)
     }
+}
+
+/// Decode a Cloudflare tunnel token (base64-encoded JSON) into TunnelCredentials.
+///
+/// The token is base64 of `{"a":"account_tag","t":"tunnel_id","s":"base64_secret"}`.
+pub fn decode_tunnel_token(token: &str) -> anyhow::Result<TunnelCredentials> {
+    #[derive(Deserialize)]
+    struct TokenPayload {
+        a: String,
+        t: String,
+        s: String,
+    }
+
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(token.trim())
+        .map_err(|e| anyhow::anyhow!("invalid base64 in tunnel token: {e}"))?;
+    let payload: TokenPayload = serde_json::from_slice(&decoded)
+        .map_err(|e| anyhow::anyhow!("invalid JSON in tunnel token: {e}"))?;
+    let secret = base64::engine::general_purpose::STANDARD
+        .decode(&payload.s)
+        .map_err(|e| anyhow::anyhow!("invalid base64 secret in tunnel token: {e}"))?;
+
+    Ok(TunnelCredentials {
+        account_tag: payload.a,
+        tunnel_id: payload.t,
+        secret,
+        hostname: String::new(),
+    })
 }
 
 pub struct TunnelHandle {

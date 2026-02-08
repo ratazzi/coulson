@@ -157,29 +157,45 @@ pub async fn proxy_by_host(
 ) -> anyhow::Result<()> {
     let (parts, mut body) = request.into_parts();
 
+    // In HTTP/2, the host is in the :authority pseudo-header (mapped to URI authority),
+    // not the "host" header. Check URI authority first, then fall back to host header.
     let original_host = parts
-        .headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
+        .uri
+        .authority()
+        .map(|a| a.as_str())
+        .or_else(|| parts.headers.get("host").and_then(|v| v.to_str().ok()))
         .unwrap_or(tunnel_domain);
 
     let local_host = map_tunnel_host_to_local(original_host, tunnel_domain, local_suffix);
 
-    // Check tunnel_exposed: extract domain prefix and verify it's allowed
+    // Check tunnel access: extract domain prefix and verify the app allows tunnel access.
+    // Apps with tunnel_mode "global", "quick", or "named" are allowed.
+    // Apps with tunnel_mode "none" are not exposed through the tunnel.
     let domain_prefix = store::domain_to_db(&local_host, local_suffix);
-    let exposed = app_store.is_tunnel_exposed(&domain_prefix).unwrap_or(false);
+    let exposed = match app_store.is_tunnel_exposed(&domain_prefix) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!(
+                original_host = %original_host,
+                domain_prefix = %domain_prefix,
+                error = %e,
+                "is_tunnel_exposed query failed, denying access"
+            );
+            false
+        }
+    };
     if !exposed {
-        warn!(
+        debug!(
             original_host = %original_host,
             domain_prefix = %domain_prefix,
-            "tunnel access denied: app not exposed"
+            "tunnel access denied: app not found or tunnel_mode is off"
         );
         let response = http::Response::builder()
             .status(403)
             .body(())
             .unwrap();
         let mut send_stream = send_response.send_response(response, false)?;
-        send_stream.send_data(Bytes::from("403 Forbidden"), true)?;
+        send_stream.send_data(Bytes::from("403 Forbidden: app not exposed via tunnel"), true)?;
         return Ok(());
     }
 
