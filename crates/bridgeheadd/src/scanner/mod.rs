@@ -18,6 +18,8 @@ struct BridgeheadManifest {
     #[allow(dead_code)]
     module: Option<String>,
     #[allow(dead_code)]
+    server: Option<String>,
+    #[allow(dead_code)]
     command: Option<String>,
     target_host: Option<String>,
     #[serde(default)]
