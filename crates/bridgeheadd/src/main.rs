@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{bail, Context};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
@@ -50,6 +50,8 @@ pub struct SharedState {
     pub apps_root: std::path::PathBuf,
     pub scan_warnings_path: std::path::PathBuf,
     pub tunnels: tunnel::TunnelManager,
+    pub named_tunnel: Arc<Mutex<Option<tunnel::NamedTunnelHandle>>>,
+    pub listen_http: std::net::SocketAddr,
 }
 
 impl SharedState {
@@ -186,6 +188,8 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         apps_root: cfg.apps_root.clone(),
         scan_warnings_path: cfg.scan_warnings_path.clone(),
         tunnels: tunnel::new_tunnel_manager(),
+        named_tunnel: Arc::new(Mutex::new(None)),
+        listen_http: cfg.listen_http,
     })
 }
 
@@ -236,6 +240,44 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
         pruned = startup_scan.pruned,
         "startup apps scan completed"
     );
+
+    // Auto-connect named tunnel if credentials exist in settings
+    {
+        let creds_json = state.store.get_setting("named_tunnel.credentials");
+        let domain = state.store.get_setting("named_tunnel.domain");
+        if let (Ok(Some(creds_str)), Ok(Some(tunnel_domain))) = (creds_json, domain) {
+            match serde_json::from_str::<tunnel::TunnelCredentials>(&creds_str) {
+                Ok(credentials) => {
+                    info!(
+                        tunnel_domain = %tunnel_domain,
+                        tunnel_id = %credentials.tunnel_id,
+                        "auto-connecting named tunnel from saved credentials"
+                    );
+                    let local_proxy_port = cfg.listen_http.port();
+                    let local_suffix = cfg.domain_suffix.clone();
+                    match tunnel::start_named_tunnel(
+                        credentials,
+                        tunnel_domain,
+                        local_suffix,
+                        local_proxy_port,
+                    )
+                    .await
+                    {
+                        Ok(handle) => {
+                            *state.named_tunnel.lock() = Some(handle);
+                            info!("named tunnel auto-connected");
+                        }
+                        Err(err) => {
+                            error!(error = %err, "failed to auto-connect named tunnel");
+                        }
+                    }
+                }
+                Err(err) => {
+                    error!(error = %err, "failed to parse saved named tunnel credentials");
+                }
+            }
+        }
+    }
 
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
@@ -354,6 +396,10 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     info!("shutdown signal received");
 
     tunnel::shutdown_all(&state.tunnels);
+    if let Some(handle) = state.named_tunnel.lock().take() {
+        info!("shutting down named tunnel");
+        handle.task.abort();
+    }
 
     proxy_task.abort();
     control_task.abort();

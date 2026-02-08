@@ -1,4 +1,5 @@
 pub mod edge;
+pub mod named;
 pub mod proxy;
 pub mod quick;
 pub mod rpc;
@@ -50,6 +51,49 @@ pub fn new_tunnel_manager() -> TunnelManager {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+pub struct NamedTunnelHandle {
+    pub task: JoinHandle<()>,
+    pub credentials: TunnelCredentials,
+    pub tunnel_domain: String,
+}
+
+/// Start a named tunnel that routes by Host header to the local Pingora proxy.
+pub async fn start_named_tunnel(
+    credentials: TunnelCredentials,
+    tunnel_domain: String,
+    local_suffix: String,
+    local_proxy_port: u16,
+) -> anyhow::Result<NamedTunnelHandle> {
+    let creds = credentials.clone();
+    let td = tunnel_domain.clone();
+    let task = tokio::spawn(async move {
+        let mut handles = Vec::new();
+        for conn_index in 0..4u8 {
+            let c = creds.clone();
+            let routing = transport::TunnelRouting::HostBased {
+                tunnel_domain: td.clone(),
+                local_suffix: local_suffix.clone(),
+                local_proxy_port,
+            };
+            let h = tokio::spawn(async move {
+                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
+                    error!(error = ?err, conn_index, "named tunnel connection failed");
+                }
+            });
+            handles.push(h);
+        }
+        for h in handles {
+            let _ = h.await;
+        }
+    });
+
+    Ok(NamedTunnelHandle {
+        task,
+        credentials,
+        tunnel_domain,
+    })
+}
+
 /// Start a quick tunnel for a local port. Returns the public hostname.
 pub async fn start_quick_tunnel(
     manager: TunnelManager,
@@ -76,9 +120,9 @@ pub async fn start_quick_tunnel(
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
             let c = creds.clone();
+            let routing = transport::TunnelRouting::FixedPort(local_port);
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, local_port, conn_index).await
-                {
+                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
                     error!(error = ?err, conn_index, "tunnel connection failed");
                 }
             });

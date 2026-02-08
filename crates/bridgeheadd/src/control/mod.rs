@@ -101,6 +101,20 @@ struct AppIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct NamedTunnelSetupParams {
+    api_token: String,
+    account_id: String,
+    domain: String,
+    #[serde(default)]
+    tunnel_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NamedTunnelTeardownParams {
+    api_token: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct UpdateSettingsParams {
     app_id: String,
     cors_enabled: Option<bool>,
@@ -537,6 +551,250 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "tunnel.status" => {
             let tunnels = tunnel::tunnel_status(&state.tunnels);
             Ok(json!({ "tunnels": tunnels }))
+        }
+        "named_tunnel.setup" => {
+            let params: NamedTunnelSetupParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            if params.domain.trim().is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("domain cannot be empty".to_string()),
+                );
+            }
+
+            // Check if already connected
+            if state.named_tunnel.lock().is_some() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams(
+                        "named tunnel already active, disconnect first".to_string(),
+                    ),
+                );
+            }
+
+            let tunnel_name = params
+                .tunnel_name
+                .unwrap_or_else(|| format!("bridgehead-{}", &params.domain));
+
+            let (credentials, tunnel_id) = match tunnel::named::create_named_tunnel(
+                &params.api_token,
+                &params.account_id,
+                &tunnel_name,
+            )
+            .await
+            {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            // Persist credentials and domain
+            let creds_json = match serde_json::to_string(&credentials) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            if let Err(e) = state.store.set_setting("named_tunnel.credentials", &creds_json) {
+                return internal_error(req.request_id, e.to_string());
+            }
+            if let Err(e) = state.store.set_setting("named_tunnel.domain", &params.domain) {
+                return internal_error(req.request_id, e.to_string());
+            }
+            if let Err(e) = state
+                .store
+                .set_setting("named_tunnel.account_id", &params.account_id)
+            {
+                return internal_error(req.request_id, e.to_string());
+            }
+
+            // Start the tunnel
+            let local_proxy_port = state.listen_http.port();
+            let local_suffix = state.domain_suffix.clone();
+            match tunnel::start_named_tunnel(
+                credentials,
+                params.domain.clone(),
+                local_suffix,
+                local_proxy_port,
+            )
+            .await
+            {
+                Ok(handle) => {
+                    *state.named_tunnel.lock() = Some(handle);
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+
+            let cname_target = format!("{tunnel_id}.cfargotunnel.com");
+            Ok(json!({
+                "tunnel_id": tunnel_id,
+                "cname_target": cname_target,
+                "domain": params.domain,
+                "hint": format!("Add DNS: *.{} CNAME {}", params.domain, cname_target),
+            }))
+        }
+        "named_tunnel.teardown" => {
+            let params: NamedTunnelTeardownParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            // Disconnect if active (scope the lock to avoid holding across await)
+            let active_handle = state.named_tunnel.lock().take();
+            if let Some(handle) = active_handle {
+                handle.task.abort();
+                info!("named tunnel disconnected for teardown");
+
+                let account_id = match state.store.get_setting("named_tunnel.account_id") {
+                    Ok(Some(v)) => v,
+                    _ => {
+                        return render_err(
+                            req.request_id,
+                            ControlError::Internal(
+                                "account_id not found in settings".to_string(),
+                            ),
+                        );
+                    }
+                };
+
+                if let Err(e) = tunnel::named::delete_named_tunnel(
+                    &params.api_token,
+                    &account_id,
+                    &handle.credentials.tunnel_id,
+                )
+                .await
+                {
+                    return internal_error(req.request_id, e.to_string());
+                }
+            } else {
+                // Try to delete from stored credentials even if not connected
+                let creds_json = state.store.get_setting("named_tunnel.credentials");
+                let account_id = state.store.get_setting("named_tunnel.account_id");
+                if let (Ok(Some(creds_str)), Ok(Some(acct))) = (creds_json, account_id) {
+                    if let Ok(creds) = serde_json::from_str::<tunnel::TunnelCredentials>(&creds_str)
+                    {
+                        if let Err(e) = tunnel::named::delete_named_tunnel(
+                            &params.api_token,
+                            &acct,
+                            &creds.tunnel_id,
+                        )
+                        .await
+                        {
+                            return internal_error(req.request_id, e.to_string());
+                        }
+                    }
+                }
+            }
+
+            // Clear stored credentials
+            let _ = state.store.delete_setting("named_tunnel.credentials");
+            let _ = state.store.delete_setting("named_tunnel.domain");
+            let _ = state.store.delete_setting("named_tunnel.account_id");
+
+            Ok(json!({ "torn_down": true }))
+        }
+        "named_tunnel.connect" => {
+            if state.named_tunnel.lock().is_some() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("named tunnel already connected".to_string()),
+                );
+            }
+
+            let creds_str = match state.store.get_setting("named_tunnel.credentials") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "no saved credentials, run named_tunnel.setup first".to_string(),
+                        ),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let tunnel_domain = match state.store.get_setting("named_tunnel.domain") {
+                Ok(Some(v)) => v,
+                Ok(None) => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("no saved tunnel domain".to_string()),
+                    );
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let credentials: tunnel::TunnelCredentials = match serde_json::from_str(&creds_str) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            let local_proxy_port = state.listen_http.port();
+            let local_suffix = state.domain_suffix.clone();
+            match tunnel::start_named_tunnel(
+                credentials,
+                tunnel_domain.clone(),
+                local_suffix,
+                local_proxy_port,
+            )
+            .await
+            {
+                Ok(handle) => {
+                    *state.named_tunnel.lock() = Some(handle);
+                    Ok(json!({ "connected": true, "domain": tunnel_domain }))
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+        }
+        "named_tunnel.disconnect" => {
+            match state.named_tunnel.lock().take() {
+                Some(handle) => {
+                    handle.task.abort();
+                    info!("named tunnel disconnected");
+                    Ok(json!({ "disconnected": true }))
+                }
+                None => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("no named tunnel connected".to_string()),
+                    );
+                }
+            }
+        }
+        "named_tunnel.status" => {
+            let guard = state.named_tunnel.lock();
+            if let Some(handle) = guard.as_ref() {
+                let domain = match state.store.get_setting("named_tunnel.domain") {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+                Ok(json!({
+                    "connected": true,
+                    "tunnel_id": handle.credentials.tunnel_id,
+                    "tunnel_domain": handle.tunnel_domain,
+                    "domain": domain,
+                    "cname_target": format!("{}.cfargotunnel.com", handle.credentials.tunnel_id),
+                }))
+            } else {
+                // Check if credentials are saved (disconnected but configured)
+                let has_creds = matches!(
+                    state.store.get_setting("named_tunnel.credentials"),
+                    Ok(Some(_))
+                );
+                let domain = state
+                    .store
+                    .get_setting("named_tunnel.domain")
+                    .ok()
+                    .flatten();
+                Ok(json!({
+                    "connected": false,
+                    "configured": has_creds,
+                    "domain": domain,
+                }))
+            }
         }
         _ => Err(ControlError::InvalidParams(format!(
             "unknown method: {}",

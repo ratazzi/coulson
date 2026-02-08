@@ -69,6 +69,12 @@ impl AppRepository {
 
             CREATE INDEX IF NOT EXISTS idx_apps_enabled_domain
             ON apps(enabled, domain);
+
+            CREATE TABLE IF NOT EXISTS settings (
+              key TEXT PRIMARY KEY,
+              value TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
             "#,
         )?;
         add_column_if_missing(
@@ -602,6 +608,35 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
+    pub fn get_setting(&self, key: &str) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        let value = conn
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> anyhow::Result<()> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+            params![key, value, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_setting(&self, key: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let changed = conn.execute("DELETE FROM settings WHERE key = ?1", params![key])?;
+        Ok(changed > 0)
+    }
+
     pub fn update_tunnel_url(
         &self,
         app_id: &str,
@@ -866,6 +901,33 @@ mod tests {
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].domain.0, "myapp.bridgehead.local");
+    }
+
+    #[test]
+    fn settings_crud() {
+        let repo = AppRepository {
+            conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
+            domain_suffix: "bridgehead.local".to_string(),
+        };
+        repo.init_schema().expect("schema");
+
+        // Get missing key returns None
+        assert_eq!(repo.get_setting("foo").unwrap(), None);
+
+        // Set and get
+        repo.set_setting("foo", "bar").unwrap();
+        assert_eq!(repo.get_setting("foo").unwrap(), Some("bar".to_string()));
+
+        // Overwrite
+        repo.set_setting("foo", "baz").unwrap();
+        assert_eq!(repo.get_setting("foo").unwrap(), Some("baz".to_string()));
+
+        // Delete
+        assert!(repo.delete_setting("foo").unwrap());
+        assert_eq!(repo.get_setting("foo").unwrap(), None);
+
+        // Delete missing key
+        assert!(!repo.delete_setting("foo").unwrap());
     }
 
     #[test]

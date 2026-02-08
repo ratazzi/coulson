@@ -14,12 +14,26 @@ use super::proxy;
 use super::rpc;
 use super::TunnelCredentials;
 
+/// Determines how incoming HTTP requests from the tunnel are routed locally.
+#[derive(Clone)]
+pub enum TunnelRouting {
+    /// Quick Tunnel: all requests go to a fixed local port.
+    FixedPort(u16),
+    /// Named Tunnel: extract app from Host header, rewrite Host, forward to Pingora.
+    HostBased {
+        tunnel_domain: String,
+        local_suffix: String,
+        local_proxy_port: u16,
+    },
+}
+
 const EDGE_SNI: &str = "h2.cftunnel.com";
 const UPGRADE_HEADER: &str = "cf-cloudflared-proxy-connection-upgrade";
 
 #[derive(Debug)]
 enum StreamType {
     ControlStream,
+    UpdateConfiguration,
     Http,
 }
 
@@ -27,6 +41,9 @@ fn detect_stream_type(req: &Request<h2::RecvStream>) -> StreamType {
     if let Some(val) = req.headers().get(UPGRADE_HEADER) {
         if val.as_bytes() == b"control-stream" {
             return StreamType::ControlStream;
+        }
+        if val.as_bytes() == b"update-configuration" {
+            return StreamType::UpdateConfiguration;
         }
     }
     StreamType::Http
@@ -153,13 +170,13 @@ async fn tls_connect(
 /// Run a single tunnel connection to Cloudflare edge with reconnection.
 pub async fn run_tunnel_connection(
     credentials: &TunnelCredentials,
-    local_port: u16,
+    routing: TunnelRouting,
     conn_index: u8,
 ) -> anyhow::Result<()> {
     let tls_config = build_tls_config();
 
     loop {
-        match try_connect(credentials, local_port, conn_index, &tls_config).await {
+        match try_connect(credentials, &routing, conn_index, &tls_config).await {
             Ok(()) => {
                 info!("tunnel connection closed normally, reconnecting...");
             }
@@ -174,7 +191,7 @@ pub async fn run_tunnel_connection(
 
 async fn try_connect(
     credentials: &TunnelCredentials,
-    local_port: u16,
+    routing: &TunnelRouting,
     conn_index: u8,
     tls_config: &Arc<ClientConfig>,
 ) -> anyhow::Result<()> {
@@ -200,7 +217,7 @@ async fn try_connect(
     let mut control_registered = false;
 
     while let Some(result) = h2_conn.accept().await {
-        let (request, send_response) = result.context("h2 accept error")?;
+        let (request, mut send_response) = result.context("h2 accept error")?;
 
         match detect_stream_type(&request) {
             StreamType::ControlStream => {
@@ -234,11 +251,40 @@ async fn try_connect(
                     Err(_) => error!("control stream thread panicked"),
                 });
             }
+            StreamType::UpdateConfiguration => {
+                // CF edge pushes config updates; acknowledge and ignore.
+                info!("received update-configuration stream, acknowledging");
+                let response = http::Response::builder()
+                    .status(200)
+                    .body(())
+                    .unwrap();
+                if let Err(err) = send_response.send_response(response, true) {
+                    warn!(error = %err, "failed to ack update-configuration");
+                }
+            }
             StreamType::Http => {
+                let routing = routing.clone();
                 tokio::spawn(async move {
-                    if let Err(err) =
-                        proxy::proxy_to_local(request, send_response, local_port).await
-                    {
+                    let result = match &routing {
+                        TunnelRouting::FixedPort(port) => {
+                            proxy::proxy_to_local(request, send_response, *port).await
+                        }
+                        TunnelRouting::HostBased {
+                            tunnel_domain,
+                            local_suffix,
+                            local_proxy_port,
+                        } => {
+                            proxy::proxy_by_host(
+                                request,
+                                send_response,
+                                tunnel_domain,
+                                local_suffix,
+                                *local_proxy_port,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(err) = result {
                         error!(error = %err, "proxy request failed");
                     }
                 });
