@@ -196,6 +196,22 @@ impl ProxyHttp for BridgeProxy {
         }
     }
 
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        if let Some(upgrade) = _session.req_header().headers.get("upgrade").cloned() {
+            upstream_request.insert_header("Upgrade", upgrade)?;
+            upstream_request.insert_header("Connection", "Upgrade")?;
+        }
+        Ok(())
+    }
+
     fn upstream_response_filter(
         &self,
         _session: &mut Session,
@@ -362,6 +378,22 @@ impl ProxyHttp for DedicatedProxy {
                 Error::e_explain(ErrorType::InternalError, "non-proxy target has no upstream")
             }
         }
+    }
+
+    async fn upstream_request_filter(
+        &self,
+        _session: &mut Session,
+        upstream_request: &mut RequestHeader,
+        _ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        if let Some(upgrade) = _session.req_header().headers.get("upgrade").cloned() {
+            upstream_request.insert_header("Upgrade", upgrade)?;
+            upstream_request.insert_header("Connection", "Upgrade")?;
+        }
+        Ok(())
     }
 
     fn upstream_response_filter(
