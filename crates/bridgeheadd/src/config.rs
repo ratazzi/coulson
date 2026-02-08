@@ -33,7 +33,7 @@ impl Default for BridgeheadConfig {
             scan_warnings_path: PathBuf::from(format!("{home}/.bridgehead/scan_warnings.json")),
             domain_suffix: "bridgehead.local".to_string(),
             apps_root,
-            scan_interval_secs: 2,
+            scan_interval_secs: 0,
             watch_fs: true,
             idle_timeout_secs: 900,
         }
