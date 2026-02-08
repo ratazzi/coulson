@@ -25,3 +25,20 @@ pingora = { version = "0.6", features = ["proxy"] }
 mdns-sd = { version = "0.17", features = ["async"] }
 notify = "8"
 bytes = "1"
+capnp = "0.20"
+capnp-rpc = "0.20"
+h2 = "0.4"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy", "http1"] }
+http-body-util = "0.1"
+http = "1"
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+webpki-roots = "0.26"
+reqwest = { version = "0.12", features = ["json"] }
+hickory-resolver = "0.25"
+base64 = "0.22"
+futures = "0.3"
+rand = "0.8"
+tokio-util = { version = "0.7", features = ["compat"] }

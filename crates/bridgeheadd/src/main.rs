@@ -6,6 +6,10 @@ mod proxy;
 mod runtime;
 mod scanner;
 mod store;
+mod tunnel;
+
+// Re-export at crate root so generated capnp code can find it as `crate::tunnelrpc_capnp`
+pub(crate) use tunnel::rpc::tunnelrpc_capnp;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -45,6 +49,7 @@ pub struct SharedState {
     pub domain_suffix: String,
     pub apps_root: std::path::PathBuf,
     pub scan_warnings_path: std::path::PathBuf,
+    pub tunnels: tunnel::TunnelManager,
 }
 
 impl SharedState {
@@ -180,6 +185,7 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         domain_suffix: cfg.domain_suffix.clone(),
         apps_root: cfg.apps_root.clone(),
         scan_warnings_path: cfg.scan_warnings_path.clone(),
+        tunnels: tunnel::new_tunnel_manager(),
     })
 }
 
@@ -346,6 +352,8 @@ async fn run_serve(cfg: BridgeheadConfig) -> anyhow::Result<()> {
     info!("bridgeheadd started");
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
+
+    tunnel::shutdown_all(&state.tunnels);
 
     proxy_task.abort();
     control_task.abort();

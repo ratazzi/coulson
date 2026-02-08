@@ -22,3 +22,23 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+capnp.workspace = true
+capnp-rpc.workspace = true
+h2.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+reqwest.workspace = true
+hickory-resolver.workspace = true
+base64.workspace = true
+futures.workspace = true
+rand.workspace = true
+tokio-util.workspace = true
+
+[build-dependencies]
+capnpc = "0.20"

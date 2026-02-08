@@ -10,6 +10,7 @@ use tracing::{error, info};
 use crate::domain::DomainName;
 use crate::scanner;
 use crate::store::StoreError;
+use crate::tunnel;
 use crate::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -469,6 +470,74 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(data) => Ok(json!({ "warnings": data })),
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
+        "tunnel.start" => {
+            let params: AppIdParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            // Look up the app to get its target port
+            let app = match state.store.get_by_id(&params.app_id) {
+                Ok(Some(app)) => app,
+                Ok(None) => {
+                    return render_err(req.request_id, ControlError::NotFound);
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+
+            let local_port = match &app.target {
+                crate::domain::BackendTarget::Tcp { port, .. } => *port,
+                _ => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "tunnel only supports TCP backend targets".to_string(),
+                        ),
+                    );
+                }
+            };
+
+            match tunnel::start_quick_tunnel(
+                state.tunnels.clone(),
+                params.app_id.clone(),
+                local_port,
+            )
+            .await
+            {
+                Ok(hostname) => {
+                    let url = format!("https://{}", hostname);
+                    if let Err(e) = state.store.update_tunnel_url(&params.app_id, Some(&url)) {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "tunnel_url": url, "hostname": hostname }))
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+        }
+        "tunnel.stop" => {
+            let params: AppIdParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            match tunnel::stop_tunnel(&state.tunnels, &params.app_id) {
+                Ok(()) => {
+                    if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "stopped": true }))
+                }
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+        }
+        "tunnel.status" => {
+            let tunnels = tunnel::tunnel_status(&state.tunnels);
+            Ok(json!({ "tunnels": tunnels }))
+        }
         _ => Err(ControlError::InvalidParams(format!(
             "unknown method: {}",
             req.method

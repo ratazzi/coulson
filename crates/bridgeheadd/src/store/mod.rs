@@ -94,6 +94,7 @@ impl AppRepository {
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN static_root TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN socket_path TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN listen_port INTEGER")?;
+        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN tunnel_url TEXT")?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -145,6 +146,7 @@ impl AppRepository {
             basic_auth_pass: basic_auth_pass.map(ToOwned::to_owned),
             spa_rewrite,
             listen_port,
+            tunnel_url: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -209,6 +211,7 @@ impl AppRepository {
             basic_auth_pass: None,
             spa_rewrite: false,
             listen_port,
+            tunnel_url: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -272,6 +275,7 @@ impl AppRepository {
             basic_auth_pass: None,
             spa_rewrite: false,
             listen_port,
+            tunnel_url: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -598,6 +602,32 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
+    pub fn update_tunnel_url(
+        &self,
+        app_id: &str,
+        tunnel_url: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE apps SET tunnel_url = ?1, updated_at = ?2 WHERE id = ?3",
+            params![tunnel_url, now, app_id],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn get_by_id(&self, app_id: &str) -> anyhow::Result<Option<AppSpec>> {
+        let conn = self.conn.lock();
+        let app = conn
+            .query_row(
+                &format!("SELECT {} FROM apps WHERE id = ?1", COLS),
+                params![app_id],
+                |row| row_to_app(row, &self.domain_suffix),
+            )
+            .optional()?;
+        Ok(app)
+    }
+
     fn read_app_by_route(
         conn: &Connection,
         domain_db: &str,
@@ -666,7 +696,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind: String = row.get(2)?;
@@ -718,6 +748,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .get::<_, Option<i64>>(17)
             .unwrap_or(None)
             .map(|v| v as u16),
+        tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
     })
 }
 

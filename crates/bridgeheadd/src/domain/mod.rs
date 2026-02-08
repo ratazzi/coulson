@@ -105,6 +105,7 @@ pub struct AppSpec {
     pub basic_auth_pass: Option<String>,
     pub spa_rewrite: bool,
     pub listen_port: Option<u16>,
+    pub tunnel_url: Option<String>,
     pub enabled: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
