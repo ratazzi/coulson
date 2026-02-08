@@ -7,6 +7,7 @@ final class BridgeheadViewModel: ObservableObject {
     @Published var warnings: ScanWarningsFile?
     @Published var isHealthy = false
     @Published var namedTunnelDomain: String?
+    @Published var errorMessage: String?
 
     private let client: UDSControlClient
     let domainSuffix: String
@@ -29,7 +30,7 @@ final class BridgeheadViewModel: ObservableObject {
     }
 
     func tunnelURL(for app: AppRecord) -> String? {
-        guard app.tunnelExposed, let tunnelDomain = namedTunnelDomain else { return nil }
+        guard app.tunnelMode != "none", let tunnelDomain = namedTunnelDomain else { return nil }
         let dotSuffix = ".\(domainSuffix)"
         let prefix = app.domain.hasSuffix(dotSuffix)
             ? String(app.domain.dropLast(dotSuffix.count))
@@ -141,23 +142,16 @@ final class BridgeheadViewModel: ObservableObject {
         } catch {}
     }
 
-    func setTunnelExposed(app: AppRecord, exposed: Bool) async {
-        do {
-            _ = try client.request(method: "app.update", params: [
-                "app_id": app.id,
-                "tunnel_exposed": exposed,
-            ])
-            await refreshAll()
-        } catch {}
-    }
-
     func updateApp(app: AppRecord, params: [String: Any]) async {
         var allParams: [String: Any] = ["app_id": app.id]
         for (k, v) in params { allParams[k] = v }
         do {
             _ = try client.request(method: "app.update", params: allParams)
             await refreshAll()
-        } catch {}
+        } catch {
+            errorMessage = error.localizedDescription
+            await refreshAll()
+        }
     }
 
     func deleteApp(_ app: AppRecord) async -> Bool {

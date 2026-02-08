@@ -37,6 +37,14 @@ struct AppDetailView: View {
         } message: {
             Text("This will remove the app from Bridgehead. The underlying service is not affected.")
         }
+        .alert("Error", isPresented: Binding(
+            get: { vm.errorMessage != nil },
+            set: { if !$0 { vm.errorMessage = nil } }
+        )) {
+            Button("OK") { vm.errorMessage = nil }
+        } message: {
+            Text(vm.errorMessage ?? "")
+        }
     }
 
     // MARK: - Status Banner
@@ -218,25 +226,6 @@ struct AppDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("Tunnel")
             VStack(spacing: 0) {
-                HStack {
-                    Text("Expose via tunnel")
-                        .font(.system(size: 13))
-                    Spacer()
-                    Toggle("", isOn: Binding(
-                        get: { app.tunnelExposed },
-                        set: { exposed in
-                            Task { await vm.setTunnelExposed(app: app, exposed: exposed) }
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(.switch)
-                    .controlSize(.small)
-                }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 8)
-
-                Divider().padding(.leading, 12)
-
                 // Tunnel mode picker
                 HStack {
                     Text("Mode")

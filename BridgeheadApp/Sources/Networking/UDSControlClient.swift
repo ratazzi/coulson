@@ -31,6 +31,10 @@ struct UDSControlClient {
         }
         guard connectResult == 0 else { throw ClientError.connectFailed }
 
+        // Set read timeout so we don't block forever if daemon stalls.
+        var tv = timeval(tv_sec: 5, tv_usec: 0)
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+
         let reqID = "swift-\(UUID().uuidString)"
         let payload: [String: Any] = [
             "request_id": reqID,
@@ -44,11 +48,21 @@ struct UDSControlClient {
             var nl = UInt8(ascii: "\n")
             _ = write(fd, &nl, 1)
         }
+        // Signal we're done writing so the server's reader returns EOF
+        // instead of blocking on next_line(), preventing broken pipe on close.
+        shutdown(fd, SHUT_WR)
 
-        var buffer = [UInt8](repeating: 0, count: 8192)
-        let readCount = read(fd, &buffer, buffer.count)
-        guard readCount > 0 else { throw ClientError.emptyResponse }
-        let raw = String(decoding: buffer.prefix(readCount), as: UTF8.self)
+        // Read until we get a complete NDJSON line (terminated by \n).
+        var accumulated = Data()
+        var chunk = [UInt8](repeating: 0, count: 16384)
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            if n <= 0 { break }
+            accumulated.append(contentsOf: chunk.prefix(n))
+            if accumulated.contains(UInt8(ascii: "\n")) { break }
+        }
+        guard !accumulated.isEmpty else { throw ClientError.emptyResponse }
+        let raw = String(decoding: accumulated, as: UTF8.self)
         let line = raw.split(separator: "\n").first.map(String.init) ?? raw
         guard let json = try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else {
             throw ClientError.invalidResponse
@@ -57,7 +71,10 @@ struct UDSControlClient {
         if let ok = json["ok"] as? Bool, ok, let result = json["result"] as? [String: Any] {
             return result
         }
-        throw ClientError.rpcFailed
+        if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
+            throw ClientError.rpcFailed(msg)
+        }
+        throw ClientError.rpcFailed("unknown error")
     }
 
     enum ClientError: Error, LocalizedError {
@@ -65,7 +82,7 @@ struct UDSControlClient {
         case pathTooLong
         case emptyResponse
         case invalidResponse
-        case rpcFailed
+        case rpcFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -73,7 +90,7 @@ struct UDSControlClient {
             case .pathTooLong: return "Socket path too long"
             case .emptyResponse: return "Empty response from daemon"
             case .invalidResponse: return "Invalid response from daemon"
-            case .rpcFailed: return "RPC request failed"
+            case .rpcFailed(let msg): return msg
             }
         }
     }
