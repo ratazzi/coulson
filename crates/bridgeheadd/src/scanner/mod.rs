@@ -96,6 +96,14 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                 app.enabled,
                 "apps_root",
             )?
+        } else if let Some(ref static_root) = app.static_root {
+            state.store.upsert_scanned_static_dir(
+                &app.name,
+                &app.domain,
+                static_root,
+                app.enabled,
+                "apps_root",
+            )?
         } else {
             state.store.upsert_scanned_static(
                 &app.name,
@@ -163,6 +171,7 @@ struct DiscoveredStaticApp {
     spa_rewrite: bool,
     listen_port: Option<u16>,
     app_root: Option<String>,
+    static_root: Option<String>,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -243,6 +252,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     spa_rewrite: false,
                     listen_port: None,
                     app_root: None,
+                    static_root: None,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
@@ -290,6 +300,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         spa_rewrite: false,
                         listen_port: None,
                         app_root: None,
+                        static_root: None,
                         enabled: true,
                         explicit_domain,
                     };
@@ -327,6 +338,38 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         spa_rewrite: false,
                         listen_port: None,
                         app_root: Some(root_str),
+                        static_root: None,
+                        enabled: true,
+                        explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
+                    };
+                    insert_with_priority(&mut by_route, &mut conflicts, app);
+                } else if entry.path().join("public").is_dir() {
+                    let domain_text = file_name_to_domain(&dir_name, suffix);
+                    let domain =
+                        DomainName::parse(&domain_text, suffix).with_context(|| {
+                            format!(
+                                "invalid domain '{}' in {}",
+                                domain_text,
+                                entry.path().display()
+                            )
+                        })?;
+                    let public_root = entry.path().join("public").to_string_lossy().to_string();
+                    let app = DiscoveredStaticApp {
+                        name: sanitize_name(&dir_name),
+                        kind: AppKind::Static,
+                        domain,
+                        path_prefix: None,
+                        target_host: String::new(),
+                        target_port: 0,
+                        socket_path: None,
+                        timeout_ms: None,
+                        cors_enabled: false,
+                        basic_auth_user: None,
+                        basic_auth_pass: None,
+                        spa_rewrite: false,
+                        listen_port: None,
+                        app_root: None,
+                        static_root: Some(public_root),
                         enabled: true,
                         explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
                     };
@@ -370,6 +413,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     listen_port: manifest.listen_port,
                     app_root: Some(root_str),
+                    static_root: None,
                     enabled,
                     explicit_domain,
                 };
@@ -391,6 +435,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                         spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
                         listen_port: route.listen_port.or(manifest.listen_port),
                         app_root: None,
+                        static_root: None,
                         enabled,
                         explicit_domain,
                     };
@@ -415,6 +460,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     listen_port: manifest.listen_port,
                     app_root: None,
+                    static_root: None,
                     enabled,
                     explicit_domain,
                 };
@@ -492,6 +538,7 @@ fn discover_from_symlink(
                 spa_rewrite: false,
                 listen_port: None,
                 app_root: None,
+                static_root: None,
                 enabled: true,
                 explicit_domain,
             });
@@ -521,6 +568,7 @@ fn discover_from_symlink(
                     spa_rewrite: false,
                     listen_port: None,
                     app_root: None,
+                    static_root: None,
                     enabled: true,
                     explicit_domain,
                 });
@@ -548,6 +596,29 @@ fn discover_from_symlink(
                     spa_rewrite: false,
                     listen_port: None,
                     app_root: Some(root_str),
+                    static_root: None,
+                    enabled: true,
+                    explicit_domain,
+                }]);
+            }
+            if resolved_target.join("public").is_dir() {
+                let public_root = resolved_target.join("public").to_string_lossy().to_string();
+                return Ok(vec![DiscoveredStaticApp {
+                    name,
+                    kind: AppKind::Static,
+                    domain,
+                    path_prefix: None,
+                    target_host: String::new(),
+                    target_port: 0,
+                    socket_path: None,
+                    timeout_ms: None,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
+                    listen_port: None,
+                    app_root: None,
+                    static_root: Some(public_root),
                     enabled: true,
                     explicit_domain,
                 }]);
@@ -572,6 +643,7 @@ fn discover_from_symlink(
                 spa_rewrite: false,
                 listen_port: None,
                 app_root: None,
+                static_root: None,
                 enabled: true,
                 explicit_domain,
             }]);
@@ -836,6 +908,7 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 app_root: None,
+                static_root: None,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -858,6 +931,7 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 app_root: None,
+                static_root: None,
                 enabled: true,
                 explicit_domain: true,
             },

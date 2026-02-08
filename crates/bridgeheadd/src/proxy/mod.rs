@@ -17,6 +17,50 @@ use crate::domain::BackendTarget;
 use crate::process::ProcessManagerHandle;
 use crate::{RouteRule, SharedState};
 
+// ---------------------------------------------------------------------------
+// Middleware pipeline
+// ---------------------------------------------------------------------------
+
+/// Controls whether the middleware pipeline should continue or stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Flow {
+    /// Response already written — stop the pipeline.
+    Done,
+    /// Continue to the next middleware / backend resolution.
+    Next,
+}
+
+async fn mw_auth(session: &mut Session, route: &RouteRule) -> Result<Flow> {
+    if let (Some(user), Some(pass)) = (&route.basic_auth_user, &route.basic_auth_pass) {
+        if !check_basic_auth(session, user, pass) {
+            write_auth_required(session).await?;
+            return Ok(Flow::Done);
+        }
+    }
+    Ok(Flow::Next)
+}
+
+async fn mw_cors(session: &mut Session, route: &RouteRule) -> Result<Flow> {
+    if route.cors_enabled {
+        let method = session.req_header().method.as_str();
+        let has_origin = session.req_header().headers.get("origin").is_some();
+        if method == "OPTIONS" && has_origin {
+            write_cors_preflight(session).await?;
+            return Ok(Flow::Done);
+        }
+    }
+    Ok(Flow::Next)
+}
+
+async fn mw_static(session: &mut Session, route: &RouteRule, req_path: &str) -> Result<Flow> {
+    if let Some(ref root) = route.static_root {
+        if try_serve_static(session, root, req_path, route.cors_enabled).await? {
+            return Ok(Flow::Done);
+        }
+    }
+    Ok(Flow::Next)
+}
+
 #[derive(Clone)]
 struct BridgeProxy {
     shared: SharedState,
@@ -67,27 +111,18 @@ impl ProxyHttp for BridgeProxy {
             return Ok(true);
         };
 
-        // --- Basic Auth ---
-        if let (Some(expected_user), Some(expected_pass)) =
-            (&route.basic_auth_user, &route.basic_auth_pass)
-        {
-            if !check_basic_auth(session, expected_user, expected_pass) {
-                write_auth_required(session).await?;
-                return Ok(true);
-            }
+        // --- Middleware pipeline ---
+        if mw_auth(session, &route).await? == Flow::Done {
+            return Ok(true);
+        }
+        if mw_cors(session, &route).await? == Flow::Done {
+            return Ok(true);
+        }
+        if mw_static(session, &route, &req_path).await? == Flow::Done {
+            return Ok(true);
         }
 
-        // --- CORS Preflight ---
-        if route.cors_enabled {
-            let method = session.req_header().method.as_str();
-            let has_origin = session.req_header().headers.get("origin").is_some();
-            if method == "OPTIONS" && has_origin {
-                write_cors_preflight(session).await?;
-                return Ok(true);
-            }
-        }
-
-        // --- Static directory serving ---
+        // --- Static directory serving (full, with 404 / directory listing) ---
         if let BackendTarget::StaticDir { ref root } = route.target {
             serve_static(session, root, &req_path, route.cors_enabled).await?;
             return Ok(true);
@@ -103,16 +138,12 @@ impl ProxyHttp for BridgeProxy {
                     .await
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
+            // Mark active for idle reaper
+            pm_mark_active(&self.process_manager, app_id).await;
             BackendTarget::UnixSocket { path: socket_path }
         } else {
             route.target.clone()
         };
-
-        // Mark active for managed processes (for idle reaper)
-        if let BackendTarget::Managed { ref app_id, .. } = route.target {
-            let mut pm = self.process_manager.lock().await;
-            pm.mark_active(app_id);
-        }
 
         // --- SPA Rewrite ---
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
@@ -266,27 +297,18 @@ impl ProxyHttp for DedicatedProxy {
             return Ok(true);
         };
 
-        // Basic Auth
-        if let (Some(expected_user), Some(expected_pass)) =
-            (&route.basic_auth_user, &route.basic_auth_pass)
-        {
-            if !check_basic_auth(session, expected_user, expected_pass) {
-                write_auth_required(session).await?;
-                return Ok(true);
-            }
+        // --- Middleware pipeline ---
+        if mw_auth(session, &route).await? == Flow::Done {
+            return Ok(true);
+        }
+        if mw_cors(session, &route).await? == Flow::Done {
+            return Ok(true);
+        }
+        if mw_static(session, &route, &req_path).await? == Flow::Done {
+            return Ok(true);
         }
 
-        // CORS Preflight
-        if route.cors_enabled {
-            let method = session.req_header().method.as_str();
-            let has_origin = session.req_header().headers.get("origin").is_some();
-            if method == "OPTIONS" && has_origin {
-                write_cors_preflight(session).await?;
-                return Ok(true);
-            }
-        }
-
-        // Static directory serving
+        // Static directory serving (full, with 404 / directory listing)
         if let BackendTarget::StaticDir { ref root } = route.target {
             serve_static(session, root, &req_path, route.cors_enabled).await?;
             return Ok(true);
@@ -386,6 +408,56 @@ pub fn run_dedicated_proxy_blocking(
 // ---------------------------------------------------------------------------
 // Static file serving + directory listing
 // ---------------------------------------------------------------------------
+
+/// Try to serve a static file from `root`. Returns `Ok(true)` if the file was
+/// found and served, `Ok(false)` if the file does not exist (caller should
+/// fall through to the backend). Only returns `Err` on I/O or write failures.
+async fn try_serve_static(
+    session: &mut Session,
+    root: &str,
+    req_path: &str,
+    cors: bool,
+) -> Result<bool> {
+    let decoded = percent_decode(req_path);
+    let clean = sanitize_path(&decoded);
+    let full_path = PathBuf::from(root).join(&clean);
+
+    let canonical_root = match std::fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    let canonical_file = match std::fs::canonicalize(&full_path) {
+        Ok(p) => p,
+        Err(_) => return Ok(false),
+    };
+    if !canonical_file.starts_with(&canonical_root) {
+        return Ok(false);
+    }
+
+    let meta = match std::fs::metadata(&canonical_file) {
+        Ok(m) => m,
+        Err(_) => return Ok(false),
+    };
+
+    if meta.is_dir() {
+        let index = canonical_file.join("index.html");
+        if index.exists() && index.is_file() {
+            serve_file(session, &index, cors).await?;
+            return Ok(true);
+        }
+        // Directory exists in public/ → show listing (don't fallthrough to backend)
+        serve_directory_listing(session, &canonical_file, &canonical_root, req_path, cors)
+            .await?;
+        return Ok(true);
+    }
+
+    if meta.is_file() {
+        serve_file(session, &canonical_file, cors).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
 
 async fn serve_static(
     session: &mut Session,
@@ -869,6 +941,15 @@ fn should_rewrite_for_spa(path: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Process manager helper
+// ---------------------------------------------------------------------------
+
+async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: &str) {
+    let mut pm = pm.lock().await;
+    pm.mark_active(app_id);
+}
+
+// ---------------------------------------------------------------------------
 // Error / routing helpers
 // ---------------------------------------------------------------------------
 
@@ -990,6 +1071,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         let out = resolve_target(&routes, "www.myapp.bridgehead.local", "bridgehead.local", "/").expect("fallback");
@@ -1019,6 +1101,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         let out = resolve_target(&routes, "totally-unknown.bridgehead.local", "bridgehead.local", "/").expect("default");
@@ -1049,6 +1132,7 @@ mod tests {
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
+                    static_root: None,
                 },
                 RouteRule {
                     target: BackendTarget::Tcp {
@@ -1062,6 +1146,7 @@ mod tests {
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
+                    static_root: None,
                 },
             ],
         );
@@ -1089,6 +1174,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("wildcard");
@@ -1115,6 +1201,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         routes.insert(
@@ -1131,6 +1218,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.bridgehead.local", "bridgehead.local", "/").expect("route");
@@ -1157,6 +1245,7 @@ mod tests {
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
+                static_root: None,
             }],
         );
         assert!(resolve_target(&routes, "myapp.bridgehead.local", "bridgehead.local", "/").is_none());

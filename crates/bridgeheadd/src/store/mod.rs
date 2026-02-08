@@ -576,6 +576,62 @@ impl AppRepository {
         Ok((app, op))
     }
 
+    pub fn upsert_scanned_static_dir(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        static_root: &str,
+        enabled: bool,
+        source: &str,
+    ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let path_prefix_db = "";
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+
+        let existing: Option<(String, i64)> = conn
+            .query_row(
+                "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+                params![domain_db, path_prefix_db],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+
+        let op = match existing {
+            Some((_id, 0)) => ScanUpsertResult::SkippedManual,
+            Some((id, _)) => {
+                conn.execute(
+                    "UPDATE apps SET name = ?1, kind = 'static', target_host = '', target_port = 0, static_root = ?2, enabled = ?3, updated_at = ?4, scan_managed = 1, scan_source = ?5, app_root = NULL WHERE id = ?6",
+                    params![name, static_root, if enabled { 1 } else { 0 }, now, source, id],
+                )?;
+                ScanUpsertResult::Updated
+            }
+            None => {
+                let created = AppId::new().0;
+                conn.execute(
+                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, static_root)
+                     VALUES (?1, ?2, 'static', ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
+                    params![
+                        created,
+                        name,
+                        domain_db,
+                        path_prefix_db,
+                        if enabled { 1 } else { 0 },
+                        source,
+                        now,
+                        now,
+                        static_root,
+                    ],
+                )?;
+                ScanUpsertResult::Inserted
+            }
+        };
+
+        let suffix = &self.domain_suffix;
+        let app = Self::read_app_by_route(&conn, &domain_db, path_prefix_db, suffix)?;
+        Ok((app, op))
+    }
+
     pub fn prune_scanned_not_in(
         &self,
         source: &str,

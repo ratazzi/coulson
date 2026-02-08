@@ -40,6 +40,9 @@ pub struct RouteRule {
     pub basic_auth_pass: Option<String>,
     pub spa_rewrite: bool,
     pub listen_port: Option<u16>,
+    /// Optional static file root to try before forwarding to the backend.
+    /// For Managed apps this is `{app_root}/public` when the directory exists.
+    pub static_root: Option<String>,
 }
 
 #[derive(Clone)]
@@ -64,6 +67,17 @@ impl SharedState {
         let mut table: HashMap<String, Vec<RouteRule>> = HashMap::new();
         let mut port_rules: HashMap<u16, Vec<RouteRule>> = HashMap::new();
         for app in enabled_apps {
+            let static_root = match &app.target {
+                BackendTarget::Managed { root, .. } => {
+                    let public = format!("{root}/public");
+                    if std::path::Path::new(&public).is_dir() {
+                        Some(public)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
             let rule = RouteRule {
                 target: app.target,
                 path_prefix: app.path_prefix,
@@ -73,6 +87,7 @@ impl SharedState {
                 basic_auth_pass: app.basic_auth_pass,
                 spa_rewrite: app.spa_rewrite,
                 listen_port: app.listen_port,
+                static_root,
             };
             if let Some(port) = app.listen_port {
                 port_rules.entry(port).or_default().push(rule.clone());
