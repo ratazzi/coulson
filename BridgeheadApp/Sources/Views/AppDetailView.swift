@@ -13,6 +13,7 @@ struct AppDetailView: View {
                 statusBanner
                 urlsSection
                 infoSection
+                settingsSection
                 tunnelSection
                 warningsSection
                 dangerSection
@@ -148,6 +149,69 @@ struct AppDetailView: View {
         }
     }
 
+    // MARK: - Settings
+
+    private var settingsSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            sectionHeader("Settings")
+            VStack(spacing: 0) {
+                settingsToggleRow("CORS", value: app.corsEnabled) { val in
+                    Task { await vm.updateApp(app: app, params: ["cors_enabled": val]) }
+                }
+                Divider().padding(.leading, 12)
+                settingsToggleRow("SPA Rewrite", value: app.spaRewrite) { val in
+                    Task { await vm.updateApp(app: app, params: ["spa_rewrite": val]) }
+                }
+                Divider().padding(.leading, 12)
+                basicAuthRow
+                if let port = app.listenPort {
+                    Divider().padding(.leading, 12)
+                    infoRow("Listen port", "\(port)")
+                }
+            }
+            .background(.quaternary.opacity(0.3))
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        }
+    }
+
+    private func settingsToggleRow(_ label: String, value: Bool, onChange: @escaping (Bool) -> Void) -> some View {
+        HStack {
+            Text(label)
+                .font(.system(size: 13))
+            Spacer()
+            Toggle("", isOn: Binding(
+                get: { value },
+                set: { onChange($0) }
+            ))
+            .labelsHidden()
+            .toggleStyle(.switch)
+            .controlSize(.small)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var basicAuthRow: some View {
+        HStack {
+            Text("Basic Auth")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .frame(width: 90, alignment: .leading)
+            if let user = app.basicAuthUser, !user.isEmpty {
+                Text(user)
+                    .font(.system(size: 13, design: .monospaced))
+                    .lineLimit(1)
+            } else {
+                Text("off")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+    }
+
     // MARK: - Tunnel
 
     private var tunnelSection: some View {
@@ -171,12 +235,46 @@ struct AppDetailView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 8)
 
-                if let url = vm.tunnelURL(for: app) {
+                Divider().padding(.leading, 12)
+
+                // Tunnel mode picker
+                HStack {
+                    Text("Mode")
+                        .font(.system(size: 13))
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { app.tunnelMode },
+                        set: { mode in
+                            Task { await vm.updateApp(app: app, params: ["tunnel_mode": mode]) }
+                        }
+                    )) {
+                        Text("None").tag("none")
+                        Text("Quick").tag("quick")
+                        Text("Named").tag("named")
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 200)
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+
+                // Per-app tunnel URL (quick/named) takes priority
+                if app.tunnelMode == "quick", let url = app.tunnelUrl {
                     Divider().padding(.leading, 12)
                     tunnelURLRow(url)
-                } else if let url = app.tunnelUrl {
+                } else if app.tunnelMode == "named", let domain = app.appTunnelDomain {
+                    Divider().padding(.leading, 12)
+                    tunnelURLRow("https://\(domain)")
+                } else if let url = vm.tunnelURL(for: app) {
+                    // Global named tunnel URL
                     Divider().padding(.leading, 12)
                     tunnelURLRow(url)
+                }
+
+                if let domain = app.appTunnelDomain {
+                    Divider().padding(.leading, 12)
+                    infoRow("Tunnel domain", domain)
                 }
             }
             .background(.quaternary.opacity(0.3))

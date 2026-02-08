@@ -8,16 +8,30 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     let pathPrefix: String?
     let target: Target
     let timeoutMs: UInt64?
+    let corsEnabled: Bool
+    let basicAuthUser: String?
+    let basicAuthPass: String?
+    let spaRewrite: Bool
+    let listenPort: Int?
     let tunnelExposed: Bool
+    let tunnelMode: String
     let tunnelUrl: String?
+    let appTunnelDomain: String?
     let enabled: Bool
 
     enum CodingKeys: String, CodingKey {
         case id, name, kind, domain, target, enabled
         case pathPrefix = "path_prefix"
         case timeoutMs = "timeout_ms"
+        case corsEnabled = "cors_enabled"
+        case basicAuthUser = "basic_auth_user"
+        case basicAuthPass = "basic_auth_pass"
+        case spaRewrite = "spa_rewrite"
+        case listenPort = "listen_port"
         case tunnelExposed = "tunnel_exposed"
+        case tunnelMode = "tunnel_mode"
         case tunnelUrl = "tunnel_url"
+        case appTunnelDomain = "app_tunnel_domain"
     }
 
     var kindLabel: String {

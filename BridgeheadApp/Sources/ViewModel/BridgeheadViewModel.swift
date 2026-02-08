@@ -154,6 +154,15 @@ final class BridgeheadViewModel: ObservableObject {
         } catch {}
     }
 
+    func updateApp(app: AppRecord, params: [String: Any]) async {
+        var allParams: [String: Any] = ["app_id": app.id]
+        for (k, v) in params { allParams[k] = v }
+        do {
+            _ = try client.request(method: "app.update", params: allParams)
+            await refreshAll()
+        } catch {}
+    }
+
     func deleteApp(_ app: AppRecord) async -> Bool {
         do {
             _ = try client.request(method: "app.delete", params: ["app_id": app.id])
