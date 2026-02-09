@@ -519,11 +519,13 @@ impl AppRepository {
         Ok((app, op))
     }
 
-    pub fn upsert_scanned_asgi(
+    /// Upsert a managed (ASGI, Rack, Node, Docker, etc.) app discovered by the scanner.
+    pub fn upsert_scanned_managed(
         &self,
         name: &str,
         domain: &DomainName,
         app_root: &str,
+        kind: &str,
         enabled: bool,
         source: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
@@ -544,8 +546,8 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = 'asgi', target_host = '', target_port = 0, updated_at = ?2, scan_managed = 1, scan_source = ?3, app_root = ?4 WHERE id = ?5",
-                    params![name, now, source, app_root, id],
+                    "UPDATE apps SET name = ?1, kind = ?2, target_host = '', target_port = 0, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = ?5 WHERE id = ?6",
+                    params![name, kind, now, source, app_root, id],
                 )?;
                 ScanUpsertResult::Updated
             }
@@ -553,10 +555,11 @@ impl AppRepository {
                 let created = AppId::new().0;
                 conn.execute(
                     "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, app_root)
-                     VALUES (?1, ?2, 'asgi', ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, '', 0, NULL, ?6, 1, ?7, ?8, ?9, ?10)",
                     params![
                         created,
                         name,
+                        kind,
                         domain_db,
                         path_prefix_db,
                         if enabled { 1 } else { 0 },
@@ -937,8 +940,8 @@ impl AppRepository {
 const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
-    let kind: String = row.get(2)?;
-    let kind = match kind.as_str() {
+    let kind_str: String = row.get(2)?;
+    let kind = match kind_str.as_str() {
         "static" => AppKind::Static,
         "rack" => AppKind::Rack,
         "asgi" => AppKind::Asgi,
@@ -957,6 +960,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         BackendTarget::Managed {
             app_id: id_str.clone(),
             root,
+            kind: kind_str.clone(),
         }
     } else if let Some(root) = static_root {
         BackendTarget::StaticDir { root }

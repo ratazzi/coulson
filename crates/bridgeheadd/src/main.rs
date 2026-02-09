@@ -25,7 +25,7 @@ use tracing::{debug, error, info};
 
 use crate::config::BridgeheadConfig;
 use crate::domain::BackendTarget;
-use crate::process::ProcessManagerHandle;
+use crate::process::{ProcessManagerHandle, ProviderRegistry};
 use crate::store::AppRepository;
 
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
@@ -59,6 +59,7 @@ pub struct SharedState {
     pub app_tunnels: tunnel::AppNamedTunnelManager,
     pub listen_http: std::net::SocketAddr,
     pub process_manager: ProcessManagerHandle,
+    pub provider_registry: Arc<ProviderRegistry>,
 }
 
 impl SharedState {
@@ -199,7 +200,8 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
 
     let (route_tx, _rx) = broadcast::channel(32);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
-    let process_manager = process::new_process_manager(idle_timeout);
+    let registry = Arc::new(process::default_registry());
+    let process_manager = process::new_process_manager(idle_timeout, Arc::clone(&registry));
     Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
@@ -213,6 +215,7 @@ fn build_state(cfg: &BridgeheadConfig) -> anyhow::Result<SharedState> {
         app_tunnels: tunnel::new_app_tunnel_manager(),
         listen_http: cfg.listen_http,
         process_manager,
+        provider_registry: registry,
     })
 }
 

@@ -7,6 +7,7 @@ use anyhow::Context;
 use serde::Deserialize;
 
 use crate::domain::{AppKind, DomainName};
+use crate::process::ProviderRegistry;
 use crate::store::{domain_to_db, route_key, ScanUpsertResult};
 use crate::SharedState;
 
@@ -14,6 +15,7 @@ use crate::SharedState;
 struct BridgeheadManifest {
     name: Option<String>,
     domain: Option<String>,
+    #[allow(dead_code)]
     kind: Option<String>,
     #[allow(dead_code)]
     module: Option<String>,
@@ -84,17 +86,19 @@ pub struct ScanStats {
 }
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
-    let discovered = discover(&state.apps_root, &state.domain_suffix)?;
+    let discovered = discover(&state.apps_root, &state.domain_suffix, &state.provider_registry)?;
     let mut active_routes: HashSet<String> = HashSet::new();
     let mut inserted = 0usize;
     let mut updated = 0usize;
     let mut skipped_manual = 0usize;
     for app in &discovered.apps {
-        let (_, op) = if app.kind == AppKind::Asgi {
-            state.store.upsert_scanned_asgi(
+        let (_, op) = if let Some(ref app_root) = app.app_root {
+            let kind_str = app_kind_to_str(app.kind);
+            state.store.upsert_scanned_managed(
                 &app.name,
                 &app.domain,
-                app.app_root.as_deref().unwrap_or(""),
+                app_root,
+                kind_str,
                 app.enabled,
                 "apps_root",
             )?
@@ -184,7 +188,7 @@ struct DiscoverResult {
     parse_warnings: Vec<String>,
 }
 
-fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
+fn discover(root: &Path, suffix: &str, registry: &ProviderRegistry) -> anyhow::Result<DiscoverResult> {
     if !root.exists() {
         return Ok(DiscoverResult {
             apps: Vec::new(),
@@ -208,7 +212,7 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             if file_name.starts_with('.') {
                 continue;
             }
-            let apps = discover_from_symlink(entry.path(), &file_name, suffix)?;
+            let apps = discover_from_symlink(entry.path(), &file_name, suffix, registry)?;
             for app in apps {
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             }
@@ -313,8 +317,8 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
 
             let manifest_path = entry.path().join("bridgehead.json");
             if !manifest_path.exists() {
-                // Auto-detect ASGI app by convention
-                if detect_asgi_app(&entry.path()) {
+                // Auto-detect managed app via provider registry
+                if let Some((_provider, detected)) = registry.detect(&entry.path(), None) {
                     let domain_text = file_name_to_domain(&dir_name, suffix);
                     let domain =
                         DomainName::parse(&domain_text, suffix).with_context(|| {
@@ -325,9 +329,10 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
                             )
                         })?;
                     let root_str = entry.path().to_string_lossy().to_string();
+                    let app_kind = kind_str_to_app_kind(&detected.kind);
                     let app = DiscoveredStaticApp {
                         name: sanitize_name(&dir_name),
-                        kind: AppKind::Asgi,
+                        kind: app_kind,
                         domain,
                         path_prefix: None,
                         target_host: String::new(),
@@ -395,14 +400,18 @@ fn discover(root: &Path, suffix: &str) -> anyhow::Result<DiscoverResult> {
             })?;
 
             let enabled = manifest.enabled.unwrap_or(true);
-            let is_asgi = manifest.kind.as_deref() == Some("asgi");
             let dir_path = entry.path();
 
-            if is_asgi {
+            // Check if a provider can handle this directory (manifest kind or auto-detect)
+            let manifest_value: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+            let is_managed = registry.detect(&dir_path, Some(&manifest_value));
+
+            if let Some((_prov, detected)) = is_managed {
                 let root_str = dir_path.to_string_lossy().to_string();
+                let app_kind = kind_str_to_app_kind(&detected.kind);
                 let app = DiscoveredStaticApp {
                     name,
-                    kind: AppKind::Asgi,
+                    kind: app_kind,
                     domain,
                     path_prefix: None,
                     target_host: String::new(),
@@ -492,6 +501,7 @@ fn discover_from_symlink(
     link_path: PathBuf,
     file_name: &str,
     suffix: &str,
+    registry: &ProviderRegistry,
 ) -> anyhow::Result<Vec<DiscoveredStaticApp>> {
     let target = fs::read_link(&link_path)
         .with_context(|| format!("failed reading symlink {}", link_path.display()))?;
@@ -580,12 +590,13 @@ fn discover_from_symlink(
 
         let port_file = resolved_target.join("bridgehead.port");
         if !port_file.exists() {
-            // Auto-detect ASGI app
-            if detect_asgi_app(&resolved_target) {
+            // Auto-detect managed app via provider registry
+            if let Some((_prov, detected)) = registry.detect(&resolved_target, None) {
                 let root_str = resolved_target.to_string_lossy().to_string();
+                let app_kind = kind_str_to_app_kind(&detected.kind);
                 return Ok(vec![DiscoveredStaticApp {
                     name,
-                    kind: AppKind::Asgi,
+                    kind: app_kind,
                     domain,
                     path_prefix: None,
                     target_host: String::new(),
@@ -807,13 +818,26 @@ fn normalize_path_prefix(input: Option<&str>) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Detect an ASGI app in a directory.
-/// Returns true if the directory looks like a Python ASGI project:
-/// has (app.py or main.py) AND (pyproject.toml or requirements.txt).
-fn detect_asgi_app(dir: &Path) -> bool {
-    let has_entry = dir.join("app.py").exists() || dir.join("main.py").exists();
-    let has_deps = dir.join("pyproject.toml").exists() || dir.join("requirements.txt").exists();
-    has_entry && has_deps
+/// Convert a provider kind string to AppKind enum.
+fn kind_str_to_app_kind(kind: &str) -> AppKind {
+    match kind {
+        "asgi" => AppKind::Asgi,
+        "rack" => AppKind::Rack,
+        "docker" => AppKind::Container,
+        // Node and other future kinds default to Static for now
+        // until AppKind is extended.
+        _ => AppKind::Static,
+    }
+}
+
+/// Convert AppKind enum to the DB/provider kind string.
+fn app_kind_to_str(kind: AppKind) -> &'static str {
+    match kind {
+        AppKind::Asgi => "asgi",
+        AppKind::Rack => "rack",
+        AppKind::Container => "container",
+        AppKind::Static => "static",
+    }
 }
 
 fn insert_with_priority(

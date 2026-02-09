@@ -128,22 +128,22 @@ impl ProxyHttp for BridgeProxy {
             return Ok(true);
         }
 
-        // --- Managed process (ASGI) ---
-        let resolved_target = if let BackendTarget::Managed { ref app_id, ref root } = route.target
-        {
-            let root_path = std::path::PathBuf::from(root);
-            let socket_path = {
-                let mut pm = self.process_manager.lock().await;
-                pm.ensure_running(app_id, &root_path)
-                    .await
-                    .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
+        // --- Managed process ---
+        let resolved_target =
+            if let BackendTarget::Managed { ref app_id, ref root, ref kind } = route.target {
+                let root_path = std::path::PathBuf::from(root);
+                let socket_path = {
+                    let mut pm = self.process_manager.lock().await;
+                    pm.ensure_running(app_id, &root_path, kind)
+                        .await
+                        .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
+                };
+                // Mark active for idle reaper
+                pm_mark_active(&self.process_manager, app_id).await;
+                BackendTarget::UnixSocket { path: socket_path }
+            } else {
+                route.target.clone()
             };
-            // Mark active for idle reaper
-            pm_mark_active(&self.process_manager, app_id).await;
-            BackendTarget::UnixSocket { path: socket_path }
-        } else {
-            route.target.clone()
-        };
 
         // --- SPA Rewrite ---
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
