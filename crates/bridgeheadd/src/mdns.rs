@@ -1,16 +1,21 @@
 use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, UdpSocket};
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
-use tracing::{error, info, warn};
+use tokio::time::{interval, Duration};
+use tracing::{debug, error, info, warn};
 
 use crate::SharedState;
 
 const SERVICE_TYPE: &str = "_bridgehead._tcp.local.";
+const NETWORK_CHECK_INTERVAL_SECS: u64 = 5;
 
 pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     let mdns = ServiceDaemon::new()?;
     mdns.disable_interface(IfKind::IPv6)?;
     let mut route_rx = state.route_tx.subscribe();
+    let mut network_check_timer = interval(Duration::from_secs(NETWORK_CHECK_INTERVAL_SECS));
+    let mut last_local_ip = detect_local_ip();
 
     // registered: domain -> fullname (for unregister)
     let mut registered: HashMap<String, String> = HashMap::new();
@@ -19,15 +24,31 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     sync_records(&mdns, &state, &mut registered);
 
     loop {
-        match route_rx.recv().await {
-            Ok(()) => sync_records(&mdns, &state, &mut registered),
-            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                warn!(skipped = n, "mdns responder lagged, re-syncing");
-                sync_records(&mdns, &state, &mut registered);
+        tokio::select! {
+            result = route_rx.recv() => {
+                match result {
+                    Ok(()) => sync_records(&mdns, &state, &mut registered),
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!(skipped = n, "mdns responder lagged, re-syncing");
+                        sync_records(&mdns, &state, &mut registered);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        info!("mdns responder shutting down (channel closed)");
+                        break;
+                    }
+                }
             }
-            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                info!("mdns responder shutting down (channel closed)");
-                break;
+            _ = network_check_timer.tick() => {
+                let current_ip = detect_local_ip();
+                if current_ip != last_local_ip {
+                    info!(
+                        old = ?last_local_ip,
+                        new = ?current_ip,
+                        "network change detected, re-registering mdns records"
+                    );
+                    last_local_ip = current_ip;
+                    reregister_all(&mdns, &mut registered);
+                }
             }
         }
     }
@@ -43,6 +64,12 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn detect_local_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("8.8.8.8:80").ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
 }
 
 fn sync_records(
@@ -88,14 +115,33 @@ fn sync_records(
     }
 }
 
+fn reregister_all(mdns: &ServiceDaemon, registered: &mut HashMap<String, String>) {
+    if registered.is_empty() {
+        return;
+    }
+    let domains: Vec<(String, String)> = registered.drain().collect();
+    for (_domain, fullname) in &domains {
+        let _ = mdns.unregister(fullname);
+    }
+    for (domain, _) in domains {
+        match register_domain(mdns, &domain) {
+            Ok(fullname) => {
+                debug!(domain, "mdns re-registered");
+                registered.insert(domain, fullname);
+            }
+            Err(e) => {
+                error!(domain, error = %e, "failed to re-register mdns service");
+            }
+        }
+    }
+}
+
 fn is_local_domain(domain: &str) -> bool {
     domain.ends_with(".local") || domain == "local"
 }
 
 fn register_domain(mdns: &ServiceDaemon, domain: &str) -> anyhow::Result<String> {
-    // instance name: use the domain prefix (part before .bridgehead.local)
     let instance_name = domain;
-    // hostname must end with "." for mDNS
     let hostname = format!("{domain}.");
     let properties: HashMap<String, String> = HashMap::new();
 
