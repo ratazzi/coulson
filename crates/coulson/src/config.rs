@@ -1,0 +1,95 @@
+use std::env;
+use std::net::SocketAddr;
+use std::path::PathBuf;
+
+use anyhow::Context;
+
+#[derive(Debug, Clone)]
+pub struct CoulsonConfig {
+    pub listen_http: SocketAddr,
+    pub control_socket: PathBuf,
+    pub sqlite_path: PathBuf,
+    pub scan_warnings_path: PathBuf,
+    pub domain_suffix: String,
+    pub apps_root: PathBuf,
+    pub scan_interval_secs: u64,
+    pub watch_fs: bool,
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for CoulsonConfig {
+    fn default() -> Self {
+        let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let pow_root = PathBuf::from(format!("{home}/.pow"));
+        let apps_root = if pow_root.exists() {
+            pow_root
+        } else {
+            PathBuf::from(format!("{home}/Coulson/Apps"))
+        };
+        Self {
+            listen_http: "127.0.0.1:8080".parse().expect("default listen addr"),
+            control_socket: PathBuf::from("/tmp/coulson/coulson.sock"),
+            sqlite_path: PathBuf::from(format!("{home}/.coulson/state.db")),
+            scan_warnings_path: PathBuf::from(format!("{home}/.coulson/scan_warnings.json")),
+            domain_suffix: "coulson.local".to_string(),
+            apps_root,
+            scan_interval_secs: 0,
+            watch_fs: true,
+            idle_timeout_secs: 900,
+        }
+    }
+}
+
+impl CoulsonConfig {
+    pub fn load() -> anyhow::Result<Self> {
+        let mut cfg = Self::default();
+
+        if let Ok(addr) = env::var("COULSON_LISTEN_HTTP") {
+            cfg.listen_http = addr
+                .parse()
+                .with_context(|| format!("invalid COULSON_LISTEN_HTTP: {addr}"))?;
+        }
+
+        if let Ok(path) = env::var("COULSON_CONTROL_SOCKET") {
+            cfg.control_socket = PathBuf::from(path);
+        }
+
+        if let Ok(path) = env::var("COULSON_SQLITE_PATH") {
+            cfg.sqlite_path = PathBuf::from(path);
+        }
+        if let Ok(path) = env::var("COULSON_SCAN_WARNINGS_PATH") {
+            cfg.scan_warnings_path = PathBuf::from(path);
+        }
+
+        if let Ok(suffix) = env::var("COULSON_DOMAIN_SUFFIX") {
+            cfg.domain_suffix = suffix;
+        }
+        if let Ok(path) = env::var("COULSON_APPS_ROOT") {
+            cfg.apps_root = PathBuf::from(path);
+        }
+        if let Ok(raw) = env::var("COULSON_SCAN_INTERVAL_SECS") {
+            cfg.scan_interval_secs = raw
+                .parse()
+                .with_context(|| format!("invalid COULSON_SCAN_INTERVAL_SECS: {raw}"))?;
+        }
+        if let Ok(raw) = env::var("COULSON_WATCH_FS") {
+            cfg.watch_fs =
+                parse_bool(&raw).with_context(|| format!("invalid COULSON_WATCH_FS: {raw}"))?;
+        }
+        if let Ok(raw) = env::var("COULSON_IDLE_TIMEOUT_SECS") {
+            cfg.idle_timeout_secs = raw
+                .parse()
+                .with_context(|| format!("invalid COULSON_IDLE_TIMEOUT_SECS: {raw}"))?;
+        }
+
+        Ok(cfg)
+    }
+}
+
+fn parse_bool(input: &str) -> anyhow::Result<bool> {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("expected boolean"),
+    }
+}

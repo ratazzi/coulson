@@ -2,10 +2,10 @@
 **/*.rs.bk
 .DS_Store
 
-# SwiftPM (BridgeheadApp)
-BridgeheadApp/.build/
-BridgeheadApp/.swiftpm/
-BridgeheadApp/Package.resolved
+# SwiftPM (CoulsonApp)
+CoulsonApp/.build/
+CoulsonApp/.swiftpm/
+CoulsonApp/Package.resolved
 
 # Xcode user files
 **/*.xcuserstate
