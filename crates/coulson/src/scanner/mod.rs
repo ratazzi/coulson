@@ -86,7 +86,16 @@ pub struct ScanStats {
 }
 
 pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
-    let discovered = discover(&state.apps_root, &state.domain_suffix, &state.provider_registry)?;
+    let skip_paths: Vec<&Path> = vec![
+        state.scan_warnings_path.as_path(),
+        state.sqlite_path.as_path(),
+    ];
+    let discovered = discover(
+        &state.apps_root,
+        &state.domain_suffix,
+        &state.provider_registry,
+        &skip_paths,
+    )?;
     let mut active_routes: HashSet<String> = HashSet::new();
     let mut inserted = 0usize;
     let mut updated = 0usize;
@@ -188,7 +197,12 @@ struct DiscoverResult {
     parse_warnings: Vec<String>,
 }
 
-fn discover(root: &Path, suffix: &str, registry: &ProviderRegistry) -> anyhow::Result<DiscoverResult> {
+fn discover(
+    root: &Path,
+    suffix: &str,
+    registry: &ProviderRegistry,
+    skip_paths: &[&Path],
+) -> anyhow::Result<DiscoverResult> {
     if !root.exists() {
         return Ok(DiscoverResult {
             apps: Vec::new(),
@@ -205,6 +219,12 @@ fn discover(root: &Path, suffix: &str, registry: &ProviderRegistry) -> anyhow::R
         .with_context(|| format!("failed reading apps root: {}", root.display()))?
     {
         let entry = entry?;
+        let entry_path = entry.path();
+
+        if skip_paths.iter().any(|p| *p == entry_path) {
+            continue;
+        }
+
         let file_type = entry.file_type()?;
         let file_name = entry.file_name().to_string_lossy().to_string();
 

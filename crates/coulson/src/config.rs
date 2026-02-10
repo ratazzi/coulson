@@ -24,7 +24,7 @@ impl Default for CoulsonConfig {
         let apps_root = if pow_root.exists() {
             pow_root
         } else {
-            PathBuf::from(format!("{home}/Coulson/Apps"))
+            PathBuf::from(format!("{home}/.coulson"))
         };
         Self {
             listen_http: "127.0.0.1:8080".parse().expect("default listen addr"),
