@@ -1,20 +1,33 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, UdpSocket};
+use std::path::Path;
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceInfo};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 use tracing::{debug, error, info, warn};
 
 use crate::SharedState;
 
 const SERVICE_TYPE: &str = "_bridgehead._tcp.local.";
-const NETWORK_CHECK_INTERVAL_SECS: u64 = 5;
+/// macOS updates this file on every network change (interface up/down, WiFi switch, etc.)
+const RESOLV_CONF: &str = "/var/run/resolv.conf";
+/// Fallback: poll local IP every N seconds when resolv.conf watching is unavailable
+const IP_POLL_INTERVAL_SECS: u64 = 5;
 
 pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     let mdns = ServiceDaemon::new()?;
     mdns.disable_interface(IfKind::IPv6)?;
     let mut route_rx = state.route_tx.subscribe();
-    let mut network_check_timer = interval(Duration::from_secs(NETWORK_CHECK_INTERVAL_SECS));
+
+    // Primary: watch /var/run/resolv.conf for network changes
+    let (net_tx, mut net_rx) = mpsc::channel::<()>(1);
+    let _watcher = watch_resolv_conf(net_tx.clone());
+
+    // Fallback: poll local IP for network changes
+    let has_watcher = _watcher.is_some();
+    let mut ip_poll_timer = interval(Duration::from_secs(IP_POLL_INTERVAL_SECS));
     let mut last_local_ip = detect_local_ip();
 
     // registered: domain -> fullname (for unregister)
@@ -38,13 +51,19 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
                     }
                 }
             }
-            _ = network_check_timer.tick() => {
+            _ = net_rx.recv() => {
+                info!("network change detected (resolv.conf), re-registering mdns records");
+                reregister_all(&mdns, &mut registered);
+                // Also update last_local_ip to stay in sync
+                last_local_ip = detect_local_ip();
+            }
+            _ = ip_poll_timer.tick(), if !has_watcher => {
                 let current_ip = detect_local_ip();
                 if current_ip != last_local_ip {
                     info!(
                         old = ?last_local_ip,
                         new = ?current_ip,
-                        "network change detected, re-registering mdns records"
+                        "network change detected (IP changed), re-registering mdns records"
                     );
                     last_local_ip = current_ip;
                     reregister_all(&mdns, &mut registered);
@@ -70,6 +89,39 @@ fn detect_local_ip() -> Option<IpAddr> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("8.8.8.8:80").ok()?;
     socket.local_addr().ok().map(|a| a.ip())
+}
+
+fn watch_resolv_conf(tx: mpsc::Sender<()>) -> Option<RecommendedWatcher> {
+    let path = Path::new(RESOLV_CONF);
+    if !path.exists() {
+        warn!("resolv.conf not found at {RESOLV_CONF}, falling back to IP polling");
+        return None;
+    }
+
+    let mut watcher = match notify::recommended_watcher(move |res: Result<Event, _>| {
+        if let Ok(event) = res {
+            if matches!(
+                event.kind,
+                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+            ) {
+                let _ = tx.try_send(());
+            }
+        }
+    }) {
+        Ok(w) => w,
+        Err(e) => {
+            warn!(error = %e, "failed to create resolv.conf watcher, falling back to IP polling");
+            return None;
+        }
+    };
+
+    if let Err(e) = watcher.watch(path, RecursiveMode::NonRecursive) {
+        warn!(error = %e, "failed to watch {RESOLV_CONF}, falling back to IP polling");
+        return None;
+    }
+
+    info!("watching {RESOLV_CONF} for network changes");
+    Some(watcher)
 }
 
 fn sync_records(
@@ -156,7 +208,6 @@ fn register_domain(mdns: &ServiceDaemon, domain: &str) -> anyhow::Result<String>
     service_info.set_interfaces(vec![IfKind::LoopbackV4]);
 
     let fullname = service_info.get_fullname().to_string();
-    // Unregister first to clear any stale registration from a previous run
     let _ = mdns.unregister(&fullname);
     mdns.register(service_info)?;
     Ok(fullname)
