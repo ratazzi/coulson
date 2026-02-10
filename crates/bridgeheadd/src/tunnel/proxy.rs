@@ -9,6 +9,10 @@ use tracing::{debug, info, warn};
 
 use crate::store::{self, AppRepository};
 
+const RESPONSE_USER_HEADERS: &str = "cf-cloudflared-response-headers";
+const RESPONSE_META_HEADER: &str = "cf-cloudflared-response-meta";
+const RESPONSE_META_ORIGIN: &str = r#"{"src":"origin"}"#;
+
 /// Proxy an HTTP request to the local Pingora proxy with a fixed Host header.
 /// Used for per-app tunnels where the backend is not a TCP port (e.g. static_dir, managed).
 pub async fn proxy_to_local_with_host(
@@ -42,13 +46,7 @@ pub async fn proxy_to_local_with_host(
 
     for (name, value) in &parts.headers {
         let name_str = name.as_str();
-        if matches!(
-            name_str,
-            "host" | "content-length" | "transfer-encoding" | "connection"
-        ) || name_str.starts_with(':')
-            || name_str.starts_with("cf-cloudflared-")
-            || name_str == "cf-ray"
-        {
+        if should_strip_incoming_header(name_str) {
             continue;
         }
         let val_bytes = value.as_bytes();
@@ -62,6 +60,21 @@ pub async fn proxy_to_local_with_host(
         local_req = local_req.header(name, value);
     }
     local_req = local_req.header("host", local_host);
+
+    // Let the backend know the original tunnel host and protocol
+    let original_host = parts
+        .uri
+        .authority()
+        .map(|a| a.as_str().to_string())
+        .or_else(|| {
+            parts
+                .headers
+                .get("host")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        })
+        .unwrap_or_else(|| local_host.to_string());
+    append_forwarding_headers(&mut local_req, &original_host, &parts.headers);
 
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.data().await {
@@ -77,50 +90,21 @@ pub async fn proxy_to_local_with_host(
         Ok(resp) => resp,
         Err(err) => {
             warn!(error = %err, local_host = %local_host, "local proxy request failed");
+            let msg = format!("Bad Gateway: {err}");
             let response = http::Response::builder()
                 .status(502)
+                .header("content-type", "text/plain")
                 .body(())
                 .unwrap();
             let mut send_stream = send_response.send_response(response, false)?;
-            let msg = format!("Bad Gateway: {err}");
             send_stream.send_data(Bytes::from(msg), true)?;
             return Ok(());
         }
     };
 
-    let (resp_parts, resp_body) = local_resp.into_parts();
+    send_proxied_response(local_resp, send_response).await?;
 
-    let mut response = http::Response::builder().status(resp_parts.status);
-    for (name, value) in &resp_parts.headers {
-        let n = name.as_str();
-        if matches!(
-            n,
-            "connection"
-                | "keep-alive"
-                | "proxy-connection"
-                | "transfer-encoding"
-                | "upgrade"
-        ) {
-            continue;
-        }
-        response = response.header(name, value);
-    }
-
-    let response = response.body(()).unwrap();
-    let mut send_stream = send_response.send_response(response, false)?;
-
-    use http_body_util::BodyExt;
-    let mut body_stream = resp_body;
-    while let Some(frame) = body_stream.frame().await {
-        let frame = frame?;
-        if let Some(data) = frame.data_ref() {
-            send_stream.send_data(data.clone(), false)?;
-        }
-    }
-
-    send_stream.send_data(Bytes::new(), true)?;
-
-    info!(status = %resp_parts.status, local_host = %local_host, "fixed-host tunnel response sent");
+    info!(local_host = %local_host, "fixed-host tunnel response sent");
     Ok(())
 }
 
@@ -192,6 +176,7 @@ pub async fn proxy_by_host(
         );
         let response = http::Response::builder()
             .status(403)
+            .header("content-type", "text/plain")
             .body(())
             .unwrap();
         let mut send_stream = send_response.send_response(response, false)?;
@@ -222,17 +207,11 @@ pub async fn proxy_by_host(
         .uri(&uri);
 
     // Forward headers, replacing Host with local mapping.
-    // Skip hop-by-hop headers, CF internal headers, and headers with values
-    // invalid for HTTP/1.1 (e.g. containing \r, \n, or \0 from HTTP/2).
+    // Strip hop-by-hop, CF internal, and client-supplied forwarding headers
+    // to prevent header spoofing — we set trusted values below.
     for (name, value) in &parts.headers {
         let name_str = name.as_str();
-        if matches!(
-            name_str,
-            "host" | "content-length" | "transfer-encoding" | "connection"
-        ) || name_str.starts_with(':')
-            || name_str.starts_with("cf-cloudflared-")
-            || name_str == "cf-ray"
-        {
+        if should_strip_incoming_header(name_str) {
             continue;
         }
         // HTTP/2 allows header values that HTTP/1.1 rejects (control chars).
@@ -249,6 +228,9 @@ pub async fn proxy_by_host(
     }
     local_req = local_req.header("host", &local_host);
 
+    // Let the backend know the original tunnel host and protocol
+    append_forwarding_headers(&mut local_req, original_host, &parts.headers);
+
     // Collect body
     let mut body_bytes = Vec::new();
     while let Some(chunk) = body.data().await {
@@ -264,52 +246,136 @@ pub async fn proxy_by_host(
         Ok(resp) => resp,
         Err(err) => {
             warn!(error = %err, local_host = %local_host, "local proxy request failed");
+            let msg = format!("Bad Gateway: {err}");
             let response = http::Response::builder()
                 .status(502)
+                .header("content-type", "text/plain")
                 .body(())
                 .unwrap();
             let mut send_stream = send_response.send_response(response, false)?;
-            let msg = format!("Bad Gateway: {err}");
             send_stream.send_data(Bytes::from(msg), true)?;
             return Ok(());
         }
     };
 
+    send_proxied_response(local_resp, send_response).await?;
+
+    info!(local_host = %local_host, "named tunnel response sent");
+    Ok(())
+}
+
+/// Headers that must be stripped from incoming tunnel requests before
+/// forwarding to the local backend. We set trusted values for these
+/// ourselves — keeping client-supplied values would allow spoofing.
+fn should_strip_incoming_header(name: &str) -> bool {
+    matches!(
+        name,
+        "host"
+            | "content-length"
+            | "transfer-encoding"
+            | "connection"
+            | "x-forwarded-for"
+            | "x-forwarded-host"
+            | "x-forwarded-proto"
+            | "x-forwarded-port"
+            | "x-real-ip"
+            | "forwarded"
+    ) || name.starts_with(':')
+        || name.starts_with("cf-cloudflared-")
+        || name == "cf-ray"
+}
+
+/// Append standard forwarding headers so the backend knows the original
+/// tunnel host, protocol, and client IP.
+fn append_forwarding_headers(
+    builder: &mut http::request::Builder,
+    original_host: &str,
+    incoming_headers: &http::HeaderMap,
+) {
+    *builder = std::mem::take(builder)
+        .header("x-forwarded-host", original_host)
+        .header("x-forwarded-proto", "https");
+
+    // Propagate client IP from Cloudflare headers
+    if let Some(ip) = incoming_headers
+        .get("cf-connecting-ip")
+        .and_then(|v| v.to_str().ok())
+    {
+        *builder = std::mem::take(builder)
+            .header("x-forwarded-for", ip)
+            .header("x-real-ip", ip);
+    }
+}
+
+/// Forward an HTTP/1.1 response from the local proxy back over the h2 tunnel stream.
+/// Strips hop-by-hop headers forbidden in HTTP/2.
+async fn send_proxied_response(
+    local_resp: hyper::Response<hyper::body::Incoming>,
+    mut send_response: h2::server::SendResponse<Bytes>,
+) -> anyhow::Result<()> {
+    use http_body_util::BodyExt;
+
     let (resp_parts, resp_body) = local_resp.into_parts();
 
-    // Filter HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2
     let mut response = http::Response::builder().status(resp_parts.status);
+    let mut user_headers = http::HeaderMap::new();
     for (name, value) in &resp_parts.headers {
-        let n = name.as_str();
-        if matches!(
-            n,
-            "connection"
-                | "keep-alive"
-                | "proxy-connection"
-                | "transfer-encoding"
-                | "upgrade"
-        ) {
+        let n = name.as_str().to_ascii_lowercase();
+        if n == "content-length" {
+            // cloudflared keeps content-length as an h2 header.
+            response = response.header(name, value);
             continue;
         }
-        response = response.header(name, value);
+        if !is_control_response_header(&n) || is_websocket_client_header(&n) {
+            user_headers.append(name.clone(), value.clone());
+        }
     }
-
+    let serialized_user_headers = serialize_headers(&user_headers);
+    response = response
+        .header(RESPONSE_USER_HEADERS, serialized_user_headers)
+        .header(RESPONSE_META_HEADER, RESPONSE_META_ORIGIN);
     let response = response.body(()).unwrap();
     let mut send_stream = send_response.send_response(response, false)?;
 
-    use http_body_util::BodyExt;
-    let mut body_stream = resp_body;
-    while let Some(frame) = body_stream.frame().await {
+    let mut body = resp_body;
+    while let Some(frame) = body.frame().await {
         let frame = frame?;
         if let Some(data) = frame.data_ref() {
             send_stream.send_data(data.clone(), false)?;
         }
     }
-
     send_stream.send_data(Bytes::new(), true)?;
 
-    info!(status = %resp_parts.status, local_host = %local_host, "named tunnel response sent");
     Ok(())
+}
+
+fn is_control_response_header(name: &str) -> bool {
+    name.starts_with(':')
+        || name.starts_with("cf-int-")
+        || name.starts_with("cf-cloudflared-")
+        || name.starts_with("cf-proxy-")
+}
+
+fn is_websocket_client_header(name: &str) -> bool {
+    matches!(name, "sec-websocket-accept" | "connection" | "upgrade")
+}
+
+fn serialize_headers(headers: &http::HeaderMap) -> String {
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::STANDARD_NO_PAD;
+    let mut out = String::new();
+    for (name, value) in headers {
+        let value_bytes = value.as_bytes();
+        let enc_name = engine.encode(name.as_str().as_bytes());
+        let enc_value = engine.encode(value_bytes);
+        if !out.is_empty() {
+            out.push(';');
+        }
+        out.push_str(&enc_name);
+        out.push(':');
+        out.push_str(&enc_value);
+    }
+    out
 }
 
 #[cfg(test)]
