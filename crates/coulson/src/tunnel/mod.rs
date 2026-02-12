@@ -3,6 +3,7 @@ pub mod named;
 pub mod proxy;
 pub mod quick;
 pub mod rpc;
+pub mod share_auth;
 pub mod transport;
 
 use std::collections::HashMap;
@@ -92,6 +93,7 @@ pub async fn start_named_tunnel(
     local_suffix: String,
     local_proxy_port: u16,
     store: Arc<crate::store::AppRepository>,
+    share_signer: Option<Arc<crate::share::ShareSigner>>,
 ) -> anyhow::Result<NamedTunnelHandle> {
     let creds = credentials.clone();
     let td = tunnel_domain.clone();
@@ -104,6 +106,7 @@ pub async fn start_named_tunnel(
                 local_suffix: local_suffix.clone(),
                 local_proxy_port,
                 store: store.clone(),
+                share_signer: share_signer.clone(),
             };
             let h = tokio::spawn(async move {
                 if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {

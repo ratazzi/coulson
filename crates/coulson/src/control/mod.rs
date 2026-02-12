@@ -898,6 +898,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 local_suffix,
                 local_proxy_port,
                 state.store.clone(),
+                Some(state.share_signer.clone()),
             )
             .await
             {
@@ -1054,6 +1055,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 local_suffix,
                 local_proxy_port,
                 state.store.clone(),
+                Some(state.share_signer.clone()),
             )
             .await
             {

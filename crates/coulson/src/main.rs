@@ -7,6 +7,7 @@ mod proxy;
 mod rpc_client;
 mod runtime;
 mod scanner;
+pub mod share;
 mod store;
 mod tunnel;
 
@@ -32,6 +33,7 @@ use crate::config::CoulsonConfig;
 use crate::domain::BackendTarget;
 use crate::process::{ProcessManagerHandle, ProviderRegistry};
 use crate::rpc_client::RpcClient;
+use crate::share::ShareSigner;
 use crate::store::AppRepository;
 
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
@@ -68,6 +70,7 @@ pub struct SharedState {
     pub process_manager: ProcessManagerHandle,
     pub provider_registry: Arc<ProviderRegistry>,
     pub lan_access: bool,
+    pub share_signer: Arc<ShareSigner>,
 }
 
 impl SharedState {
@@ -187,6 +190,19 @@ enum Commands {
     },
     /// Check system health
     Doctor,
+    /// Generate a sharing URL for a tunnel-exposed app
+    Share {
+        /// App name or domain
+        name: String,
+        /// Expiry duration (e.g. 1h, 30m, 2d)
+        #[arg(long, default_value = "24h")]
+        expires: String,
+    },
+    /// Disable share auth for an app
+    Unshare {
+        /// App name or domain
+        name: String,
+    },
 }
 
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
@@ -195,6 +211,8 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
     let store = Arc::new(AppRepository::new(&cfg.sqlite_path, &cfg.domain_suffix)?);
     store.init_schema()?;
     store.migrate_domain_to_prefix()?;
+
+    let share_signer = Arc::new(ShareSigner::load_or_generate(&store)?);
 
     let (route_tx, _rx) = broadcast::channel(32);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
@@ -216,6 +234,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         process_manager,
         provider_registry: registry,
         lan_access: cfg.lan_access,
+        share_signer,
     })
 }
 
@@ -474,6 +493,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
                         local_suffix,
                         local_proxy_port,
                         state.store.clone(),
+                        Some(state.share_signer.clone()),
                     )
                     .await
                     {
@@ -845,6 +865,8 @@ async fn main() -> anyhow::Result<()> {
         } => run_add(cfg, name, target, port, tunnel),
         Commands::Rm { name } => run_rm(cfg, name),
         Commands::Doctor => run_doctor(cfg),
+        Commands::Share { name, expires } => run_share(cfg, name, expires),
+        Commands::Unshare { name } => run_unshare(cfg, name),
     }
 }
 
@@ -1184,5 +1206,62 @@ fn run_rm_cwd(cfg: &CoulsonConfig) -> anyhow::Result<()> {
     if !found {
         bail!("no app found pointing to {}", cwd.display());
     }
+    Ok(())
+}
+
+fn run_share(cfg: CoulsonConfig, name: String, expires: String) -> anyhow::Result<()> {
+    let duration = share::parse_duration(&expires)?;
+
+    let domain = if name.contains('.') {
+        name.clone()
+    } else {
+        format!("{name}.{}", cfg.domain_suffix)
+    };
+
+    let domain_prefix = crate::store::domain_to_db(&domain, &cfg.domain_suffix);
+
+    // Get tunnel domain from daemon
+    let client = RpcClient::new(&cfg.control_socket);
+    let result = client
+        .call("named_tunnel.status", serde_json::json!({}))
+        .context("failed to query named tunnel status. Is the daemon running with a tunnel?")?;
+
+    let tunnel_domain = result
+        .get("tunnel_domain")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("no named tunnel running. Start one first with `coulson tunnel connect`"))?
+        .to_string();
+
+    // Build state to access the signer
+    let state = build_state(&cfg)?;
+
+    // Enable share_auth for this app
+    if !state.store.set_share_auth(&domain_prefix, true)? {
+        bail!("app not found: {domain}");
+    }
+
+    let token = state.share_signer.create_token(&domain, duration)?;
+
+    let share_url = format!(
+        "https://{domain_prefix}.{tunnel_domain}/_coulson/auth?t={token}"
+    );
+
+    println!("{share_url}");
+    Ok(())
+}
+
+fn run_unshare(cfg: CoulsonConfig, name: String) -> anyhow::Result<()> {
+    let domain = if name.contains('.') {
+        name.clone()
+    } else {
+        format!("{name}.{}", cfg.domain_suffix)
+    };
+    let domain_prefix = crate::store::domain_to_db(&domain, &cfg.domain_suffix);
+
+    let state = build_state(&cfg)?;
+    if !state.store.set_share_auth(&domain_prefix, false)? {
+        bail!("app not found: {domain}");
+    }
+    println!("share auth disabled for {domain}");
     Ok(())
 }

@@ -138,6 +138,7 @@ pub async fn proxy_by_host(
     local_suffix: &str,
     local_proxy_port: u16,
     app_store: &Arc<AppRepository>,
+    share_authorized: bool,
 ) -> anyhow::Result<()> {
     let (parts, mut body) = request.into_parts();
 
@@ -155,33 +156,37 @@ pub async fn proxy_by_host(
     // Check tunnel access: extract domain prefix and verify the app allows tunnel access.
     // Apps with tunnel_mode "global", "quick", or "named" are allowed.
     // Apps with tunnel_mode "none" are not exposed through the tunnel.
-    let domain_prefix = store::domain_to_db(&local_host, local_suffix);
-    let exposed = match app_store.is_tunnel_exposed(&domain_prefix) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(
+    // Skip this check if the request was already authorized via share auth.
+    if !share_authorized {
+        let domain_prefix = store::domain_to_db(&local_host, local_suffix);
+        let exposed = match app_store.is_tunnel_exposed(&domain_prefix) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!(
+                    original_host = %original_host,
+                    domain_prefix = %domain_prefix,
+                    error = %e,
+                    "is_tunnel_exposed query failed, denying access"
+                );
+                false
+            }
+        };
+        if !exposed {
+            debug!(
                 original_host = %original_host,
                 domain_prefix = %domain_prefix,
-                error = %e,
-                "is_tunnel_exposed query failed, denying access"
+                "tunnel access denied: app not found or tunnel_mode is off"
             );
-            false
+            let response = http::Response::builder()
+                .status(403)
+                .header("content-type", "text/plain")
+                .body(())
+                .unwrap();
+            let mut send_stream = send_response.send_response(response, false)?;
+            send_stream
+                .send_data(Bytes::from("403 Forbidden: app not exposed via tunnel"), true)?;
+            return Ok(());
         }
-    };
-    if !exposed {
-        debug!(
-            original_host = %original_host,
-            domain_prefix = %domain_prefix,
-            "tunnel access denied: app not found or tunnel_mode is off"
-        );
-        let response = http::Response::builder()
-            .status(403)
-            .header("content-type", "text/plain")
-            .body(())
-            .unwrap();
-        let mut send_stream = send_response.send_response(response, false)?;
-        send_stream.send_data(Bytes::from("403 Forbidden: app not exposed via tunnel"), true)?;
-        return Ok(());
     }
 
     let uri = format!(

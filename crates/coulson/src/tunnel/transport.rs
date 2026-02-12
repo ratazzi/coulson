@@ -12,7 +12,9 @@ use tracing::{debug, error, info, warn};
 use super::edge;
 use super::proxy;
 use super::rpc;
+use super::share_auth;
 use super::TunnelCredentials;
+use crate::share::ShareSigner;
 use crate::store::AppRepository;
 
 /// Determines how incoming HTTP requests from the tunnel are routed locally.
@@ -30,6 +32,7 @@ pub enum TunnelRouting {
         local_suffix: String,
         local_proxy_port: u16,
         store: Arc<AppRepository>,
+        share_signer: Option<Arc<ShareSigner>>,
     },
 }
 
@@ -289,7 +292,101 @@ async fn try_connect(
                             local_suffix,
                             local_proxy_port,
                             store,
+                            share_signer,
                         } => {
+                            let (parts, body) = request.into_parts();
+
+                            let original_host = parts
+                                .uri
+                                .authority()
+                                .map(|a| a.as_str())
+                                .or_else(|| {
+                                    parts
+                                        .headers
+                                        .get("host")
+                                        .and_then(|v| v.to_str().ok())
+                                })
+                                .unwrap_or(tunnel_domain);
+                            let local_host = proxy::map_tunnel_host_to_local(
+                                original_host,
+                                tunnel_domain,
+                                local_suffix,
+                            );
+
+                            // Only run share auth when the app has share_auth enabled.
+                            // Fail-close: reject on DB error to avoid bypassing auth.
+                            let domain_prefix =
+                                crate::store::domain_to_db(&local_host, local_suffix);
+                            let share_required = match store
+                                .is_share_auth_required(&domain_prefix)
+                            {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    error!(
+                                        error = %e,
+                                        domain_prefix = %domain_prefix,
+                                        "share_auth query failed, denying request"
+                                    );
+                                    let resp = http::Response::builder()
+                                        .status(503)
+                                        .header("content-type", "text/plain")
+                                        .body(())
+                                        .unwrap();
+                                    match send_response.send_response(resp, false) {
+                                        Ok(mut stream) => {
+                                            let _ = stream.send_data(
+                                                bytes::Bytes::from("503 Service Unavailable"),
+                                                true,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(error = %e, "failed to send 503 response");
+                                        }
+                                    }
+                                    return;
+                                }
+                            };
+
+                            let share_authorized = if share_required {
+                                if let Some(signer) = share_signer {
+                                    match share_auth::check_share_auth(
+                                        &parts,
+                                        &mut send_response,
+                                        signer,
+                                        &local_host,
+                                    ) {
+                                        Ok(share_auth::ShareAuthResult::Handled) => return,
+                                        Ok(share_auth::ShareAuthResult::Continue) => true,
+                                        Err(err) => {
+                                            error!(error = %err, "share auth middleware error");
+                                            return;
+                                        }
+                                    }
+                                } else {
+                                    error!("share_auth required but signer not configured, denying");
+                                    let resp = http::Response::builder()
+                                        .status(503)
+                                        .header("content-type", "text/plain")
+                                        .body(())
+                                        .unwrap();
+                                    match send_response.send_response(resp, false) {
+                                        Ok(mut stream) => {
+                                            let _ = stream.send_data(
+                                                bytes::Bytes::from("503 Service Unavailable"),
+                                                true,
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(error = %e, "failed to send 503 response");
+                                        }
+                                    }
+                                    return;
+                                }
+                            } else {
+                                false
+                            };
+
+                            let request = Request::from_parts(parts, body);
                             proxy::proxy_by_host(
                                 request,
                                 send_response,
@@ -297,6 +394,7 @@ async fn try_connect(
                                 local_suffix,
                                 *local_proxy_port,
                                 store,
+                                share_authorized,
                             )
                             .await
                         }

@@ -23,8 +23,8 @@ pub enum ScanUpsertResult {
 }
 
 pub struct AppRepository {
-    conn: Mutex<Connection>,
-    domain_suffix: String,
+    pub(crate) conn: Mutex<Connection>,
+    pub(crate) domain_suffix: String,
 }
 
 impl AppRepository {
@@ -114,6 +114,10 @@ impl AppRepository {
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT")?;
         add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_root TEXT")?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
+        )?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -855,6 +859,26 @@ impl AppRepository {
             |row| row.get(0),
         )?;
         Ok(count > 0)
+    }
+
+    pub fn is_share_auth_required(&self, domain_prefix: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM apps WHERE domain = ?1 AND enabled = 1 AND share_auth = 1",
+            params![domain_prefix],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    pub fn set_share_auth(&self, domain_prefix: &str, enabled: bool) -> anyhow::Result<bool> {
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE apps SET share_auth = ?1, updated_at = ?2 WHERE domain = ?3",
+            params![if enabled { 1 } else { 0 }, now, domain_prefix],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn get_by_id(&self, app_id: &str) -> anyhow::Result<Option<AppSpec>> {
