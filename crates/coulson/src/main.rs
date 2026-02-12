@@ -184,6 +184,8 @@ enum Commands {
         /// App name or domain (omit to match CWD)
         name: Option<String>,
     },
+    /// Check system health
+    Doctor,
 }
 
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
@@ -289,6 +291,139 @@ fn run_warnings(cfg: CoulsonConfig) -> anyhow::Result<()> {
     let warnings = runtime::read_scan_warnings(&state.scan_warnings_path)?;
     println!("{}", serde_json::to_string(&warnings)?);
     Ok(())
+}
+
+fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
+    println!("{}", "Coulson Doctor".bold());
+    println!();
+
+    let mut issues = 0u32;
+
+    // 1. apps_root
+    if cfg.apps_root.is_dir() {
+        let count = std::fs::read_dir(&cfg.apps_root)
+            .map(|entries| entries.flatten().count())
+            .unwrap_or(0);
+        print_check(true, &format!("apps_root exists ({}), {count} entries", cfg.apps_root.display()));
+    } else {
+        print_check(false, &format!("apps_root missing: {}", cfg.apps_root.display()));
+        issues += 1;
+    }
+
+    // 2. SQLite database
+    if cfg.sqlite_path.is_file() {
+        let app_count = AppRepository::new(&cfg.sqlite_path, &cfg.domain_suffix)
+            .and_then(|store| {
+                store.init_schema()?;
+                Ok(store)
+            })
+            .and_then(|store| {
+                let apps = store.list_all()?;
+                Ok(apps.len())
+            });
+        match app_count {
+            Ok(n) => print_check(true, &format!("database OK, {n} apps registered")),
+            Err(e) => {
+                print_check(false, &format!("database error: {e}"));
+                issues += 1;
+            }
+        }
+    } else {
+        print_check(false, &format!("database not found: {}", cfg.sqlite_path.display()));
+        issues += 1;
+    }
+
+    // 3. Daemon (control socket ping)
+    let client = RpcClient::new(&cfg.control_socket);
+    match client.call("health.ping", serde_json::json!({})) {
+        Ok(_) => print_check(true, "daemon running (health.ping OK)"),
+        Err(_) => {
+            print_check(false, &format!(
+                "daemon not reachable at {}",
+                cfg.control_socket.display()
+            ));
+            issues += 1;
+        }
+    }
+
+    // 4. Listen port
+    match std::net::TcpStream::connect_timeout(
+        &cfg.listen_http,
+        std::time::Duration::from_secs(2),
+    ) {
+        Ok(_) => print_check(true, &format!("proxy port {} reachable", cfg.listen_http)),
+        Err(_) => {
+            print_check(false, &format!("proxy port {} not reachable", cfg.listen_http));
+            issues += 1;
+        }
+    }
+
+    // 5. DNS resolution — test the bare domain suffix (dashboard host)
+    match dns_resolves_to_localhost(&cfg.domain_suffix) {
+        Some(true) => print_check(true, &format!("DNS {} resolves to localhost", cfg.domain_suffix)),
+        Some(false) => {
+            print_check(false, &format!("DNS {} does NOT resolve to localhost", cfg.domain_suffix));
+            issues += 1;
+        }
+        None => {
+            print_check(false, &format!("DNS {} resolution failed (mDNS not working?)", cfg.domain_suffix));
+            issues += 1;
+        }
+    }
+
+    // 6. Scan warnings
+    match runtime::read_scan_warnings(&cfg.scan_warnings_path) {
+        Ok(Some(data)) => {
+            if data.scan.warning_count == 0 {
+                print_check(true, "no scan warnings");
+            } else {
+                print_warn(&format!(
+                    "{} scan warning(s), run `coulson warnings` for details",
+                    data.scan.warning_count
+                ));
+                issues += 1;
+            }
+        }
+        Ok(None) => print_check(true, "no scan warnings file (OK if first run)"),
+        Err(_) => print_check(true, "no scan warnings file (OK if first run)"),
+    }
+
+    println!();
+    if issues == 0 {
+        println!("{}", "All checks passed!".green().bold());
+    } else {
+        println!("{}", format!("{issues} issue(s) found").red().bold());
+    }
+
+    Ok(())
+}
+
+fn print_check(ok: bool, msg: &str) {
+    if ok {
+        println!("  {} {msg}", "✓".green());
+    } else {
+        println!("  {} {msg}", "✗".red());
+    }
+}
+
+fn print_warn(msg: &str) {
+    println!("  {} {msg}", "!".yellow());
+}
+
+fn dns_resolves_to_localhost(host: &str) -> Option<bool> {
+    use std::net::ToSocketAddrs;
+    let lookup = format!("{host}:80");
+    match lookup.to_socket_addrs() {
+        Ok(addrs) => {
+            let localhost_v4: std::net::IpAddr = "127.0.0.1".parse().unwrap();
+            let localhost_v6: std::net::IpAddr = "::1".parse().unwrap();
+            let is_localhost = addrs
+                .into_iter()
+                .any(|a| a.ip() == localhost_v4 || a.ip() == localhost_v6);
+            Some(is_localhost)
+        }
+        Err(_) => None,
+    }
 }
 
 async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
@@ -696,6 +831,7 @@ async fn main() -> anyhow::Result<()> {
             tunnel,
         } => run_add(cfg, name, target, port, tunnel),
         Commands::Rm { name } => run_rm(cfg, name),
+        Commands::Doctor => run_doctor(cfg),
     }
 }
 

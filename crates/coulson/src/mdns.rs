@@ -129,10 +129,12 @@ fn sync_records(
     state: &SharedState,
     registered: &mut HashMap<String, String>,
 ) {
-    let current_domains: HashSet<String> = {
+    let mut current_domains: HashSet<String> = {
         let routes = state.routes.read();
         routes.keys().cloned().collect()
     };
+    // Always register the bare domain suffix (dashboard host)
+    current_domains.insert(state.domain_suffix.clone());
 
     // Remove stale
     let stale: Vec<String> = registered
