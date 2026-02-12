@@ -42,3 +42,6 @@ base64 = "0.22"
 futures = "0.3"
 rand = "0.8"
 tokio-util = { version = "0.7", features = ["compat"] }
+clap = { version = "4", features = ["derive"] }
+colored = "2"
+tabled = { version = "0.17", features = ["ansi"] }

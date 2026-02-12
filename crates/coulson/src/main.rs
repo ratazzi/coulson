@@ -4,6 +4,7 @@ mod domain;
 mod mdns;
 mod process;
 mod proxy;
+mod rpc_client;
 mod runtime;
 mod scanner;
 mod store;
@@ -16,6 +17,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{bail, Context};
+use clap::{Parser, Subcommand};
+use colored::Colorize;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
@@ -23,9 +26,12 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tracing::{debug, error, info};
 
+use tabled::Tabled;
+
 use crate::config::CoulsonConfig;
 use crate::domain::BackendTarget;
 use crate::process::{ProcessManagerHandle, ProviderRegistry};
+use crate::rpc_client::RpcClient;
 use crate::store::AppRepository;
 
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
@@ -134,62 +140,50 @@ impl SharedState {
     }
 }
 
-enum Command {
-    Serve,
-    Scan,
-    Ls {
-        managed: Option<bool>,
-        domain: Option<String>,
-    },
-    Warnings,
+#[derive(Parser)]
+#[command(name = "coulson", about = "Local development gateway")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
 }
 
-fn parse_command() -> anyhow::Result<Command> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.is_empty() {
-        return Ok(Command::Serve);
-    }
-
-    match args[0].as_str() {
-        "serve" => Ok(Command::Serve),
-        "scan" => Ok(Command::Scan),
-        "warnings" => Ok(Command::Warnings),
-        "ls" => {
-            let mut managed: Option<bool> = None;
-            let mut domain: Option<String> = None;
-            let mut i = 1usize;
-            while i < args.len() {
-                match args[i].as_str() {
-                    "--managed" => {
-                        if managed == Some(false) {
-                            bail!("cannot use --managed and --manual together");
-                        }
-                        managed = Some(true);
-                        i += 1;
-                    }
-                    "--manual" => {
-                        if managed == Some(true) {
-                            bail!("cannot use --managed and --manual together");
-                        }
-                        managed = Some(false);
-                        i += 1;
-                    }
-                    "--domain" => {
-                        if i + 1 >= args.len() {
-                            bail!("--domain requires a value");
-                        }
-                        domain = Some(args[i + 1].clone());
-                        i += 2;
-                    }
-                    other => {
-                        bail!("unknown ls option: {other}. supported: --managed --manual --domain <host>");
-                    }
-                }
-            }
-            Ok(Command::Ls { managed, domain })
-        }
-        other => bail!("unknown command: {other}. usage: coulson [serve|scan|ls|warnings]"),
-    }
+#[derive(Subcommand)]
+enum Commands {
+    /// Start the daemon (proxy + control + scanner)
+    Serve,
+    /// One-shot scan of apps_root
+    Scan,
+    /// List registered apps
+    Ls {
+        #[arg(long, conflicts_with = "manual")]
+        managed: bool,
+        #[arg(long, conflicts_with = "managed")]
+        manual: bool,
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Show scan warnings
+    Warnings,
+    /// Add an app
+    #[command(alias = "recruit")]
+    Add {
+        /// App name or domain (for manual proxy mode)
+        name: Option<String>,
+        /// Target: port, host:port, or /path/to/socket (for manual proxy mode)
+        target: Option<String>,
+        /// Port override (for directory project mode)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Also start a tunnel (not yet implemented)
+        #[arg(long)]
+        tunnel: bool,
+    },
+    /// Remove an app
+    #[command(alias = "dismiss")]
+    Rm {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+    },
 }
 
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
@@ -243,8 +237,51 @@ fn run_ls(
 ) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
     let apps = state.store.list_filtered(managed, domain.as_deref())?;
-    println!("{}", serde_json::to_string(&apps)?);
+
+    if apps.is_empty() {
+        println!("No apps found.");
+        return Ok(());
+    }
+
+    let rows: Vec<AppRow> = apps
+        .iter()
+        .map(|app| {
+            let status = if app.enabled {
+                "enabled".green().to_string()
+            } else {
+                "disabled".dimmed().to_string()
+            };
+            AppRow {
+                name: app.name.bold().to_string(),
+                domain: app.domain.0.cyan().to_string(),
+                kind: format!("{:?}", app.kind).to_lowercase(),
+                target: app.target.to_url_base().dimmed().to_string(),
+                status,
+            }
+        })
+        .collect();
+
+    use tabled::settings::Style;
+    let table = tabled::Table::new(&rows)
+        .with(Style::blank())
+        .to_string();
+    println!("{table}");
+
     Ok(())
+}
+
+#[derive(Tabled)]
+struct AppRow {
+    #[tabled(rename = "NAME")]
+    name: String,
+    #[tabled(rename = "DOMAIN")]
+    domain: String,
+    #[tabled(rename = "KIND")]
+    kind: String,
+    #[tabled(rename = "TARGET")]
+    target: String,
+    #[tabled(rename = "STATUS")]
+    status: String,
 }
 
 fn run_warnings(cfg: CoulsonConfig) -> anyhow::Result<()> {
@@ -633,10 +670,370 @@ async fn main() -> anyhow::Result<()> {
     runtime::init_tracing();
     let cfg = CoulsonConfig::load().context("failed to load config")?;
 
-    match parse_command()? {
-        Command::Serve => run_serve(cfg).await,
-        Command::Scan => run_scan_once(cfg),
-        Command::Ls { managed, domain } => run_ls(cfg, managed, domain),
-        Command::Warnings => run_warnings(cfg),
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Commands::Serve) {
+        Commands::Serve => run_serve(cfg).await,
+        Commands::Scan => run_scan_once(cfg),
+        Commands::Ls {
+            managed,
+            manual,
+            domain,
+        } => {
+            let filter = if managed {
+                Some(true)
+            } else if manual {
+                Some(false)
+            } else {
+                None
+            };
+            run_ls(cfg, filter, domain)
+        }
+        Commands::Warnings => run_warnings(cfg),
+        Commands::Add {
+            name,
+            target,
+            port,
+            tunnel,
+        } => run_add(cfg, name, target, port, tunnel),
+        Commands::Rm { name } => run_rm(cfg, name),
     }
+}
+
+fn run_add(
+    cfg: CoulsonConfig,
+    name: Option<String>,
+    target: Option<String>,
+    port: Option<u16>,
+    tunnel: bool,
+) -> anyhow::Result<()> {
+    match (name.as_deref(), target.as_deref()) {
+        // Manual proxy mode: coulson add <name> <target>
+        (Some(n), Some(t)) => run_add_manual(&cfg, n, t),
+        // Directory project mode: coulson add [--port P]
+        (None, None) => run_add_directory(&cfg, port, tunnel),
+        // name only without target: treat as directory mode with --name override
+        (Some(n), None) => run_add_directory_with_name(&cfg, n, port, tunnel),
+        (None, Some(_)) => bail!("target requires a name: coulson add <name> <target>"),
+    }
+}
+
+fn run_add_directory(cfg: &CoulsonConfig, port: Option<u16>, tunnel: bool) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app");
+    let name = scanner::sanitize_name(dir_name);
+    run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
+}
+
+fn run_add_directory_with_name(
+    cfg: &CoulsonConfig,
+    name: &str,
+    port: Option<u16>,
+    tunnel: bool,
+) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let name = scanner::sanitize_name(name);
+    run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
+}
+
+fn run_add_directory_inner(
+    cfg: &CoulsonConfig,
+    name: &str,
+    cwd: &std::path::Path,
+    port: Option<u16>,
+    tunnel: bool,
+) -> anyhow::Result<()> {
+    let link_path = cfg.apps_root.join(name);
+
+    // Conflict check
+    if link_path.exists() || link_path.symlink_metadata().is_ok() {
+        let meta = std::fs::symlink_metadata(&link_path)?;
+        if meta.file_type().is_symlink() {
+            let target = std::fs::read_link(&link_path)?;
+            let resolved = if target.is_absolute() {
+                target.clone()
+            } else {
+                cfg.apps_root.join(&target)
+            };
+            let resolved = resolved
+                .canonicalize()
+                .unwrap_or(resolved);
+            let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+            if resolved == cwd_canonical {
+                println!("{} {name}.{} already added", "=".bold(), cfg.domain_suffix);
+                return Ok(());
+            }
+            bail!(
+                "{} already points to {}. Use a different name: coulson add <name>",
+                link_path.display(),
+                resolved.display()
+            );
+        } else {
+            bail!(
+                "{} already exists (not a symlink). Remove it manually first.",
+                link_path.display()
+            );
+        }
+    }
+
+    // --port mode: create a powfile
+    if let Some(p) = port {
+        std::fs::create_dir_all(&cfg.apps_root)?;
+        std::fs::write(&link_path, format!("{p}\n"))?;
+        println!(
+            "{} {name}.{} -> 127.0.0.1:{p}",
+            "+".green().bold(), cfg.domain_suffix
+        );
+        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
+        return Ok(());
+    }
+
+    // Try auto-detect app kind
+    let manifest_path = cwd.join("coulson.json");
+    let manifest: Option<serde_json::Value> = if manifest_path.is_file() {
+        let data = std::fs::read_to_string(&manifest_path).ok();
+        data.and_then(|s| serde_json::from_str(&s).ok())
+    } else {
+        None
+    };
+
+    let registry = process::default_registry();
+    if let Some((_provider, detected)) = registry.detect(cwd, manifest.as_ref()) {
+        std::fs::create_dir_all(&cfg.apps_root)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(cwd, &link_path).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                link_path.display(),
+                cwd.display()
+            )
+        })?;
+        println!(
+            "{} {name}.{} ({}) -> {}",
+            "+".green().bold(),
+            cfg.domain_suffix,
+            detected.kind,
+            cwd.display()
+        );
+        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
+    } else {
+        // No auto-detect, still create symlink (scanner will parse coulson.routes etc.)
+        std::fs::create_dir_all(&cfg.apps_root)?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(cwd, &link_path).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                link_path.display(),
+                cwd.display()
+            )
+        })?;
+        println!(
+            "{} {name}.{} -> {}",
+            "+".green().bold(),
+            cfg.domain_suffix,
+            cwd.display()
+        );
+        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
+        println!("  {}", "Tip: use --port to specify a target port, or add coulson.json/coulson.routes".dimmed());
+    }
+
+    if tunnel {
+        println!("  {}", "Note: --tunnel is not yet implemented".yellow());
+    }
+
+    Ok(())
+}
+
+fn run_add_manual(cfg: &CoulsonConfig, name: &str, target: &str) -> anyhow::Result<()> {
+    let domain = if name.contains('.') {
+        name.to_string()
+    } else {
+        format!("{name}.{}", cfg.domain_suffix)
+    };
+
+    let client = RpcClient::new(&cfg.control_socket);
+
+    if target.starts_with('/') {
+        // Unix socket
+        client.call(
+            "app.create_unix_socket",
+            serde_json::json!({
+                "name": name,
+                "domain": domain,
+                "socket_path": target,
+            }),
+        )?;
+        println!("{} {domain} -> unix:{target}", "+".green().bold());
+    } else if let Ok(port) = target.parse::<u16>() {
+        // Port only
+        client.call(
+            "app.create_tcp",
+            serde_json::json!({
+                "name": name,
+                "domain": domain,
+                "target_host": "127.0.0.1",
+                "target_port": port,
+            }),
+        )?;
+        println!("{} {domain} -> 127.0.0.1:{port}", "+".green().bold());
+    } else if let Some((host, port_str)) = target.rsplit_once(':') {
+        // host:port
+        let port: u16 = port_str
+            .parse()
+            .with_context(|| format!("invalid port in target: {target}"))?;
+        client.call(
+            "app.create_tcp",
+            serde_json::json!({
+                "name": name,
+                "domain": domain,
+                "target_host": host,
+                "target_port": port,
+            }),
+        )?;
+        println!("{} {domain} -> {host}:{port}", "+".green().bold());
+    } else {
+        bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
+    }
+
+    println!("  {}", format!("http://{domain}:{}", cfg.listen_http.port()).cyan());
+    Ok(())
+}
+
+fn run_rm(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
+    match name {
+        Some(n) => run_rm_by_name(&cfg, &n),
+        None => run_rm_cwd(&cfg),
+    }
+}
+
+fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
+    // Strip domain suffix if present
+    let bare_name = name
+        .strip_suffix(&format!(".{}", cfg.domain_suffix))
+        .unwrap_or(name);
+
+    let mut removed_file = false;
+    let mut removed_db = false;
+
+    // Check apps_root for file/symlink
+    let link_path = cfg.apps_root.join(bare_name);
+    if link_path.symlink_metadata().is_ok() {
+        std::fs::remove_file(&link_path).with_context(|| {
+            format!("failed to remove {}", link_path.display())
+        })?;
+        removed_file = true;
+    }
+
+    // Best-effort RPC delete
+    let client = RpcClient::new(&cfg.control_socket);
+    if let Ok(result) = client.call("app.list", serde_json::json!({})) {
+        if let Some(apps) = result.get("apps").and_then(|a| a.as_array()) {
+            let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
+            for app in apps {
+                let matches = app.get("name").and_then(|n| n.as_str()) == Some(bare_name)
+                    || app.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
+                    || app.get("domain").and_then(|d| d.as_str()) == Some(bare_name);
+                if matches {
+                    if let Some(app_id) = app.get("id").and_then(|i| i.as_str()) {
+                        if client
+                            .call("app.delete", serde_json::json!({ "app_id": app_id }))
+                            .is_ok()
+                        {
+                            removed_db = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if !removed_file && !removed_db {
+        bail!("app not found: {name}");
+    }
+
+    if removed_file {
+        println!("{} {} from {}", "-".red().bold(), bare_name, cfg.apps_root.display());
+    }
+    if removed_db {
+        println!("{} {bare_name} from database", "-".red().bold());
+    }
+    Ok(())
+}
+
+fn run_rm_cwd(cfg: &CoulsonConfig) -> anyhow::Result<()> {
+    let cwd = std::env::current_dir().context("failed to get current directory")?;
+    let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+
+    let entries = match std::fs::read_dir(&cfg.apps_root) {
+        Ok(e) => e,
+        Err(_) => bail!("no app found pointing to {}", cwd.display()),
+    };
+
+    let mut found = false;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        let target = match std::fs::read_link(&path) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        let resolved = if target.is_absolute() {
+            target.clone()
+        } else {
+            cfg.apps_root.join(&target)
+        };
+        let resolved = resolved.canonicalize().unwrap_or(resolved);
+        if resolved == cwd_canonical {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+
+            std::fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            println!("{} {} from {}", "-".red().bold(), name, cfg.apps_root.display());
+
+            // Best-effort RPC delete
+            let client = RpcClient::new(&cfg.control_socket);
+            if let Ok(result) = client.call("app.list", serde_json::json!({})) {
+                if let Some(apps) = result.get("apps").and_then(|a| a.as_array()) {
+                    let domain_match = format!("{name}.{}", cfg.domain_suffix);
+                    for app in apps {
+                        let matches =
+                            app.get("name").and_then(|n| n.as_str()) == Some(name)
+                                || app.get("domain").and_then(|d| d.as_str())
+                                    == Some(&domain_match);
+                        if matches {
+                            if let Some(app_id) = app.get("id").and_then(|i| i.as_str()) {
+                                if client
+                                    .call(
+                                        "app.delete",
+                                        serde_json::json!({ "app_id": app_id }),
+                                    )
+                                    .is_ok()
+                                {
+                                    println!("{} {name} from database", "-".red().bold());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            found = true;
+        }
+    }
+
+    if !found {
+        bail!("no app found pointing to {}", cwd.display());
+    }
+    Ok(())
 }

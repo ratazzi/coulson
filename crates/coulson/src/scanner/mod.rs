@@ -809,7 +809,7 @@ fn parse_port_proxy_target(raw: &str) -> Option<(String, u16, Option<u64>)> {
     Some((route.target_host, route.target_port, route.timeout_ms))
 }
 
-fn sanitize_name(name: &str) -> String {
+pub(crate) fn sanitize_name(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' {
