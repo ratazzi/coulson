@@ -1,3 +1,4 @@
+mod certs;
 mod config;
 mod control;
 mod domain;
@@ -203,6 +204,8 @@ enum Commands {
         /// App name or domain
         name: String,
     },
+    /// Trust the Coulson CA certificate (add to macOS login keychain)
+    Trust,
 }
 
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
@@ -594,11 +597,34 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
         }
     }
 
+    // TLS certificate setup
+    let tls_config = if cfg.listen_https.is_some() {
+        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+        let certs_dir = std::path::PathBuf::from(format!("{home}/.coulson/certs"));
+        match certs::CertManager::ensure(&certs_dir, &cfg.domain_suffix) {
+            Ok(cm) => {
+                let https_addr = cfg.listen_https.unwrap();
+                Some(proxy::TlsConfig {
+                    bind: https_addr.to_string(),
+                    cert_path: cm.cert_path().to_string(),
+                    key_path: cm.key_path().to_string(),
+                    ca_path: cm.ca_path().to_string(),
+                })
+            }
+            Err(err) => {
+                error!(error = %err, "failed to initialize TLS certificates, HTTPS disabled");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
     let proxy_pm = state.process_manager.clone();
     let proxy_task = tokio::spawn(async move {
-        if let Err(err) = proxy::run_proxy(proxy_addr, proxy_state, proxy_pm).await {
+        if let Err(err) = proxy::run_proxy(proxy_addr, tls_config, proxy_state, proxy_pm).await {
             error!(error = %err, "proxy exited with error");
         }
     });
@@ -867,6 +893,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => run_doctor(cfg),
         Commands::Share { name, expires } => run_share(cfg, name, expires),
         Commands::Unshare { name } => run_unshare(cfg, name),
+        Commands::Trust => run_trust(cfg),
     }
 }
 
@@ -1263,5 +1290,54 @@ fn run_unshare(cfg: CoulsonConfig, name: String) -> anyhow::Result<()> {
         bail!("app not found: {domain}");
     }
     println!("share auth disabled for {domain}");
+    Ok(())
+}
+
+fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let ca_path = std::path::PathBuf::from(format!("{home}/.coulson/certs/ca.crt"));
+
+    if !ca_path.exists() {
+        bail!(
+            "CA certificate not found at {}. Run the daemon first to generate certificates.",
+            ca_path.display()
+        );
+    }
+
+    println!("CA certificate: {}", ca_path.display());
+
+    #[cfg(target_os = "macos")]
+    {
+        println!("Adding CA to macOS System keychain (requires sudo)...");
+        let status = std::process::Command::new("sudo")
+            .args([
+                "security",
+                "add-trusted-cert",
+                "-d",
+                "-r",
+                "trustRoot",
+                "-k",
+                "/Library/Keychains/System.keychain",
+            ])
+            .arg(&ca_path)
+            .status()
+            .context("failed to run security command")?;
+
+        if status.success() {
+            println!("{}", "CA certificate trusted successfully!".green().bold());
+            println!("HTTPS connections to *.{} will now be trusted.", _cfg.domain_suffix);
+        } else {
+            eprintln!("{}", "Failed to add CA to System keychain.".red());
+            eprintln!("You can manually trust it:");
+            eprintln!("  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}", ca_path.display());
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        println!("To trust this CA certificate, import it into your system trust store:");
+        println!("  {}", ca_path.display());
+    }
+
     Ok(())
 }

@@ -7,6 +7,7 @@ use anyhow::Context;
 #[derive(Debug, Clone)]
 pub struct CoulsonConfig {
     pub listen_http: SocketAddr,
+    pub listen_https: Option<SocketAddr>,
     pub control_socket: PathBuf,
     pub sqlite_path: PathBuf,
     pub scan_warnings_path: PathBuf,
@@ -27,8 +28,10 @@ impl Default for CoulsonConfig {
         } else {
             PathBuf::from(format!("{home}/.coulson"))
         };
+        let listen_http: SocketAddr = "127.0.0.1:8080".parse().expect("default listen addr");
         Self {
-            listen_http: "127.0.0.1:8080".parse().expect("default listen addr"),
+            listen_https: Some(SocketAddr::from(([127, 0, 0, 1], listen_http.port() + 363))),
+            listen_http,
             control_socket: PathBuf::from("/tmp/coulson/coulson.sock"),
             sqlite_path: PathBuf::from(format!("{home}/.coulson/state.db")),
             scan_warnings_path: PathBuf::from(format!("{home}/.coulson/scan_warnings.json")),
@@ -90,10 +93,33 @@ impl CoulsonConfig {
                 parse_bool(&raw).with_context(|| format!("invalid COULSON_LAN_ACCESS: {raw}"))?;
         }
 
+        // HTTPS listener
+        if let Ok(raw) = env::var("COULSON_LISTEN_HTTPS") {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "off" | "0" | "false" => {
+                    cfg.listen_https = None;
+                }
+                _ => {
+                    cfg.listen_https = Some(
+                        raw.parse()
+                            .with_context(|| format!("invalid COULSON_LISTEN_HTTPS: {raw}"))?,
+                    );
+                }
+            }
+        } else {
+            // Default: HTTP port + 363
+            let port = cfg.listen_http.port().saturating_add(363);
+            cfg.listen_https = Some(SocketAddr::from((cfg.listen_http.ip(), port)));
+        }
+
         // When LAN access enabled and listen address not explicitly set, bind to all interfaces
         if cfg.lan_access && explicit_listen.is_none() {
             let port = cfg.listen_http.port();
             cfg.listen_http = SocketAddr::from(([0, 0, 0, 0], port));
+            if let Some(ref mut https) = cfg.listen_https {
+                let https_port = https.port();
+                *https = SocketAddr::from(([0, 0, 0, 0], https_port));
+            }
         }
 
         Ok(cfg)

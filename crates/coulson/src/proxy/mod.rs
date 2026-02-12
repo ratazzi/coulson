@@ -240,25 +240,43 @@ impl ProxyHttp for BridgeProxy {
     }
 }
 
+pub struct TlsConfig {
+    pub bind: String,
+    pub cert_path: String,
+    pub key_path: String,
+    pub ca_path: String,
+}
+
 pub async fn run_proxy(
     addr: SocketAddr,
+    tls: Option<TlsConfig>,
     state: SharedState,
     process_manager: ProcessManagerHandle,
 ) -> anyhow::Result<()> {
     let bind = addr.to_string();
-    info!(%bind, "proxy listening");
+    info!(%bind, "proxy listening (HTTP)");
+    if let Some(ref tls) = tls {
+        info!(bind = %tls.bind, "proxy listening (HTTPS)");
+    }
 
-    tokio::task::spawn_blocking(move || run_proxy_blocking(&bind, state, process_manager))
+    tokio::task::spawn_blocking(move || run_proxy_blocking(&bind, tls, state, process_manager))
         .await??;
     Ok(())
 }
 
 fn run_proxy_blocking(
     bind: &str,
+    tls: Option<TlsConfig>,
     state: SharedState,
     process_manager: ProcessManagerHandle,
 ) -> anyhow::Result<()> {
-    let mut server = Server::new(None)?;
+    // When TLS is enabled, set ca_file on ServerConf to avoid loading macOS system
+    // certificates (which may contain unsupported critical extensions that crash rustls).
+    let mut conf = pingora::server::configuration::ServerConf::default();
+    if let Some(ref tls) = tls {
+        conf.ca_file = Some(tls.ca_path.clone());
+    }
+    let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 
     let mut service = http_proxy_service(
@@ -276,6 +294,18 @@ fn run_proxy_blocking(
             service.add_tcp(&v6_bind);
         }
     }
+
+    // TLS listener
+    if let Some(tls) = tls {
+        service.add_tls(&tls.bind, &tls.cert_path, &tls.key_path)?;
+        if let Ok(addr) = tls.bind.parse::<std::net::SocketAddr>() {
+            if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
+                let v6_bind = format!("[::1]:{}", addr.port());
+                service.add_tls(&v6_bind, &tls.cert_path, &tls.key_path)?;
+            }
+        }
+    }
+
     server.add_service(service);
     server.run_forever();
 }
