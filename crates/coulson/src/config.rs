@@ -15,6 +15,7 @@ pub struct CoulsonConfig {
     pub scan_interval_secs: u64,
     pub watch_fs: bool,
     pub idle_timeout_secs: u64,
+    pub lan_access: bool,
 }
 
 impl Default for CoulsonConfig {
@@ -36,6 +37,7 @@ impl Default for CoulsonConfig {
             scan_interval_secs: 0,
             watch_fs: true,
             idle_timeout_secs: 900,
+            lan_access: false,
         }
     }
 }
@@ -43,8 +45,9 @@ impl Default for CoulsonConfig {
 impl CoulsonConfig {
     pub fn load() -> anyhow::Result<Self> {
         let mut cfg = Self::default();
+        let explicit_listen = env::var("COULSON_LISTEN_HTTP").ok();
 
-        if let Ok(addr) = env::var("COULSON_LISTEN_HTTP") {
+        if let Some(addr) = &explicit_listen {
             cfg.listen_http = addr
                 .parse()
                 .with_context(|| format!("invalid COULSON_LISTEN_HTTP: {addr}"))?;
@@ -80,6 +83,17 @@ impl CoulsonConfig {
             cfg.idle_timeout_secs = raw
                 .parse()
                 .with_context(|| format!("invalid COULSON_IDLE_TIMEOUT_SECS: {raw}"))?;
+        }
+
+        if let Ok(raw) = env::var("COULSON_LAN_ACCESS") {
+            cfg.lan_access =
+                parse_bool(&raw).with_context(|| format!("invalid COULSON_LAN_ACCESS: {raw}"))?;
+        }
+
+        // When LAN access enabled and listen address not explicitly set, bind to all interfaces
+        if cfg.lan_access && explicit_listen.is_none() {
+            let port = cfg.listen_http.port();
+            cfg.listen_http = SocketAddr::from(([0, 0, 0, 0], port));
         }
 
         Ok(cfg)

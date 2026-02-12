@@ -19,6 +19,11 @@ const IP_POLL_INTERVAL_SECS: u64 = 5;
 pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     let mdns = ServiceDaemon::new()?;
     mdns.disable_interface(IfKind::IPv6)?;
+    if !state.lan_access {
+        // Loopback only: no LAN broadcast, no conflicts with other machines
+        mdns.disable_interface(IfKind::IPv4)?;
+        mdns.enable_interface(IfKind::LoopbackV4)?;
+    }
     let mut route_rx = state.route_tx.subscribe();
 
     // Primary: watch /var/run/resolv.conf for network changes
@@ -53,7 +58,7 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
             }
             _ = net_rx.recv() => {
                 info!("network change detected (resolv.conf), re-registering mdns records");
-                reregister_all(&mdns, &mut registered);
+                reregister_all(&mdns, &state, &mut registered);
                 // Also update last_local_ip to stay in sync
                 last_local_ip = detect_local_ip();
             }
@@ -66,7 +71,7 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
                         "network change detected (IP changed), re-registering mdns records"
                     );
                     last_local_ip = current_ip;
-                    reregister_all(&mdns, &mut registered);
+                    reregister_all(&mdns, &state, &mut registered);
                 }
             }
         }
@@ -153,13 +158,20 @@ fn sync_records(
     }
 
     // Register new
+    let lan_ip = if state.lan_access {
+        detect_local_ip()
+    } else {
+        None
+    };
     for domain in &current_domains {
         if registered.contains_key(domain) || !is_local_domain(domain) {
             continue;
         }
-        match register_domain(mdns, domain) {
+        let is_bare_suffix = domain == &state.domain_suffix;
+        let use_lan = state.lan_access && !is_bare_suffix;
+        match register_domain(mdns, domain, if use_lan { lan_ip } else { None }) {
             Ok(fullname) => {
-                info!(domain, "mdns registered");
+                info!(domain, lan = use_lan, "mdns registered");
                 registered.insert(domain.clone(), fullname);
             }
             Err(e) => {
@@ -169,18 +181,29 @@ fn sync_records(
     }
 }
 
-fn reregister_all(mdns: &ServiceDaemon, registered: &mut HashMap<String, String>) {
+fn reregister_all(
+    mdns: &ServiceDaemon,
+    state: &SharedState,
+    registered: &mut HashMap<String, String>,
+) {
     if registered.is_empty() {
         return;
     }
+    let lan_ip = if state.lan_access {
+        detect_local_ip()
+    } else {
+        None
+    };
     let domains: Vec<(String, String)> = registered.drain().collect();
     for (_domain, fullname) in &domains {
         let _ = mdns.unregister(fullname);
     }
     for (domain, _) in domains {
-        match register_domain(mdns, &domain) {
+        let is_bare_suffix = domain == state.domain_suffix;
+        let use_lan = state.lan_access && !is_bare_suffix;
+        match register_domain(mdns, &domain, if use_lan { lan_ip } else { None }) {
             Ok(fullname) => {
-                debug!(domain, "mdns re-registered");
+                debug!(domain, lan = use_lan, "mdns re-registered");
                 registered.insert(domain, fullname);
             }
             Err(e) => {
@@ -194,20 +217,36 @@ fn is_local_domain(domain: &str) -> bool {
     domain.ends_with(".local") || domain == "local"
 }
 
-fn register_domain(mdns: &ServiceDaemon, domain: &str) -> anyhow::Result<String> {
+/// Register a domain in mDNS.
+/// If `lan_ip` is Some, the A record uses that IP (for LAN-visible app domains).
+/// If None, uses 127.0.0.1 (loopback only).
+fn register_domain(
+    mdns: &ServiceDaemon,
+    domain: &str,
+    lan_ip: Option<IpAddr>,
+) -> anyhow::Result<String> {
     let instance_name = domain;
     let hostname = format!("{domain}.");
     let properties: HashMap<String, String> = HashMap::new();
+
+    let ip_str = match lan_ip {
+        Some(ip) => ip.to_string(),
+        None => "127.0.0.1".to_string(),
+    };
 
     let mut service_info = ServiceInfo::new(
         SERVICE_TYPE,
         instance_name,
         &hostname,
-        "127.0.0.1",
+        &ip_str,
         0,
         Some(properties),
     )?;
-    service_info.set_interfaces(vec![IfKind::LoopbackV4]);
+
+    match lan_ip {
+        Some(ip) => service_info.set_interfaces(vec![IfKind::Addr(ip)]),
+        None => service_info.set_interfaces(vec![IfKind::LoopbackV4]),
+    }
 
     let fullname = service_info.get_fullname().to_string();
     let _ = mdns.unregister(&fullname);

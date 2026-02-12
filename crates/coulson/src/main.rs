@@ -67,6 +67,7 @@ pub struct SharedState {
     pub listen_http: std::net::SocketAddr,
     pub process_manager: ProcessManagerHandle,
     pub provider_registry: Arc<ProviderRegistry>,
+    pub lan_access: bool,
 }
 
 impl SharedState {
@@ -214,6 +215,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         listen_http: cfg.listen_http,
         process_manager,
         provider_registry: registry,
+        lan_access: cfg.lan_access,
     })
 }
 
@@ -386,6 +388,17 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
         }
         Ok(None) => print_check(true, "no scan warnings file (OK if first run)"),
         Err(_) => print_check(true, "no scan warnings file (OK if first run)"),
+    }
+
+    // 7. LAN access
+    if cfg.lan_access {
+        print_check(true, &format!("LAN access enabled, proxy on {}", cfg.listen_http));
+        if cfg.listen_http.ip().is_loopback() {
+            print_warn("proxy binds to loopback but LAN access is on — LAN clients cannot connect");
+            issues += 1;
+        }
+    } else {
+        print_check(true, &format!("LAN access disabled (loopback only, {})", cfg.listen_http));
     }
 
     println!();
