@@ -88,13 +88,20 @@ impl ProxyHttp for BridgeProxy {
     where
         Self::CTX: Send + Sync,
     {
-        let host = extract_host(
-            session
-                .req_header()
-                .headers
-                .get("host")
-                .and_then(|v| v.to_str().ok()),
-        );
+        // HTTP/2 uses :authority pseudo-header; HTTP/1.1 uses Host header
+        let raw_host = session
+            .req_header()
+            .uri
+            .authority()
+            .map(|a| a.as_str())
+            .or_else(|| {
+                session
+                    .req_header()
+                    .headers
+                    .get("host")
+                    .and_then(|v| v.to_str().ok())
+            });
+        let host = extract_host(raw_host);
         let Some(host) = host else {
             write_error_page(session, 400, "missing_host").await?;
             return Ok(true);
@@ -295,13 +302,21 @@ fn run_proxy_blocking(
         }
     }
 
-    // TLS listener
+    // TLS listener with HTTP/2 + HTTP/1.1 ALPN
     if let Some(tls) = tls {
-        service.add_tls(&tls.bind, &tls.cert_path, &tls.key_path)?;
+        let mut tls_settings =
+            pingora::listeners::tls::TlsSettings::intermediate(&tls.cert_path, &tls.key_path)?;
+        tls_settings.enable_h2();
+        service.add_tls_with_settings(&tls.bind, None, tls_settings);
         if let Ok(addr) = tls.bind.parse::<std::net::SocketAddr>() {
             if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
                 let v6_bind = format!("[::1]:{}", addr.port());
-                service.add_tls(&v6_bind, &tls.cert_path, &tls.key_path)?;
+                let mut v6_settings = pingora::listeners::tls::TlsSettings::intermediate(
+                    &tls.cert_path,
+                    &tls.key_path,
+                )?;
+                v6_settings.enable_h2();
+                service.add_tls_with_settings(&v6_bind, None, v6_settings);
             }
         }
     }
