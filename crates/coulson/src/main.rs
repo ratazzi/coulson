@@ -217,6 +217,11 @@ enum Commands {
     },
     /// Show running managed processes
     Ps,
+    /// Restart a managed process
+    Restart {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+    },
     /// Trust the Coulson CA certificate (add to macOS login keychain)
     Trust,
 }
@@ -912,6 +917,7 @@ async fn main() -> anyhow::Result<()> {
             lines,
         } => run_logs(cfg, name, follow, lines),
         Commands::Ps => run_ps(cfg),
+        Commands::Restart { name } => run_restart(cfg, name),
         Commands::Trust => run_trust(cfg),
     }
 }
@@ -1413,6 +1419,30 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
         .to_string();
     println!("{table}");
 
+    Ok(())
+}
+
+fn run_restart(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
+    let bare_name = resolve_app_name(&cfg, name.as_deref())?;
+    let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
+
+    let client = RpcClient::new(&cfg.control_socket);
+    let result = client.call("app.list", serde_json::json!({}))?;
+    let app_id = result
+        .get("apps")
+        .and_then(|a| a.as_array())
+        .and_then(|apps| {
+            apps.iter().find(|a| {
+                a.get("name").and_then(|n| n.as_str()) == Some(&bare_name)
+                    || a.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
+                    || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
+            })
+        })
+        .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
+
+    client.call("process.restart", serde_json::json!({ "app_id": app_id }))?;
+    println!("{} {bare_name} restarted", "✓".green());
     Ok(())
 }
 

@@ -200,6 +200,18 @@ impl ProcessManager {
         Ok(path_str)
     }
 
+    /// Kill a specific managed process. Returns true if it was found and killed.
+    pub fn kill_process(&mut self, app_id: &str) -> bool {
+        if let Some(mut proc) = self.processes.remove(app_id) {
+            info!(app_id, "killing managed process for restart");
+            let _ = proc.child.start_kill();
+            cleanup_socket(&proc.socket_path);
+            true
+        } else {
+            false
+        }
+    }
+
     pub fn mark_active(&mut self, app_id: &str) {
         if let Some(proc) = self.processes.get_mut(app_id) {
             proc.last_active = Instant::now();

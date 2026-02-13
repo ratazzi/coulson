@@ -772,6 +772,39 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             let infos = pm.list_status();
             Ok(json!({ "processes": infos }))
         }
+        "process.restart" => {
+            let params: AppIdParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+            let app = match state.store.get_by_id(&params.app_id) {
+                Ok(Some(app)) => app,
+                Ok(None) => return render_err(req.request_id, ControlError::NotFound),
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let (root, kind) = match &app.target {
+                crate::domain::BackendTarget::Managed { root, kind, .. } => {
+                    (root.clone(), kind.clone())
+                }
+                _ => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams("app is not a managed process".to_string()),
+                    );
+                }
+            };
+            let mut pm = state.process_manager.lock().await;
+            pm.kill_process(&params.app_id);
+            match pm
+                .ensure_running(&params.app_id, std::path::Path::new(&root), &kind)
+                .await
+            {
+                Ok(socket_path) => Ok(json!({ "restarted": true, "socket_path": socket_path })),
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+        }
         "apps.warnings" => match crate::runtime::read_scan_warnings(&state.scan_warnings_path) {
             Ok(data) => Ok(json!({ "warnings": data })),
             Err(e) => return internal_error(req.request_id, e.to_string()),
