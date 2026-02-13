@@ -482,26 +482,11 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             let _ = state.store.set_tunnel_mode(&params.app_id, "none");
                         }
                         "named" => {
-                            // Teardown named tunnel (inline logic from tunnel.app_teardown)
+                            // Stop the tunnel connection but preserve credentials
+                            // (app_tunnel_id, app_tunnel_domain, app_tunnel_dns_id, app_tunnel_creds)
+                            // so the tunnel can be reconnected via `start` without re-creating CF resources.
+                            // Use `tunnel.app_teardown` to fully destroy the CF tunnel and DNS.
                             let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
-
-                            let api_token = state.store.get_setting("cf.api_token").ok().flatten();
-                            let account_id = state.store.get_setting("cf.account_id").ok().flatten();
-
-                            if let (Some(api_token), Some(account_id)) = (&api_token, &account_id) {
-                                if let Some(dns_id) = &app.app_tunnel_dns_id {
-                                    if let Some(domain) = &app.app_tunnel_domain {
-                                        if let Ok(zone_id) = tunnel::named::find_zone_id(api_token, domain).await {
-                                            let _ = tunnel::named::delete_dns_record(api_token, &zone_id, dns_id).await;
-                                        }
-                                    }
-                                }
-                                if let Some(tunnel_id) = &app.app_tunnel_id {
-                                    let _ = tunnel::named::delete_named_tunnel(api_token, account_id, tunnel_id).await;
-                                }
-                            }
-
-                            let _ = state.store.update_app_tunnel(&params.app_id, None, None, None, None);
                             let _ = state.store.set_tunnel_mode(&params.app_id, "none");
                         }
                         _ => {}
@@ -536,6 +521,39 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 .or(app.app_tunnel_domain.as_deref())
                                 .unwrap()
                                 .to_string();
+
+                            // Reconnect using saved credentials if available
+                            // (skip when domain changed — that requires a full rebuild)
+                            if !named_domain_changed && params.app_tunnel_token.is_none() && app.app_tunnel_creds.is_some() {
+                                let creds: tunnel::TunnelCredentials = match serde_json::from_str(
+                                    app.app_tunnel_creds.as_ref().unwrap(),
+                                ) {
+                                    Ok(v) => v,
+                                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                                };
+                                if let Err(e) = tunnel::start_app_named_tunnel(
+                                    state.app_tunnels.clone(),
+                                    params.app_id.clone(),
+                                    creds.clone(),
+                                    tunnel_domain.clone(),
+                                    routing.clone(),
+                                )
+                                .await
+                                {
+                                    return internal_error(req.request_id, e.to_string());
+                                }
+                                let _ = state.store.set_tunnel_mode(&params.app_id, "named");
+                                return ok_response(
+                                    req.request_id,
+                                    json!({
+                                        "updated": true,
+                                        "tunnel_mode": "named",
+                                        "tunnel_id": creds.tunnel_id,
+                                        "tunnel_domain": tunnel_domain,
+                                        "reconnected": true,
+                                    }),
+                                );
+                            }
 
                             // Token-based: decode token and connect directly
                             if let Some(token) = &params.app_tunnel_token {

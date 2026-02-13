@@ -224,6 +224,87 @@ enum Commands {
     },
     /// Trust the Coulson CA certificate (add to macOS login keychain)
     Trust,
+    /// Manage tunnels
+    Tunnel {
+        #[command(subcommand)]
+        action: TunnelCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum TunnelCommands {
+    /// Show tunnel status
+    Status,
+    /// Activate tunnel for an app
+    Start {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+        /// Tunnel mode: quick, global, or named
+        #[arg(long)]
+        mode: Option<String>,
+    },
+    /// Deactivate tunnel for an app (preserves config)
+    Stop {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+    },
+    /// Connect global named tunnel
+    Connect {
+        /// Tunnel token (from CF dashboard)
+        #[arg(long)]
+        token: Option<String>,
+        /// Tunnel domain
+        #[arg(long)]
+        domain: Option<String>,
+    },
+    /// Disconnect global named tunnel
+    Disconnect,
+    /// Save Cloudflare API credentials
+    Configure {
+        /// CF API token
+        #[arg(long)]
+        api_token: String,
+        /// CF account ID
+        #[arg(long)]
+        account_id: String,
+    },
+    /// Create a global named tunnel via CF API
+    Setup {
+        /// Tunnel domain
+        #[arg(long)]
+        domain: String,
+        /// Tunnel name (defaults to coulson-<domain>)
+        #[arg(long)]
+        tunnel_name: Option<String>,
+        /// CF API token
+        #[arg(long)]
+        api_token: String,
+        /// CF account ID
+        #[arg(long)]
+        account_id: String,
+    },
+    /// Delete the global named tunnel via CF API
+    Teardown {
+        /// CF API token
+        #[arg(long)]
+        api_token: String,
+    },
+    /// Create a per-app custom named tunnel via CF API
+    AppSetup {
+        /// App name or domain
+        name: String,
+        /// Tunnel domain
+        #[arg(long)]
+        domain: String,
+        /// Auto-create DNS CNAME record
+        #[arg(long)]
+        auto_dns: bool,
+    },
+    /// Delete a per-app custom named tunnel via CF API
+    AppTeardown {
+        /// App name or domain
+        name: String,
+    },
 }
 
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
@@ -919,6 +1000,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ps => run_ps(cfg),
         Commands::Restart { name } => run_restart(cfg, name),
         Commands::Trust => run_trust(cfg),
+        Commands::Tunnel { action } => run_tunnel(cfg, action),
     }
 }
 
@@ -1321,6 +1403,32 @@ fn resolve_app_name(cfg: &CoulsonConfig, name: Option<&str>) -> anyhow::Result<S
     Ok(scanner::sanitize_name(dir_name))
 }
 
+/// Resolve app name → app_id via RPC `app.list`.
+fn resolve_app_id(
+    client: &RpcClient,
+    cfg: &CoulsonConfig,
+    name: Option<String>,
+) -> anyhow::Result<(String, String)> {
+    let bare_name = resolve_app_name(cfg, name.as_deref())?;
+    let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
+
+    let result = client.call("app.list", serde_json::json!({}))?;
+    let app_id = result
+        .get("apps")
+        .and_then(|a| a.as_array())
+        .and_then(|apps| {
+            apps.iter().find(|a| {
+                a.get("name").and_then(|n| n.as_str()) == Some(&bare_name)
+                    || a.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
+                    || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
+            })
+        })
+        .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+        .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
+
+    Ok((bare_name, app_id))
+}
+
 fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
     let client = RpcClient::new(&cfg.control_socket);
     let result = client.call("process.list", serde_json::json!({}))?;
@@ -1423,23 +1531,8 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
 }
 
 fn run_restart(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
-    let bare_name = resolve_app_name(&cfg, name.as_deref())?;
-    let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
-
     let client = RpcClient::new(&cfg.control_socket);
-    let result = client.call("app.list", serde_json::json!({}))?;
-    let app_id = result
-        .get("apps")
-        .and_then(|a| a.as_array())
-        .and_then(|apps| {
-            apps.iter().find(|a| {
-                a.get("name").and_then(|n| n.as_str()) == Some(&bare_name)
-                    || a.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
-                    || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
-            })
-        })
-        .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
+    let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
 
     client.call("process.restart", serde_json::json!({ "app_id": app_id }))?;
     println!("{} {bare_name} restarted", "✓".green());
@@ -1462,31 +1555,14 @@ fn run_logs(
     follow: bool,
     lines: usize,
 ) -> anyhow::Result<()> {
-    let bare_name = resolve_app_name(&cfg, name.as_deref())?;
-    let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
-
-    // Try RPC first (uses the daemon's DB, so app IDs match log files)
     let client = RpcClient::new(&cfg.control_socket);
-    let app_id = if let Ok(result) = client.call("app.list", serde_json::json!({})) {
-        result
-            .get("apps")
-            .and_then(|a| a.as_array())
-            .and_then(|apps| {
-                apps.iter().find(|a| {
-                    a.get("name").and_then(|n| n.as_str()) == Some(&bare_name)
-                        || a.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
-                        || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
-                })
-            })
-            .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
-    } else {
-        None
-    };
 
-    // Fallback to local DB if daemon is not reachable
-    let app_id = match app_id {
-        Some(id) => id,
-        None => {
+    // Try RPC first, fallback to local DB
+    let (bare_name, app_id) = match resolve_app_id(&client, &cfg, name.clone()) {
+        Ok(v) => v,
+        Err(_) => {
+            let bare_name = resolve_app_name(&cfg, name.as_deref())?;
+            let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
             let state = build_state(&cfg)?;
             let apps = state.store.list_all()?;
             let app = apps
@@ -1497,7 +1573,7 @@ fn run_logs(
                         || a.domain.0 == bare_name
                 })
                 .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
-            app.id.0.clone()
+            (bare_name, app.id.0.clone())
         }
     };
 
@@ -1578,6 +1654,405 @@ fn run_unshare(cfg: CoulsonConfig, name: String) -> anyhow::Result<()> {
     }
     println!("share auth disabled for {domain}");
     Ok(())
+}
+
+fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> {
+    let client = RpcClient::new(&cfg.control_socket);
+
+    match action {
+        TunnelCommands::Status => {
+            // Build app info from app.list
+            let apps: Vec<serde_json::Value> =
+                if let Ok(app_result) = client.call("app.list", serde_json::json!({})) {
+                    app_result
+                        .get("apps")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default()
+                } else {
+                    vec![]
+                };
+
+            let app_name = |app_id: &str| -> String {
+                apps.iter()
+                    .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(app_id))
+                    .and_then(|a| a.get("name").and_then(|v| v.as_str()))
+                    .unwrap_or(app_id)
+                    .to_string()
+            };
+
+            // Quick tunnels
+            let qt = client.call("tunnel.status", serde_json::json!({}))?;
+            let quick_tunnels = qt
+                .get("tunnels")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+
+            if !quick_tunnels.is_empty() {
+                println!("{}", "Quick Tunnels".bold());
+
+                #[derive(Tabled)]
+                struct TunnelRow {
+                    #[tabled(rename = "APP")]
+                    app: String,
+                    #[tabled(rename = "URL")]
+                    url: String,
+                    #[tabled(rename = "STATUS")]
+                    status: String,
+                }
+
+                let rows: Vec<TunnelRow> = quick_tunnels
+                    .iter()
+                    .map(|t| {
+                        let aid = t.get("app_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let url = t
+                            .get("hostname")
+                            .and_then(|v| v.as_str())
+                            .map(|h| format!("https://{h}"))
+                            .unwrap_or_default();
+                        let running = t.get("running").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let status = if running {
+                            "running".green().to_string()
+                        } else {
+                            "stopped".dimmed().to_string()
+                        };
+                        TunnelRow {
+                            app: app_name(aid).bold().to_string(),
+                            url: url.cyan().to_string(),
+                            status,
+                        }
+                    })
+                    .collect();
+
+                use tabled::settings::Style;
+                let table = tabled::Table::new(&rows)
+                    .with(Style::blank())
+                    .to_string();
+                println!("{table}");
+                println!();
+            }
+
+            // Named tunnel
+            let nt = client.call("named_tunnel.status", serde_json::json!({}))?;
+            println!("{}", "Named Tunnel".bold());
+            let connected = nt.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+            if connected {
+                let tunnel_id = nt
+                    .get("tunnel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let domain = nt
+                    .get("tunnel_domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                println!(
+                    "  {} {} ({})",
+                    "connected".green(),
+                    domain.cyan(),
+                    tunnel_id.dimmed()
+                );
+
+                // Show apps exposed via global mode
+                let global_apps: Vec<&serde_json::Value> = apps
+                    .iter()
+                    .filter(|a| {
+                        a.get("tunnel_mode").and_then(|v| v.as_str()) == Some("global")
+                            && a.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+                    })
+                    .collect();
+                if !global_apps.is_empty() {
+                    println!();
+                    println!("  {}", "Exposed Apps (global mode)".dimmed());
+                    for a in &global_apps {
+                        let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let app_domain = a.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
+                        let prefix = app_domain.strip_suffix(&format!(".{}", cfg.domain_suffix)).unwrap_or(app_domain);
+                        println!(
+                            "    {}  {}",
+                            name.bold(),
+                            format!("https://{prefix}.{domain}").cyan()
+                        );
+                    }
+                }
+            } else {
+                let configured = nt
+                    .get("configured")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if configured {
+                    let domain = nt
+                        .get("domain")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    println!(
+                        "  {} (configured: {})",
+                        "disconnected".yellow(),
+                        domain.dimmed()
+                    );
+                } else {
+                    println!("  {}", "not configured".dimmed());
+                }
+            }
+
+            // Per-app named tunnels
+            let per_app: Vec<&serde_json::Value> = apps
+                .iter()
+                .filter(|a| {
+                    a.get("tunnel_mode").and_then(|v| v.as_str()) == Some("named")
+                        || a.get("app_tunnel_id").and_then(|v| v.as_str()).is_some()
+                })
+                .collect();
+            if !per_app.is_empty() {
+                println!();
+                println!("{}", "Per-App Tunnels".bold());
+
+                #[derive(Tabled)]
+                struct AppTunnelRow {
+                    #[tabled(rename = "APP")]
+                    app: String,
+                    #[tabled(rename = "DOMAIN")]
+                    domain: String,
+                    #[tabled(rename = "STATUS")]
+                    status: String,
+                }
+
+                let rows: Vec<AppTunnelRow> = per_app
+                    .iter()
+                    .map(|a| {
+                        let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                        let domain = a
+                            .get("app_tunnel_domain")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("-");
+                        let mode = a.get("tunnel_mode").and_then(|v| v.as_str()).unwrap_or("none");
+                        let status = if mode == "named" {
+                            "running".green().to_string()
+                        } else {
+                            "stopped".dimmed().to_string()
+                        };
+                        AppTunnelRow {
+                            app: name.bold().to_string(),
+                            domain: domain.cyan().to_string(),
+                            status,
+                        }
+                    })
+                    .collect();
+
+                use tabled::settings::Style;
+                let table = tabled::Table::new(&rows)
+                    .with(Style::blank())
+                    .to_string();
+                println!("{table}");
+            }
+
+            // CF credentials status
+            println!();
+            let cf_status = client.call("tunnel.configure_status", serde_json::json!({}));
+            let cf_configured = cf_status
+                .ok()
+                .and_then(|v| v.get("configured").and_then(|c| c.as_bool()))
+                .unwrap_or(false);
+            if cf_configured {
+                println!("CF Credentials: {}", "configured".green());
+            } else {
+                println!("CF Credentials: {}", "not configured".dimmed());
+            }
+
+            Ok(())
+        }
+        TunnelCommands::Start { name, mode } => {
+            let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
+
+            let tunnel_mode = match mode.as_deref() {
+                Some(m @ ("quick" | "global" | "named")) => m.to_string(),
+                Some(m) => bail!("invalid mode: {m}, must be quick/global/named"),
+                None => {
+                    // Auto-infer mode:
+                    // 1. has saved per-app tunnel creds → named (reconnect)
+                    // 2. global named tunnel is connected → global (expose via it)
+                    // 3. otherwise → quick
+                    let app_info = find_app_json(&client, &app_id)?;
+                    let has_creds = app_info
+                        .get("app_tunnel_creds")
+                        .and_then(|v| v.as_str())
+                        .is_some();
+                    if has_creds {
+                        "named".to_string()
+                    } else {
+                        let global_connected = client
+                            .call("named_tunnel.status", serde_json::json!({}))
+                            .ok()
+                            .and_then(|v| v.get("connected").and_then(|c| c.as_bool()))
+                            .unwrap_or(false);
+                        if global_connected { "global" } else { "quick" }.to_string()
+                    }
+                }
+            };
+
+            let result = client.call(
+                "app.update",
+                serde_json::json!({ "app_id": app_id, "tunnel_mode": tunnel_mode }),
+            )?;
+
+            println!("{} tunnel started for {bare_name} ({})", "✓".green(), tunnel_mode);
+
+            // Show relevant info based on mode
+            match tunnel_mode.as_str() {
+                "quick" => {
+                    let url = result
+                        .get("tunnel_url")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    println!("  {}", url.cyan());
+                }
+                "named" => {
+                    let domain = result
+                        .get("tunnel_domain")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("?");
+                    println!("  domain: {}", domain.cyan());
+                }
+                "global" => {
+                    println!("  {}", "app exposed via global named tunnel".dimmed());
+                }
+                _ => {}
+            }
+
+            Ok(())
+        }
+        TunnelCommands::Stop { name } => {
+            let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
+            client.call(
+                "app.update",
+                serde_json::json!({ "app_id": app_id, "tunnel_mode": "none" }),
+            )?;
+            println!("{} tunnel stopped for {bare_name}", "✓".green());
+            Ok(())
+        }
+        TunnelCommands::Connect { token, domain } => {
+            let mut params = serde_json::json!({});
+            if let Some(t) = &token {
+                params["token"] = serde_json::json!(t);
+            }
+            if let Some(d) = &domain {
+                params["domain"] = serde_json::json!(d);
+            }
+            let result = client.call("named_tunnel.connect", params)?;
+            let tunnel_domain = result
+                .get("domain")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("{} named tunnel connected", "✓".green());
+            println!("  domain: {}", tunnel_domain.cyan());
+            Ok(())
+        }
+        TunnelCommands::Disconnect => {
+            client.call("named_tunnel.disconnect", serde_json::json!({}))?;
+            println!("{} named tunnel disconnected", "✓".green());
+            Ok(())
+        }
+        TunnelCommands::Configure {
+            api_token,
+            account_id,
+        } => {
+            client.call(
+                "tunnel.configure",
+                serde_json::json!({ "api_token": api_token, "account_id": account_id }),
+            )?;
+            println!("{} CF credentials saved", "✓".green());
+            Ok(())
+        }
+        TunnelCommands::Setup {
+            domain,
+            tunnel_name,
+            api_token,
+            account_id,
+        } => {
+            let mut params = serde_json::json!({
+                "api_token": api_token,
+                "account_id": account_id,
+                "domain": domain,
+            });
+            if let Some(n) = &tunnel_name {
+                params["tunnel_name"] = serde_json::json!(n);
+            }
+            let result = client.call("named_tunnel.setup", params)?;
+            let tunnel_id = result
+                .get("tunnel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            let cname = result
+                .get("cname_target")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("{} global named tunnel created", "✓".green());
+            println!("  domain:  {}", domain.cyan());
+            println!("  tunnel:  {}", tunnel_id.dimmed());
+            println!("  CNAME:   *.{domain} -> {cname}");
+            Ok(())
+        }
+        TunnelCommands::Teardown { api_token } => {
+            client.call(
+                "named_tunnel.teardown",
+                serde_json::json!({ "api_token": api_token }),
+            )?;
+            println!("{} global named tunnel destroyed", "✓".green());
+            Ok(())
+        }
+        TunnelCommands::AppSetup {
+            name,
+            domain,
+            auto_dns,
+        } => {
+            let (bare_name, app_id) = resolve_app_id(&client, &cfg, Some(name))?;
+            let result = client.call(
+                "tunnel.app_setup",
+                serde_json::json!({
+                    "app_id": app_id,
+                    "domain": domain,
+                    "auto_dns": auto_dns,
+                }),
+            )?;
+            let tunnel_id = result
+                .get("tunnel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
+            println!("{} per-app tunnel created for {bare_name}", "✓".green());
+            println!("  domain:  {}", domain.cyan());
+            println!("  tunnel:  {}", tunnel_id.dimmed());
+            if let Some(dns_id) = result.get("dns_record_id").and_then(|v| v.as_str()) {
+                println!("  DNS:     {}", dns_id.dimmed());
+            }
+            Ok(())
+        }
+        TunnelCommands::AppTeardown { name } => {
+            let (bare_name, app_id) = resolve_app_id(&client, &cfg, Some(name))?;
+            client.call(
+                "tunnel.app_teardown",
+                serde_json::json!({ "app_id": app_id }),
+            )?;
+            println!("{} per-app tunnel destroyed for {bare_name}", "✓".green());
+            Ok(())
+        }
+    }
+}
+
+/// Look up an app by ID from the RPC app.list result.
+fn find_app_json(
+    client: &RpcClient,
+    app_id: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let result = client.call("app.list", serde_json::json!({}))?;
+    result
+        .get("apps")
+        .and_then(|v| v.as_array())
+        .and_then(|apps| {
+            apps.iter()
+                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(app_id))
+                .cloned()
+        })
+        .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))
 }
 
 fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
