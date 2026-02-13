@@ -53,9 +53,21 @@ pub struct ProcessManager {
 struct ManagedProcess {
     child: Child,
     socket_path: PathBuf,
+    started_at: Instant,
     last_active: Instant,
     #[allow(dead_code)]
     kind: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct ProcessInfo {
+    pub app_id: String,
+    pub pid: u32,
+    pub kind: String,
+    pub socket_path: String,
+    pub uptime_secs: u64,
+    pub idle_secs: u64,
+    pub alive: bool,
 }
 
 impl ProcessManager {
@@ -65,6 +77,25 @@ impl ProcessManager {
             idle_timeout,
             registry,
         }
+    }
+
+    pub fn list_status(&mut self) -> Vec<ProcessInfo> {
+        let now = Instant::now();
+        self.processes
+            .iter_mut()
+            .map(|(app_id, proc)| {
+                let alive = matches!(proc.child.try_wait(), Ok(None));
+                ProcessInfo {
+                    app_id: app_id.clone(),
+                    pid: proc.child.id().unwrap_or(0),
+                    kind: proc.kind.clone(),
+                    socket_path: proc.socket_path.to_string_lossy().to_string(),
+                    uptime_secs: now.duration_since(proc.started_at).as_secs(),
+                    idle_secs: now.duration_since(proc.last_active).as_secs(),
+                    alive,
+                }
+            })
+            .collect()
     }
 
     /// Returns the UDS path for the managed app, starting the process if needed.
@@ -154,12 +185,14 @@ impl ProcessManager {
         provider::wait_for_uds_ready(&spec.socket_path, Duration::from_secs(30)).await?;
 
         let path_str = spec.socket_path.to_string_lossy().to_string();
+        let now = Instant::now();
         self.processes.insert(
             app_id.to_string(),
             ManagedProcess {
                 child,
                 socket_path: spec.socket_path,
-                last_active: Instant::now(),
+                started_at: now,
+                last_active: now,
                 kind: kind.to_string(),
             },
         );

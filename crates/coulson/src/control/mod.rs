@@ -767,6 +767,11 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
+        "process.list" => {
+            let mut pm = state.process_manager.lock().await;
+            let infos = pm.list_status();
+            Ok(json!({ "processes": infos }))
+        }
         "apps.warnings" => match crate::runtime::read_scan_warnings(&state.scan_warnings_path) {
             Ok(data) => Ok(json!({ "warnings": data })),
             Err(e) => return internal_error(req.request_id, e.to_string()),

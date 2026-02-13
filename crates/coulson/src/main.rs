@@ -215,6 +215,8 @@ enum Commands {
         #[arg(short = 'n', long, default_value = "100")]
         lines: usize,
     },
+    /// Show running managed processes
+    Ps,
     /// Trust the Coulson CA certificate (add to macOS login keychain)
     Trust,
 }
@@ -909,6 +911,7 @@ async fn main() -> anyhow::Result<()> {
             follow,
             lines,
         } => run_logs(cfg, name, follow, lines),
+        Commands::Ps => run_ps(cfg),
         Commands::Trust => run_trust(cfg),
     }
 }
@@ -1310,6 +1313,117 @@ fn resolve_app_name(cfg: &CoulsonConfig, name: Option<&str>) -> anyhow::Result<S
         .and_then(|n| n.to_str())
         .unwrap_or("app");
     Ok(scanner::sanitize_name(dir_name))
+}
+
+fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
+    let client = RpcClient::new(&cfg.control_socket);
+    let result = client.call("process.list", serde_json::json!({}))?;
+
+    let processes = result
+        .get("processes")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    if processes.is_empty() {
+        println!("No managed processes running.");
+        return Ok(());
+    }
+
+    // Build app_id → (name, domain) map from app.list
+    let app_map: HashMap<String, (String, String)> =
+        if let Ok(app_result) = client.call("app.list", serde_json::json!({})) {
+            app_result
+                .get("apps")
+                .and_then(|v| v.as_array())
+                .map(|apps| {
+                    apps.iter()
+                        .filter_map(|a| {
+                            let id = a.get("id")?.as_str()?.to_string();
+                            let name = a.get("name")?.as_str()?.to_string();
+                            let domain = a
+                                .get("domain")
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            Some((id, (name, domain)))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+
+    #[derive(Tabled)]
+    struct PsRow {
+        #[tabled(rename = "NAME")]
+        name: String,
+        #[tabled(rename = "PID")]
+        pid: String,
+        #[tabled(rename = "KIND")]
+        kind: String,
+        #[tabled(rename = "UPTIME")]
+        uptime: String,
+        #[tabled(rename = "IDLE")]
+        idle: String,
+        #[tabled(rename = "STATUS")]
+        status: String,
+    }
+
+    let rows: Vec<PsRow> = processes
+        .iter()
+        .map(|p| {
+            let app_id = p.get("app_id").and_then(|v| v.as_str()).unwrap_or("");
+            let (name, _domain) = app_map
+                .get(app_id)
+                .cloned()
+                .unwrap_or_else(|| (app_id.to_string(), String::new()));
+            let pid = p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
+            let kind = p
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            let uptime_secs = p.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+            let idle_secs = p.get("idle_secs").and_then(|v| v.as_u64()).unwrap_or(0);
+            let alive = p.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            let uptime = format_duration(uptime_secs);
+            let idle = format_duration(idle_secs);
+            let status = if alive {
+                "running".green().to_string()
+            } else {
+                "exited".red().to_string()
+            };
+
+            PsRow {
+                name: name.bold().to_string(),
+                pid: pid.to_string(),
+                kind: kind.to_string(),
+                uptime,
+                idle,
+                status,
+            }
+        })
+        .collect();
+
+    use tabled::settings::Style;
+    let table = tabled::Table::new(&rows)
+        .with(Style::blank())
+        .to_string();
+    println!("{table}");
+
+    Ok(())
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+    }
 }
 
 fn run_logs(
