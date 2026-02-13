@@ -17,6 +17,7 @@ pub struct CoulsonConfig {
     pub watch_fs: bool,
     pub idle_timeout_secs: u64,
     pub lan_access: bool,
+    pub link_dir: bool,
 }
 
 impl Default for CoulsonConfig {
@@ -41,6 +42,7 @@ impl Default for CoulsonConfig {
             watch_fs: true,
             idle_timeout_secs: 900,
             lan_access: false,
+            link_dir: false,
         }
     }
 }
@@ -86,6 +88,11 @@ impl CoulsonConfig {
             cfg.idle_timeout_secs = raw
                 .parse()
                 .with_context(|| format!("invalid COULSON_IDLE_TIMEOUT_SECS: {raw}"))?;
+        }
+
+        if let Ok(raw) = env::var("COULSON_LINK_DIR") {
+            cfg.link_dir =
+                parse_bool(&raw).with_context(|| format!("invalid COULSON_LINK_DIR: {raw}"))?;
         }
 
         if let Ok(raw) = env::var("COULSON_LAN_ACCESS") {

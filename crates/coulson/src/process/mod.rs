@@ -18,7 +18,7 @@ use tracing::info;
 
 use provider::{ManagedApp, ProcessSpec};
 
-const SOCKETS_DIR_RAW: &str = "/tmp/coulson/managed";
+pub const SOCKETS_DIR_RAW: &str = "/tmp/coulson/managed";
 
 pub type ProcessManagerHandle = Arc<tokio::sync::Mutex<ProcessManager>>;
 

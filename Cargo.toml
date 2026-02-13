@@ -48,3 +48,4 @@ colored = "2"
 tabled = { version = "0.17", features = ["ansi"] }
 jsonwebtoken = "9"
 p256 = { version = "0.13", features = ["pem"] }
+toml = "0.8"

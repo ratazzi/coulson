@@ -243,8 +243,19 @@ fn discover(
             if file_name.starts_with('.') {
                 continue;
             }
-            let raw = fs::read_to_string(entry.path())
-                .with_context(|| format!("failed reading {}", entry.path().display()))?;
+            // Skip known non-config files (e.g. SQLite databases left in apps_root)
+            if let Some(ext) = entry_path.extension().and_then(|e| e.to_str()) {
+                if matches!(ext, "db" | "db-wal" | "db-shm" | "log") {
+                    continue;
+                }
+            }
+            let raw = match fs::read_to_string(entry.path()) {
+                Ok(r) => r,
+                Err(_) => {
+                    // Skip files that can't be read as UTF-8 (binary files)
+                    continue;
+                }
+            };
             let parse = parse_pow_file_routes(&raw);
             parse_warnings.extend(
                 parse
@@ -553,8 +564,17 @@ fn discover_from_symlink(
     if meta.is_file() {
         let raw = fs::read_to_string(&resolved_target)
             .with_context(|| format!("failed reading {}", resolved_target.display()))?;
+        let is_toml = resolved_target
+            .extension()
+            .map(|ext| ext == "toml")
+            .unwrap_or(false);
+        let routes = if is_toml {
+            parse_coulson_toml(&raw).unwrap_or_default()
+        } else {
+            parse_pow_file_routes(&raw).routes
+        };
         let mut out = Vec::new();
-        for route in parse_pow_file_routes(&raw).routes {
+        for route in routes {
             out.push(DiscoveredStaticApp {
                 name: name.clone(),
                 kind: AppKind::Static,
@@ -583,6 +603,68 @@ fn discover_from_symlink(
         if routes_file.exists() {
             let raw = fs::read_to_string(&routes_file)
                 .with_context(|| format!("failed reading {}", routes_file.display()))?;
+            let mut out = Vec::new();
+            for route in parse_pow_file_routes(&raw).routes {
+                out.push(DiscoveredStaticApp {
+                    name: name.clone(),
+                    kind: AppKind::Static,
+                    domain: domain.clone(),
+                    path_prefix: route.path_prefix,
+                    target_host: route.target_host,
+                    target_port: route.target_port,
+                    socket_path: None,
+                    timeout_ms: route.timeout_ms,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
+                    listen_port: None,
+                    app_root: None,
+                    static_root: None,
+                    enabled: true,
+                    explicit_domain,
+                });
+            }
+            return Ok(out);
+        }
+
+        // .coulson.toml in the directory
+        let coulson_toml_file = resolved_target.join(".coulson.toml");
+        if coulson_toml_file.exists() {
+            let raw = fs::read_to_string(&coulson_toml_file)
+                .with_context(|| format!("failed reading {}", coulson_toml_file.display()))?;
+            if let Ok(routes) = parse_coulson_toml(&raw) {
+                let mut out = Vec::new();
+                for route in routes {
+                    out.push(DiscoveredStaticApp {
+                        name: name.clone(),
+                        kind: AppKind::Static,
+                        domain: domain.clone(),
+                        path_prefix: route.path_prefix,
+                        target_host: route.target_host,
+                        target_port: route.target_port,
+                        socket_path: None,
+                        timeout_ms: route.timeout_ms,
+                        cors_enabled: false,
+                        basic_auth_user: None,
+                        basic_auth_pass: None,
+                        spa_rewrite: false,
+                        listen_port: None,
+                        app_root: None,
+                        static_root: None,
+                        enabled: true,
+                        explicit_domain,
+                    });
+                }
+                return Ok(out);
+            }
+        }
+
+        // .coulson (powfile format) in the directory
+        let coulson_file = resolved_target.join(".coulson");
+        if coulson_file.exists() {
+            let raw = fs::read_to_string(&coulson_file)
+                .with_context(|| format!("failed reading {}", coulson_file.display()))?;
             let mut out = Vec::new();
             for route in parse_pow_file_routes(&raw).routes {
                 out.push(DiscoveredStaticApp {
@@ -705,6 +787,69 @@ struct PowRoute {
 struct PowParseResult {
     routes: Vec<PowRoute>,
     warnings: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct CoulsonToml {
+    port: Option<u16>,
+    host: Option<String>,
+    #[allow(dead_code)]
+    kind: Option<String>,
+    #[allow(dead_code)]
+    module: Option<String>,
+    #[allow(dead_code)]
+    server: Option<String>,
+    #[allow(dead_code)]
+    command: Option<String>,
+    timeout: Option<u64>,
+    #[allow(dead_code)]
+    cors: Option<bool>,
+    #[allow(dead_code)]
+    spa: Option<bool>,
+    #[allow(dead_code)]
+    listen_port: Option<u16>,
+    routes: Option<Vec<CoulsonTomlRoute>>,
+}
+
+#[derive(Deserialize)]
+struct CoulsonTomlRoute {
+    path: Option<String>,
+    target: String,
+    timeout: Option<u64>,
+}
+
+fn parse_coulson_toml(raw: &str) -> anyhow::Result<Vec<PowRoute>> {
+    let toml_cfg: CoulsonToml =
+        toml::from_str(raw).context("invalid TOML in .coulson.toml")?;
+
+    if let Some(routes) = toml_cfg.routes {
+        let mut out = Vec::new();
+        for route in routes {
+            let (target_host, target_port) = parse_target_token(&route.target)
+                .with_context(|| format!("invalid target '{}' in routes", route.target))?;
+            out.push(PowRoute {
+                path_prefix: normalize_path_prefix(route.path.as_deref()),
+                target_host,
+                target_port,
+                timeout_ms: route.timeout.or(toml_cfg.timeout),
+            });
+        }
+        return Ok(out);
+    }
+
+    if let Some(port) = toml_cfg.port {
+        let host = toml_cfg
+            .host
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        return Ok(vec![PowRoute {
+            path_prefix: None,
+            target_host: host,
+            target_port: port,
+            timeout_ms: toml_cfg.timeout,
+        }]);
+    }
+
+    anyhow::bail!("TOML config must have either 'port' or 'routes'")
 }
 
 fn parse_pow_file_routes(raw: &str) -> PowParseResult {
@@ -1029,5 +1174,54 @@ mod tests {
             humanize_route_conflict_key("myapp.coulson.local|/api"),
             "myapp.coulson.local (path=/api)"
         );
+    }
+
+    #[test]
+    fn parse_coulson_toml_port_only() {
+        let raw = "port = 5006\n";
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].target_host, "127.0.0.1");
+        assert_eq!(routes[0].target_port, 5006);
+        assert!(routes[0].path_prefix.is_none());
+    }
+
+    #[test]
+    fn parse_coulson_toml_port_with_host() {
+        let raw = "port = 3000\nhost = \"192.168.1.1\"\n";
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].target_host, "192.168.1.1");
+        assert_eq!(routes[0].target_port, 3000);
+    }
+
+    #[test]
+    fn parse_coulson_toml_routes() {
+        let raw = r#"
+            timeout = 5000
+
+            [[routes]]
+            path = "/api"
+            target = "127.0.0.1:3000"
+
+            [[routes]]
+            target = "8080"
+            timeout = 10000
+        "#;
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0].path_prefix.as_deref(), Some("/api"));
+        assert_eq!(routes[0].target_port, 3000);
+        assert_eq!(routes[0].timeout_ms, Some(5000));
+        assert_eq!(routes[1].path_prefix, None);
+        assert_eq!(routes[1].target_port, 8080);
+        assert_eq!(routes[1].timeout_ms, Some(10000));
+    }
+
+    #[test]
+    fn parse_coulson_toml_invalid() {
+        let raw = "not_a_valid_field = true\n";
+        let result = parse_coulson_toml(raw);
+        assert!(result.is_err());
     }
 }

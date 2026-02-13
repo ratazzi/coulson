@@ -45,6 +45,7 @@ rand.workspace = true
 tokio-util.workspace = true
 jsonwebtoken.workspace = true
 p256.workspace = true
+toml.workspace = true
 
 [build-dependencies]
 capnpc = "0.20"

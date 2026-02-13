@@ -204,6 +204,17 @@ enum Commands {
         /// App name or domain
         name: String,
     },
+    /// Show logs for a managed app
+    Logs {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+        /// Follow log output (like tail -f)
+        #[arg(short, long)]
+        follow: bool,
+        /// Number of lines to show (default: 100)
+        #[arg(short = 'n', long, default_value = "100")]
+        lines: usize,
+    },
     /// Trust the Coulson CA certificate (add to macOS login keychain)
     Trust,
 }
@@ -893,6 +904,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Doctor => run_doctor(cfg),
         Commands::Share { name, expires } => run_share(cfg, name, expires),
         Commands::Unshare { name } => run_unshare(cfg, name),
+        Commands::Logs {
+            name,
+            follow,
+            lines,
+        } => run_logs(cfg, name, follow, lines),
         Commands::Trust => run_trust(cfg),
     }
 }
@@ -959,7 +975,15 @@ fn run_add_directory_inner(
                 .canonicalize()
                 .unwrap_or(resolved);
             let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
-            if resolved == cwd_canonical {
+            // symlink-to-dir: resolved == CWD
+            // symlink-to-file: resolved parent == CWD
+            let already = resolved == cwd_canonical
+                || resolved
+                    .parent()
+                    .and_then(|p| p.canonicalize().ok())
+                    .map(|p| p == cwd_canonical)
+                    .unwrap_or(false);
+            if already {
                 println!("{} {name}.{} already added", "=".bold(), cfg.domain_suffix);
                 return Ok(());
             }
@@ -976,10 +1000,33 @@ fn run_add_directory_inner(
         }
     }
 
-    // --port mode: create a powfile
+    // --port mode
     if let Some(p) = port {
         std::fs::create_dir_all(&cfg.apps_root)?;
-        std::fs::write(&link_path, format!("{p}\n"))?;
+
+        if cfg.link_dir {
+            // Legacy mode: write powfile directly in apps_root
+            std::fs::write(&link_path, format!("{p}\n"))?;
+        } else {
+            // Default mode: write .coulson in CWD, symlink from apps_root
+            let dotfile = cwd.join(".coulson");
+            if dotfile.exists() {
+                bail!(
+                    "{} already exists. Remove it first or use COULSON_LINK_DIR=1 for legacy mode.",
+                    dotfile.display()
+                );
+            }
+            std::fs::write(&dotfile, format!("{p}\n"))?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&dotfile, &link_path).with_context(|| {
+                format!(
+                    "failed to create symlink {} -> {}",
+                    link_path.display(),
+                    dotfile.display()
+                )
+            })?;
+        }
+
         println!(
             "{} {name}.{} -> 127.0.0.1:{p}",
             "+".green().bold(), cfg.domain_suffix
@@ -1117,11 +1164,38 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
 
     // Check apps_root for file/symlink
     let link_path = cfg.apps_root.join(bare_name);
+    let mut symlink_target_file: Option<std::path::PathBuf> = None;
     if link_path.symlink_metadata().is_ok() {
+        // If it's a symlink pointing to a file (.coulson or .coulson.toml), remember the target
+        if let Ok(meta) = std::fs::symlink_metadata(&link_path) {
+            if meta.file_type().is_symlink() {
+                if let Ok(target) = std::fs::read_link(&link_path) {
+                    let resolved = if target.is_absolute() {
+                        target
+                    } else {
+                        cfg.apps_root.join(&target)
+                    };
+                    if resolved.is_file() {
+                        if let Some(fname) = resolved.file_name().and_then(|n| n.to_str()) {
+                            if fname == ".coulson" || fname == ".coulson.toml" {
+                                symlink_target_file = Some(resolved);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         std::fs::remove_file(&link_path).with_context(|| {
             format!("failed to remove {}", link_path.display())
         })?;
         removed_file = true;
+
+        // Also remove the .coulson/.coulson.toml file the symlink pointed to
+        if let Some(target_file) = &symlink_target_file {
+            if let Err(err) = std::fs::remove_file(target_file) {
+                debug!("failed to remove {}: {err}", target_file.display());
+            }
+        }
     }
 
     // Best-effort RPC delete
@@ -1161,78 +1235,147 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
 }
 
 fn run_rm_cwd(cfg: &CoulsonConfig) -> anyhow::Result<()> {
+    let bare_name = resolve_app_name(cfg, None)?;
+
+    // Verify the symlink actually exists before removing
+    let link_path = cfg.apps_root.join(&bare_name);
+    if link_path.symlink_metadata().is_err() {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        bail!("no app found pointing to {}", cwd.display());
+    }
+
+    run_rm_by_name(cfg, &bare_name)
+}
+
+/// Resolve an app name (domain prefix) from an explicit argument or CWD.
+///
+/// - Some(name): strip domain suffix if present, return bare name
+/// - None: scan apps_root symlinks for one pointing to CWD, fallback to CWD dir name
+fn resolve_app_name(cfg: &CoulsonConfig, name: Option<&str>) -> anyhow::Result<String> {
+    if let Some(n) = name {
+        let bare = n
+            .strip_suffix(&format!(".{}", cfg.domain_suffix))
+            .unwrap_or(n);
+        return Ok(bare.to_string());
+    }
+
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
 
-    let entries = match std::fs::read_dir(&cfg.apps_root) {
-        Ok(e) => e,
-        Err(_) => bail!("no app found pointing to {}", cwd.display()),
-    };
-
-    let mut found = false;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if !meta.file_type().is_symlink() {
-            continue;
-        }
-        let target = match std::fs::read_link(&path) {
-            Ok(t) => t,
-            Err(_) => continue,
-        };
-        let resolved = if target.is_absolute() {
-            target.clone()
-        } else {
-            cfg.apps_root.join(&target)
-        };
-        let resolved = resolved.canonicalize().unwrap_or(resolved);
-        if resolved == cwd_canonical {
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-
-            std::fs::remove_file(&path)
-                .with_context(|| format!("failed to remove {}", path.display()))?;
-            println!("{} {} from {}", "-".red().bold(), name, cfg.apps_root.display());
-
-            // Best-effort RPC delete
-            let client = RpcClient::new(&cfg.control_socket);
-            if let Ok(result) = client.call("app.list", serde_json::json!({})) {
-                if let Some(apps) = result.get("apps").and_then(|a| a.as_array()) {
-                    let domain_match = format!("{name}.{}", cfg.domain_suffix);
-                    for app in apps {
-                        let matches =
-                            app.get("name").and_then(|n| n.as_str()) == Some(name)
-                                || app.get("domain").and_then(|d| d.as_str())
-                                    == Some(&domain_match);
-                        if matches {
-                            if let Some(app_id) = app.get("id").and_then(|i| i.as_str()) {
-                                if client
-                                    .call(
-                                        "app.delete",
-                                        serde_json::json!({ "app_id": app_id }),
-                                    )
-                                    .is_ok()
-                                {
-                                    println!("{} {name} from database", "-".red().bold());
-                                }
-                            }
-                        }
-                    }
+    if let Ok(entries) = std::fs::read_dir(&cfg.apps_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let meta = match std::fs::symlink_metadata(&path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !meta.file_type().is_symlink() {
+                continue;
+            }
+            let target = match std::fs::read_link(&path) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let resolved = if target.is_absolute() {
+                target.clone()
+            } else {
+                cfg.apps_root.join(&target)
+            };
+            let resolved = resolved.canonicalize().unwrap_or(resolved);
+            // symlink-to-dir: resolved == CWD
+            if resolved == cwd_canonical {
+                let found = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("unknown");
+                return Ok(found.to_string());
+            }
+            // symlink-to-file: resolved parent == CWD
+            if let Some(parent) = resolved.parent() {
+                let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+                if parent_canonical == cwd_canonical {
+                    let found = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("unknown");
+                    return Ok(found.to_string());
                 }
             }
-
-            found = true;
         }
     }
 
-    if !found {
-        bail!("no app found pointing to {}", cwd.display());
+    // Fallback: use CWD directory name
+    let dir_name = cwd
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("app");
+    Ok(scanner::sanitize_name(dir_name))
+}
+
+fn run_logs(
+    cfg: CoulsonConfig,
+    name: Option<String>,
+    follow: bool,
+    lines: usize,
+) -> anyhow::Result<()> {
+    let bare_name = resolve_app_name(&cfg, name.as_deref())?;
+    let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
+
+    // Try RPC first (uses the daemon's DB, so app IDs match log files)
+    let client = RpcClient::new(&cfg.control_socket);
+    let app_id = if let Ok(result) = client.call("app.list", serde_json::json!({})) {
+        result
+            .get("apps")
+            .and_then(|a| a.as_array())
+            .and_then(|apps| {
+                apps.iter().find(|a| {
+                    a.get("name").and_then(|n| n.as_str()) == Some(&bare_name)
+                        || a.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
+                        || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
+                })
+            })
+            .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+    } else {
+        None
+    };
+
+    // Fallback to local DB if daemon is not reachable
+    let app_id = match app_id {
+        Some(id) => id,
+        None => {
+            let state = build_state(&cfg)?;
+            let apps = state.store.list_all()?;
+            let app = apps
+                .iter()
+                .find(|a| {
+                    a.name == bare_name
+                        || a.domain.0 == domain_match
+                        || a.domain.0 == bare_name
+                })
+                .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
+            app.id.0.clone()
+        }
+    };
+
+    let log_path = format!("{}/{}.log", process::SOCKETS_DIR_RAW, app_id);
+    if !std::path::Path::new(&log_path).exists() {
+        bail!("no logs found for {bare_name} (expected {log_path})");
     }
+
+    if follow {
+        eprintln!("{} $ tail -F {log_path}", format!("[{bare_name}]").blue());
+        std::process::Command::new("tail")
+            .args(["-F", &log_path])
+            .status()
+            .context("failed to run tail -f")?;
+    } else {
+        eprintln!("{} $ tail -n {lines} {log_path}", format!("[{bare_name}]").blue());
+        std::process::Command::new("tail")
+            .args(["-n", &lines.to_string(), &log_path])
+            .status()
+            .context("failed to run tail")?;
+    }
+
     Ok(())
 }
 
