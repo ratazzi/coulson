@@ -47,5 +47,8 @@ jsonwebtoken.workspace = true
 p256.workspace = true
 toml.workspace = true
 
+[features]
+builtin-quick-tunnel = []
+
 [build-dependencies]
 capnpc = "0.20"

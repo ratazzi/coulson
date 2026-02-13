@@ -1,10 +1,14 @@
 pub mod edge;
 pub mod named;
 pub mod proxy;
+#[cfg(feature = "builtin-quick-tunnel")]
 pub mod quick;
 pub mod rpc;
 pub mod share_auth;
 pub mod transport;
+
+#[cfg(not(feature = "builtin-quick-tunnel"))]
+mod cli;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -128,6 +132,7 @@ pub async fn start_named_tunnel(
 }
 
 /// Start a quick tunnel with the given routing. Returns the public hostname.
+#[cfg(feature = "builtin-quick-tunnel")]
 pub async fn start_quick_tunnel(
     manager: TunnelManager,
     app_id: String,
@@ -177,6 +182,22 @@ pub async fn start_quick_tunnel(
     );
 
     Ok(hostname)
+}
+
+/// Start a quick tunnel via cloudflared CLI. Returns the public hostname.
+#[cfg(not(feature = "builtin-quick-tunnel"))]
+pub async fn start_quick_tunnel(
+    manager: TunnelManager,
+    app_id: String,
+    routing: transport::TunnelRouting,
+) -> anyhow::Result<String> {
+    {
+        let tunnels = manager.lock();
+        if tunnels.contains_key(&app_id) {
+            anyhow::bail!("tunnel already running for app {}", app_id);
+        }
+    }
+    cli::start_quick_tunnel_cli(manager, app_id, routing).await
 }
 
 /// Stop a running tunnel.
