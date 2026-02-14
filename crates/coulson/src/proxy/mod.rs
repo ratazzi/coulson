@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use base64::prelude::*;
 use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
@@ -939,32 +940,10 @@ fn check_basic_auth(session: &Session, expected_user: &str, expected_pass: &str)
 }
 
 fn decode_basic_auth(encoded: &str) -> Option<(String, String)> {
-    let decoded_bytes = base64_decode(encoded.trim())?;
+    let decoded_bytes = BASE64_STANDARD.decode(encoded.trim()).ok()?;
     let decoded = String::from_utf8(decoded_bytes).ok()?;
     let (user, pass) = decoded.split_once(':')?;
     Some((user.to_string(), pass.to_string()))
-}
-
-/// Minimal base64 decoder (standard alphabet, no padding required).
-fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = Vec::with_capacity(input.len() * 3 / 4);
-    let mut buf: u32 = 0;
-    let mut bits: u32 = 0;
-    for &b in input.as_bytes() {
-        if b == b'=' {
-            break;
-        }
-        let val = TABLE.iter().position(|&c| c == b)? as u32;
-        buf = (buf << 6) | val;
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push((buf >> bits) as u8);
-            buf &= (1 << bits) - 1;
-        }
-    }
-    Some(out)
 }
 
 async fn write_auth_required(session: &mut Session) -> Result<()> {
@@ -1345,12 +1324,6 @@ mod tests {
     }
 
     // --- New feature tests ---
-
-    #[test]
-    fn base64_decode_works() {
-        let decoded = base64_decode("dGVzdDp0ZXN0").expect("decode");
-        assert_eq!(String::from_utf8(decoded).unwrap(), "test:test");
-    }
 
     #[test]
     fn decode_basic_auth_works() {
