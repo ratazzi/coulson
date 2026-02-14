@@ -57,7 +57,9 @@ impl ProcessProvider for DockerProvider {
     }
 
     fn resolve(&self, _app: &ManagedApp) -> anyhow::Result<ProcessSpec> {
-        anyhow::bail!("Docker provider is not yet implemented. Coming soon: docker compose up / docker run")
+        anyhow::bail!(
+            "Docker provider is not yet implemented. Coming soon: docker compose up / docker run"
+        )
     }
 }
 

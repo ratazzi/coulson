@@ -173,10 +173,7 @@ fn find_asgi_server(root: &Path) -> anyhow::Result<AsgiServerInfo> {
                 if let Some(cmd) = command {
                     let path = PathBuf::from(cmd);
                     if path.exists() {
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("");
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                         let server_type = if name.contains("uvicorn") {
                             AsgiServer::Uvicorn
                         } else {
@@ -243,10 +240,7 @@ mod tests {
 
     /// Create a unique temp directory for a test case.
     fn temp_app_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "coulson-test-{label}-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("coulson-test-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -365,11 +359,7 @@ mod tests {
         let root = temp_app_dir("manifest-uvicorn");
         place_venv_binary(&root, "granian");
         place_venv_binary(&root, "uvicorn");
-        fs::write(
-            root.join("coulson.json"),
-            r#"{"server": "uvicorn"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("coulson.json"), r#"{"server": "uvicorn"}"#).unwrap();
         let info = find_asgi_server(&root).unwrap();
         assert_eq!(info.server_type, AsgiServer::Uvicorn);
         assert_eq!(info.binary, root.join(".venv/bin/uvicorn"));
@@ -381,11 +371,7 @@ mod tests {
         let root = temp_app_dir("manifest-granian");
         place_venv_binary(&root, "granian");
         place_venv_binary(&root, "uvicorn");
-        fs::write(
-            root.join("coulson.json"),
-            r#"{"server": "granian"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("coulson.json"), r#"{"server": "granian"}"#).unwrap();
         let info = find_asgi_server(&root).unwrap();
         assert_eq!(info.server_type, AsgiServer::Granian);
         assert_eq!(info.binary, root.join(".venv/bin/granian"));
@@ -456,11 +442,7 @@ mod tests {
     fn manifest_unknown_server_falls_back() {
         let root = temp_app_dir("manifest-unknown");
         place_venv_binary(&root, "uvicorn");
-        fs::write(
-            root.join("coulson.json"),
-            r#"{"server": "hypercorn"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("coulson.json"), r#"{"server": "hypercorn"}"#).unwrap();
         let info = find_asgi_server(&root).unwrap();
         // Falls back to auto-detect → finds uvicorn
         assert_eq!(info.server_type, AsgiServer::Uvicorn);
@@ -508,11 +490,7 @@ mod tests {
     fn detect_module_manifest_overrides_files() {
         let root = temp_app_dir("module-manifest-override");
         fs::write(root.join("app.py"), "").unwrap();
-        fs::write(
-            root.join("coulson.json"),
-            r#"{"module": "custom:factory"}"#,
-        )
-        .unwrap();
+        fs::write(root.join("coulson.json"), r#"{"module": "custom:factory"}"#).unwrap();
         assert_eq!(detect_module(&root).unwrap(), "custom:factory");
         fs::remove_dir_all(&root).ok();
     }

@@ -351,14 +351,13 @@ fn discover(
                 // Auto-detect managed app via provider registry
                 if let Some((_provider, detected)) = registry.detect(&entry.path(), None) {
                     let domain_text = file_name_to_domain(&dir_name, suffix);
-                    let domain =
-                        DomainName::parse(&domain_text, suffix).with_context(|| {
-                            format!(
-                                "invalid domain '{}' in {}",
-                                domain_text,
-                                entry.path().display()
-                            )
-                        })?;
+                    let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
+                        format!(
+                            "invalid domain '{}' in {}",
+                            domain_text,
+                            entry.path().display()
+                        )
+                    })?;
                     let root_str = entry.path().to_string_lossy().to_string();
                     let app_kind = kind_str_to_app_kind(&detected.kind);
                     let app = DiscoveredStaticApp {
@@ -383,14 +382,13 @@ fn discover(
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 } else if entry.path().join("public").is_dir() {
                     let domain_text = file_name_to_domain(&dir_name, suffix);
-                    let domain =
-                        DomainName::parse(&domain_text, suffix).with_context(|| {
-                            format!(
-                                "invalid domain '{}' in {}",
-                                domain_text,
-                                entry.path().display()
-                            )
-                        })?;
+                    let domain = DomainName::parse(&domain_text, suffix).with_context(|| {
+                        format!(
+                            "invalid domain '{}' in {}",
+                            domain_text,
+                            entry.path().display()
+                        )
+                    })?;
                     let public_root = entry.path().join("public").to_string_lossy().to_string();
                     let app = DiscoveredStaticApp {
                         name: sanitize_name(&dir_name),
@@ -471,9 +469,16 @@ fn discover(
                         target_port: route.target_port,
                         socket_path: route.socket_path.or_else(|| manifest.socket_path.clone()),
                         timeout_ms: route.timeout_ms,
-                        cors_enabled: route.cors_enabled.or(manifest.cors_enabled).unwrap_or(false),
-                        basic_auth_user: route.basic_auth_user.or_else(|| manifest.basic_auth_user.clone()),
-                        basic_auth_pass: route.basic_auth_pass.or_else(|| manifest.basic_auth_pass.clone()),
+                        cors_enabled: route
+                            .cors_enabled
+                            .or(manifest.cors_enabled)
+                            .unwrap_or(false),
+                        basic_auth_user: route
+                            .basic_auth_user
+                            .or_else(|| manifest.basic_auth_user.clone()),
+                        basic_auth_pass: route
+                            .basic_auth_pass
+                            .or_else(|| manifest.basic_auth_pass.clone()),
                         spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
                         listen_port: route.listen_port.or(manifest.listen_port),
                         app_root: None,
@@ -819,8 +824,7 @@ struct CoulsonTomlRoute {
 }
 
 fn parse_coulson_toml(raw: &str) -> anyhow::Result<Vec<PowRoute>> {
-    let toml_cfg: CoulsonToml =
-        toml::from_str(raw).context("invalid TOML in .coulson.toml")?;
+    let toml_cfg: CoulsonToml = toml::from_str(raw).context("invalid TOML in .coulson.toml")?;
 
     if let Some(routes) = toml_cfg.routes {
         let mut out = Vec::new();
@@ -838,9 +842,7 @@ fn parse_coulson_toml(raw: &str) -> anyhow::Result<Vec<PowRoute>> {
     }
 
     if let Some(port) = toml_cfg.port {
-        let host = toml_cfg
-            .host
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let host = toml_cfg.host.unwrap_or_else(|| "127.0.0.1".to_string());
         return Ok(vec![PowRoute {
             path_prefix: None,
             target_host: host,
@@ -1165,7 +1167,10 @@ mod tests {
 
     #[test]
     fn humanize_conflict_key_default_route() {
-        assert_eq!(humanize_route_conflict_key("myapp.coulson.local|"), "myapp.coulson.local");
+        assert_eq!(
+            humanize_route_conflict_key("myapp.coulson.local|"),
+            "myapp.coulson.local"
+        );
     }
 
     #[test]

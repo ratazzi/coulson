@@ -151,8 +151,7 @@ mod tests {
                 - 1,
         };
         let header = Header::new(Algorithm::ES256);
-        let token =
-            jsonwebtoken::encode(&header, &claims, &signer.encoding_key).expect("encode");
+        let token = jsonwebtoken::encode(&header, &claims, &signer.encoding_key).expect("encode");
         assert!(signer.validate_token(&token).is_none());
     }
 

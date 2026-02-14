@@ -163,8 +163,7 @@ pub async fn find_zone_id(api_token: &str, domain: &str) -> anyhow::Result<Strin
 
         for zone in &zones {
             // domain must equal zone name or end with .zone_name
-            let is_match = domain == zone.name
-                || domain.ends_with(&format!(".{}", zone.name));
+            let is_match = domain == zone.name || domain.ends_with(&format!(".{}", zone.name));
             if is_match {
                 let len = zone.name.len();
                 if best.as_ref().is_none_or(|(_, best_len)| len > *best_len) {

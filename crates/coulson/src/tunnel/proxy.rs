@@ -183,8 +183,10 @@ pub async fn proxy_by_host(
                 .body(())
                 .unwrap();
             let mut send_stream = send_response.send_response(response, false)?;
-            send_stream
-                .send_data(Bytes::from("403 Forbidden: app not exposed via tunnel"), true)?;
+            send_stream.send_data(
+                Bytes::from("403 Forbidden: app not exposed via tunnel"),
+                true,
+            )?;
             return Ok(());
         }
     }

@@ -747,10 +747,7 @@ impl AppRepository {
             idx += 1;
         }
 
-        let sql = format!(
-            "UPDATE apps SET {} WHERE id = ?{idx}",
-            sets.join(", ")
-        );
+        let sql = format!("UPDATE apps SET {} WHERE id = ?{idx}", sets.join(", "));
         values.push(Box::new(app_id.to_string()));
 
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
@@ -900,7 +897,10 @@ impl AppRepository {
         suffix: &str,
     ) -> anyhow::Result<AppSpec> {
         let app = conn.query_row(
-            &format!("SELECT {} FROM apps WHERE domain = ?1 AND path_prefix = ?2", COLS),
+            &format!(
+                "SELECT {} FROM apps WHERE domain = ?1 AND path_prefix = ?2",
+                COLS
+            ),
             params![domain_db, path_prefix_db],
             |row| row_to_app(row, suffix),
         )?;
@@ -915,7 +915,10 @@ impl AppRepository {
         let sql = if enabled_only {
             format!("SELECT {} FROM apps WHERE enabled = 1 ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC", COLS)
         } else {
-            format!("SELECT {} FROM apps ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC", COLS)
+            format!(
+                "SELECT {} FROM apps ORDER BY name ASC, LENGTH(path_prefix) DESC, id ASC",
+                COLS
+            )
         };
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1023,7 +1026,9 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .map(|v| v as u16),
         tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
         tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
-        tunnel_mode: row.get::<_, String>(20).unwrap_or_else(|_| "none".to_string()),
+        tunnel_mode: row
+            .get::<_, String>(20)
+            .unwrap_or_else(|_| "none".to_string()),
         app_tunnel_id: row.get::<_, Option<String>>(21).unwrap_or(None),
         app_tunnel_domain: row.get::<_, Option<String>>(22).unwrap_or(None),
         app_tunnel_dns_id: row.get::<_, Option<String>>(23).unwrap_or(None),
@@ -1140,8 +1145,20 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());
 
-        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false, None)
-            .expect("insert");
+        repo.insert_static(
+            "myapp",
+            &domain,
+            None,
+            "127.0.0.1",
+            9001,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("insert");
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].domain.0, "myapp.coulson.local");
@@ -1183,8 +1200,20 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());
 
-        repo.insert_static("myapp", &domain, None, "127.0.0.1", 9001, None, false, None, None, false, None)
-            .expect("insert");
+        repo.insert_static(
+            "myapp",
+            &domain,
+            None,
+            "127.0.0.1",
+            9001,
+            None,
+            false,
+            None,
+            None,
+            false,
+            None,
+        )
+        .expect("insert");
 
         // Verify raw DB stores only prefix
         let conn = repo.conn.lock();

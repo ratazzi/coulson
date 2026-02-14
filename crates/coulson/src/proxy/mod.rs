@@ -136,21 +136,25 @@ impl ProxyHttp for BridgeProxy {
         }
 
         // --- Managed process ---
-        let resolved_target =
-            if let BackendTarget::Managed { ref app_id, ref root, ref kind } = route.target {
-                let root_path = std::path::PathBuf::from(root);
-                let socket_path = {
-                    let mut pm = self.process_manager.lock().await;
-                    pm.ensure_running(app_id, &root_path, kind)
-                        .await
-                        .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
-                };
-                // Mark active for idle reaper
-                pm_mark_active(&self.process_manager, app_id).await;
-                BackendTarget::UnixSocket { path: socket_path }
-            } else {
-                route.target.clone()
+        let resolved_target = if let BackendTarget::Managed {
+            ref app_id,
+            ref root,
+            ref kind,
+        } = route.target
+        {
+            let root_path = std::path::PathBuf::from(root);
+            let socket_path = {
+                let mut pm = self.process_manager.lock().await;
+                pm.ensure_running(app_id, &root_path, kind)
+                    .await
+                    .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
+            // Mark active for idle reaper
+            pm_mark_active(&self.process_manager, app_id).await;
+            BackendTarget::UnixSocket { path: socket_path }
+        } else {
+            route.target.clone()
+        };
 
         // --- SPA Rewrite ---
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
@@ -533,8 +537,7 @@ async fn try_serve_static(
             return Ok(true);
         }
         // Directory exists in public/ → show listing (don't fallthrough to backend)
-        serve_directory_listing(session, &canonical_file, &canonical_root, req_path, cors)
-            .await?;
+        serve_directory_listing(session, &canonical_file, &canonical_root, req_path, cors).await?;
         return Ok(true);
     }
 
@@ -546,12 +549,7 @@ async fn try_serve_static(
     Ok(false)
 }
 
-async fn serve_static(
-    session: &mut Session,
-    root: &str,
-    req_path: &str,
-    cors: bool,
-) -> Result<()> {
+async fn serve_static(session: &mut Session, root: &str, req_path: &str, cors: bool) -> Result<()> {
     let decoded = percent_decode(req_path);
     let clean = sanitize_path(&decoded);
     let full_path = PathBuf::from(root).join(&clean);
@@ -619,9 +617,7 @@ async fn serve_file(session: &mut Session, path: &Path, cors: bool) -> Result<()
         resp.insert_header("access-control-allow-origin", "*")?;
     }
 
-    session
-        .write_response_header(Box::new(resp), false)
-        .await?;
+    session.write_response_header(Box::new(resp), false).await?;
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
@@ -684,7 +680,9 @@ async fn serve_directory_listing(
 
     entries.sort_by(|a, b| {
         // dirs first, then alphabetical
-        b.is_dir.cmp(&a.is_dir).then(a.display_name.cmp(&b.display_name))
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.display_name.cmp(&b.display_name))
     });
 
     let relative = dir
@@ -706,9 +704,7 @@ async fn serve_directory_listing(
         resp.insert_header("access-control-allow-origin", "*")?;
     }
 
-    session
-        .write_response_header(Box::new(resp), false)
-        .await?;
+    session.write_response_header(Box::new(resp), false).await?;
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
@@ -951,8 +947,7 @@ fn decode_basic_auth(encoded: &str) -> Option<(String, String)> {
 
 /// Minimal base64 decoder (standard alphabet, no padding required).
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(input.len() * 3 / 4);
     let mut buf: u32 = 0;
     let mut bits: u32 = 0;
@@ -980,9 +975,7 @@ async fn write_auth_required(session: &mut Session) -> Result<()> {
     resp.insert_header("www-authenticate", r#"Basic realm="coulson""#)?;
     resp.insert_header("connection", "close")?;
 
-    session
-        .write_response_header(Box::new(resp), false)
-        .await?;
+    session.write_response_header(Box::new(resp), false).await?;
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
@@ -1004,9 +997,7 @@ async fn write_cors_preflight(session: &mut Session) -> Result<()> {
     resp.insert_header("access-control-max-age", "86400")?;
     resp.insert_header("content-length", "0")?;
 
-    session
-        .write_response_header(Box::new(resp), true)
-        .await?;
+    session.write_response_header(Box::new(resp), true).await?;
     Ok(())
 }
 
@@ -1049,9 +1040,7 @@ async fn write_error_page(session: &mut Session, status: u16, message: &str) -> 
     resp.insert_header("content-length", body.len().to_string())?;
     resp.insert_header("connection", "close")?;
 
-    session
-        .write_response_header(Box::new(resp), false)
-        .await?;
+    session.write_response_header(Box::new(resp), false).await?;
     session
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
@@ -1163,7 +1152,8 @@ mod tests {
                 static_root: None,
             }],
         );
-        let out = resolve_target(&routes, "www.myapp.coulson.local", "coulson.local", "/").expect("fallback");
+        let out = resolve_target(&routes, "www.myapp.coulson.local", "coulson.local", "/")
+            .expect("fallback");
         match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
@@ -1193,7 +1183,13 @@ mod tests {
                 static_root: None,
             }],
         );
-        let out = resolve_target(&routes, "totally-unknown.coulson.local", "coulson.local", "/").expect("default");
+        let out = resolve_target(
+            &routes,
+            "totally-unknown.coulson.local",
+            "coulson.local",
+            "/",
+        )
+        .expect("default");
         match out.target {
             BackendTarget::Tcp { host, port } => {
                 assert_eq!(host, "127.0.0.1");
@@ -1239,7 +1235,13 @@ mod tests {
                 },
             ],
         );
-        let out = resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/api/v1/users").expect("route");
+        let out = resolve_target(
+            &routes,
+            "myapp.coulson.local",
+            "coulson.local",
+            "/api/v1/users",
+        )
+        .expect("route");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5000),
             _ => panic!("expected tcp"),
@@ -1266,7 +1268,8 @@ mod tests {
                 static_root: None,
             }],
         );
-        let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/").expect("wildcard");
+        let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
+            .expect("wildcard");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5010),
             _ => panic!("expected tcp"),
@@ -1310,7 +1313,8 @@ mod tests {
                 static_root: None,
             }],
         );
-        let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/").expect("route");
+        let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
+            .expect("route");
         match out.target {
             BackendTarget::Tcp { port, .. } => assert_eq!(port, 5001),
             _ => panic!("expected tcp"),

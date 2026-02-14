@@ -76,10 +76,21 @@ impl DomainName {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendTarget {
-    Tcp { host: String, port: u16 },
-    UnixSocket { path: String },
-    StaticDir { root: String },
-    Managed { app_id: String, root: String, kind: String },
+    Tcp {
+        host: String,
+        port: u16,
+    },
+    UnixSocket {
+        path: String,
+    },
+    StaticDir {
+        root: String,
+    },
+    Managed {
+        app_id: String,
+        root: String,
+        kind: String,
+    },
 }
 
 impl BackendTarget {
@@ -132,29 +143,25 @@ mod tests {
 
     #[test]
     fn rejects_invalid_suffix() {
-        let err =
-            DomainName::parse("myapp.test", "coulson.local").expect_err("must fail");
+        let err = DomainName::parse("myapp.test", "coulson.local").expect_err("must fail");
         assert!(matches!(err, DomainError::InvalidSuffix(_)));
     }
 
     #[test]
     fn accepts_subdomain_labels() {
-        let domain =
-            DomainName::parse("www.myapp.coulson.local", "coulson.local").expect("valid");
+        let domain = DomainName::parse("www.myapp.coulson.local", "coulson.local").expect("valid");
         assert_eq!(domain.0, "www.myapp.coulson.local");
     }
 
     #[test]
     fn accepts_wildcard_subdomain() {
-        let domain =
-            DomainName::parse("*.myapp.coulson.local", "coulson.local").expect("valid");
+        let domain = DomainName::parse("*.myapp.coulson.local", "coulson.local").expect("valid");
         assert_eq!(domain.0, "*.myapp.coulson.local");
     }
 
     #[test]
     fn wildcard_must_have_suffix_labels() {
-        let err =
-            DomainName::parse("*.coulson.local", "coulson.local").expect_err("must fail");
+        let err = DomainName::parse("*.coulson.local", "coulson.local").expect_err("must fail");
         assert!(matches!(err, DomainError::InvalidLabel));
     }
 }

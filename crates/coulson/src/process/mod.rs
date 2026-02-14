@@ -175,12 +175,7 @@ impl ProcessManager {
             .stdout(stderr_file)
             .stderr(log_file)
             .spawn()
-            .with_context(|| {
-                format!(
-                    "failed to spawn {} for {app_id}",
-                    spec.command.display()
-                )
-            })?;
+            .with_context(|| format!("failed to spawn {} for {app_id}", spec.command.display()))?;
 
         provider::wait_for_uds_ready(&spec.socket_path, Duration::from_secs(30)).await?;
 

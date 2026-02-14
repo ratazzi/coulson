@@ -99,10 +99,7 @@ impl AsyncWrite for H2Stream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         let _ = self.send.send_data(Bytes::new(), true);
         Poll::Ready(Ok(()))
     }
@@ -187,7 +184,9 @@ async fn register_connection(
             "support_datagram_v2",
             "management_logs",
         ];
-        let mut features = client_info.reborrow().init_features(feature_list.len() as u32);
+        let mut features = client_info
+            .reborrow()
+            .init_features(feature_list.len() as u32);
         for (i, f) in feature_list.iter().enumerate() {
             features.set(i as u32, f);
         }

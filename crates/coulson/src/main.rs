@@ -355,11 +355,7 @@ fn run_scan_once(cfg: CoulsonConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_ls(
-    cfg: CoulsonConfig,
-    managed: Option<bool>,
-    domain: Option<String>,
-) -> anyhow::Result<()> {
+fn run_ls(cfg: CoulsonConfig, managed: Option<bool>, domain: Option<String>) -> anyhow::Result<()> {
     let state = build_state(&cfg)?;
     let apps = state.store.list_filtered(managed, domain.as_deref())?;
 
@@ -387,9 +383,7 @@ fn run_ls(
         .collect();
 
     use tabled::settings::Style;
-    let table = tabled::Table::new(&rows)
-        .with(Style::blank())
-        .to_string();
+    let table = tabled::Table::new(&rows).with(Style::blank()).to_string();
     println!("{table}");
 
     Ok(())
@@ -427,9 +421,18 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
         let count = std::fs::read_dir(&cfg.apps_root)
             .map(|entries| entries.flatten().count())
             .unwrap_or(0);
-        print_check(true, &format!("apps_root exists ({}), {count} entries", cfg.apps_root.display()));
+        print_check(
+            true,
+            &format!(
+                "apps_root exists ({}), {count} entries",
+                cfg.apps_root.display()
+            ),
+        );
     } else {
-        print_check(false, &format!("apps_root missing: {}", cfg.apps_root.display()));
+        print_check(
+            false,
+            &format!("apps_root missing: {}", cfg.apps_root.display()),
+        );
         issues += 1;
     }
 
@@ -452,7 +455,10 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
             }
         }
     } else {
-        print_check(false, &format!("database not found: {}", cfg.sqlite_path.display()));
+        print_check(
+            false,
+            &format!("database not found: {}", cfg.sqlite_path.display()),
+        );
         issues += 1;
     }
 
@@ -461,35 +467,48 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
     match client.call("health.ping", serde_json::json!({})) {
         Ok(_) => print_check(true, "daemon running (health.ping OK)"),
         Err(_) => {
-            print_check(false, &format!(
-                "daemon not reachable at {}",
-                cfg.control_socket.display()
-            ));
+            print_check(
+                false,
+                &format!("daemon not reachable at {}", cfg.control_socket.display()),
+            );
             issues += 1;
         }
     }
 
     // 4. Listen port
-    match std::net::TcpStream::connect_timeout(
-        &cfg.listen_http,
-        std::time::Duration::from_secs(2),
-    ) {
+    match std::net::TcpStream::connect_timeout(&cfg.listen_http, std::time::Duration::from_secs(2))
+    {
         Ok(_) => print_check(true, &format!("proxy port {} reachable", cfg.listen_http)),
         Err(_) => {
-            print_check(false, &format!("proxy port {} not reachable", cfg.listen_http));
+            print_check(
+                false,
+                &format!("proxy port {} not reachable", cfg.listen_http),
+            );
             issues += 1;
         }
     }
 
     // 5. DNS resolution — test the bare domain suffix (dashboard host)
     match dns_resolves_to_localhost(&cfg.domain_suffix) {
-        Some(true) => print_check(true, &format!("DNS {} resolves to localhost", cfg.domain_suffix)),
+        Some(true) => print_check(
+            true,
+            &format!("DNS {} resolves to localhost", cfg.domain_suffix),
+        ),
         Some(false) => {
-            print_check(false, &format!("DNS {} does NOT resolve to localhost", cfg.domain_suffix));
+            print_check(
+                false,
+                &format!("DNS {} does NOT resolve to localhost", cfg.domain_suffix),
+            );
             issues += 1;
         }
         None => {
-            print_check(false, &format!("DNS {} resolution failed (mDNS not working?)", cfg.domain_suffix));
+            print_check(
+                false,
+                &format!(
+                    "DNS {} resolution failed (mDNS not working?)",
+                    cfg.domain_suffix
+                ),
+            );
             issues += 1;
         }
     }
@@ -513,13 +532,19 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
 
     // 7. LAN access
     if cfg.lan_access {
-        print_check(true, &format!("LAN access enabled, proxy on {}", cfg.listen_http));
+        print_check(
+            true,
+            &format!("LAN access enabled, proxy on {}", cfg.listen_http),
+        );
         if cfg.listen_http.ip().is_loopback() {
             print_warn("proxy binds to loopback but LAN access is on — LAN clients cannot connect");
             issues += 1;
         }
     } else {
-        print_check(true, &format!("LAN access disabled (loopback only, {})", cfg.listen_http));
+        print_check(
+            true,
+            &format!("LAN access disabled (loopback only, {})", cfg.listen_http),
+        );
     }
 
     println!();
@@ -1024,10 +1049,7 @@ fn run_add(
 
 fn run_add_directory(cfg: &CoulsonConfig, port: Option<u16>, tunnel: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
-    let dir_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("app");
+    let dir_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app");
     let name = scanner::sanitize_name(dir_name);
     run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
 }
@@ -1062,9 +1084,7 @@ fn run_add_directory_inner(
             } else {
                 cfg.apps_root.join(&target)
             };
-            let resolved = resolved
-                .canonicalize()
-                .unwrap_or(resolved);
+            let resolved = resolved.canonicalize().unwrap_or(resolved);
             let cwd_canonical = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
             // symlink-to-dir: resolved == CWD
             // symlink-to-file: resolved parent == CWD
@@ -1120,9 +1140,18 @@ fn run_add_directory_inner(
 
         println!(
             "{} {name}.{} -> 127.0.0.1:{p}",
-            "+".green().bold(), cfg.domain_suffix
+            "+".green().bold(),
+            cfg.domain_suffix
         );
-        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
+        println!(
+            "  {}",
+            format!(
+                "http://{name}.{}:{}",
+                cfg.domain_suffix,
+                cfg.listen_http.port()
+            )
+            .cyan()
+        );
         return Ok(());
     }
 
@@ -1153,7 +1182,15 @@ fn run_add_directory_inner(
             detected.kind,
             cwd.display()
         );
-        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
+        println!(
+            "  {}",
+            format!(
+                "http://{name}.{}:{}",
+                cfg.domain_suffix,
+                cfg.listen_http.port()
+            )
+            .cyan()
+        );
     } else {
         // No auto-detect, still create symlink (scanner will parse coulson.routes etc.)
         std::fs::create_dir_all(&cfg.apps_root)?;
@@ -1171,8 +1208,19 @@ fn run_add_directory_inner(
             cfg.domain_suffix,
             cwd.display()
         );
-        println!("  {}", format!("http://{name}.{}:{}", cfg.domain_suffix, cfg.listen_http.port()).cyan());
-        println!("  {}", "Tip: use --port to specify a target port, or add coulson.json/coulson.routes".dimmed());
+        println!(
+            "  {}",
+            format!(
+                "http://{name}.{}:{}",
+                cfg.domain_suffix,
+                cfg.listen_http.port()
+            )
+            .cyan()
+        );
+        println!(
+            "  {}",
+            "Tip: use --port to specify a target port, or add coulson.json/coulson.routes".dimmed()
+        );
     }
 
     if tunnel {
@@ -1233,7 +1281,10 @@ fn run_add_manual(cfg: &CoulsonConfig, name: &str, target: &str) -> anyhow::Resu
         bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
     }
 
-    println!("  {}", format!("http://{domain}:{}", cfg.listen_http.port()).cyan());
+    println!(
+        "  {}",
+        format!("http://{domain}:{}", cfg.listen_http.port()).cyan()
+    );
     Ok(())
 }
 
@@ -1276,9 +1327,8 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
                 }
             }
         }
-        std::fs::remove_file(&link_path).with_context(|| {
-            format!("failed to remove {}", link_path.display())
-        })?;
+        std::fs::remove_file(&link_path)
+            .with_context(|| format!("failed to remove {}", link_path.display()))?;
         removed_file = true;
 
         // Also remove the .coulson/.coulson.toml file the symlink pointed to
@@ -1317,7 +1367,12 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
     }
 
     if removed_file {
-        println!("{} {} from {}", "-".red().bold(), bare_name, cfg.apps_root.display());
+        println!(
+            "{} {} from {}",
+            "-".red().bold(),
+            bare_name,
+            cfg.apps_root.display()
+        );
     }
     if removed_db {
         println!("{} {bare_name} from database", "-".red().bold());
@@ -1383,7 +1438,9 @@ fn resolve_app_name(cfg: &CoulsonConfig, name: Option<&str>) -> anyhow::Result<S
             }
             // symlink-to-file: resolved parent == CWD
             if let Some(parent) = resolved.parent() {
-                let parent_canonical = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+                let parent_canonical = parent
+                    .canonicalize()
+                    .unwrap_or_else(|_| parent.to_path_buf());
                 if parent_canonical == cwd_canonical {
                     let found = path
                         .file_name()
@@ -1396,10 +1453,7 @@ fn resolve_app_name(cfg: &CoulsonConfig, name: Option<&str>) -> anyhow::Result<S
     }
 
     // Fallback: use CWD directory name
-    let dir_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("app");
+    let dir_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app");
     Ok(scanner::sanitize_name(dir_name))
 }
 
@@ -1494,10 +1548,7 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
                 .cloned()
                 .unwrap_or_else(|| (app_id.to_string(), String::new()));
             let pid = p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-            let kind = p
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
             let uptime_secs = p.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
             let idle_secs = p.get("idle_secs").and_then(|v| v.as_u64()).unwrap_or(0);
             let alive = p.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1522,9 +1573,7 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
         .collect();
 
     use tabled::settings::Style;
-    let table = tabled::Table::new(&rows)
-        .with(Style::blank())
-        .to_string();
+    let table = tabled::Table::new(&rows).with(Style::blank()).to_string();
     println!("{table}");
 
     Ok(())
@@ -1568,9 +1617,7 @@ fn run_logs(
             let app = apps
                 .iter()
                 .find(|a| {
-                    a.name == bare_name
-                        || a.domain.0 == domain_match
-                        || a.domain.0 == bare_name
+                    a.name == bare_name || a.domain.0 == domain_match || a.domain.0 == bare_name
                 })
                 .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
             (bare_name, app.id.0.clone())
@@ -1589,7 +1636,10 @@ fn run_logs(
             .status()
             .context("failed to run tail -f")?;
     } else {
-        eprintln!("{} $ tail -n {lines} {log_path}", format!("[{bare_name}]").blue());
+        eprintln!(
+            "{} $ tail -n {lines} {log_path}",
+            format!("[{bare_name}]").blue()
+        );
         std::process::Command::new("tail")
             .args(["-n", &lines.to_string(), &log_path])
             .status()
@@ -1619,7 +1669,11 @@ fn run_share(cfg: CoulsonConfig, name: String, expires: String) -> anyhow::Resul
     let tunnel_domain = result
         .get("tunnel_domain")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("no named tunnel running. Start one first with `coulson tunnel connect`"))?
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "no named tunnel running. Start one first with `coulson tunnel connect`"
+            )
+        })?
         .to_string();
 
     // Build state to access the signer
@@ -1632,9 +1686,7 @@ fn run_share(cfg: CoulsonConfig, name: String, expires: String) -> anyhow::Resul
 
     let token = state.share_signer.create_token(&domain, duration)?;
 
-    let share_url = format!(
-        "https://{domain_prefix}.{tunnel_domain}/_coulson/auth?t={token}"
-    );
+    let share_url = format!("https://{domain_prefix}.{tunnel_domain}/_coulson/auth?t={token}");
 
     println!("{share_url}");
     Ok(())
@@ -1726,9 +1778,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                     .collect();
 
                 use tabled::settings::Style;
-                let table = tabled::Table::new(&rows)
-                    .with(Style::blank())
-                    .to_string();
+                let table = tabled::Table::new(&rows).with(Style::blank()).to_string();
                 println!("{table}");
                 println!();
             }
@@ -1736,12 +1786,12 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
             // Named tunnel
             let nt = client.call("named_tunnel.status", serde_json::json!({}))?;
             println!("{}", "Named Tunnel".bold());
-            let connected = nt.get("connected").and_then(|v| v.as_bool()).unwrap_or(false);
+            let connected = nt
+                .get("connected")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             if connected {
-                let tunnel_id = nt
-                    .get("tunnel_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("?");
+                let tunnel_id = nt.get("tunnel_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let domain = nt
                     .get("tunnel_domain")
                     .and_then(|v| v.as_str())
@@ -1767,7 +1817,9 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                     for a in &global_apps {
                         let name = a.get("name").and_then(|v| v.as_str()).unwrap_or("?");
                         let app_domain = a.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
-                        let prefix = app_domain.strip_suffix(&format!(".{}", cfg.domain_suffix)).unwrap_or(app_domain);
+                        let prefix = app_domain
+                            .strip_suffix(&format!(".{}", cfg.domain_suffix))
+                            .unwrap_or(app_domain);
                         println!(
                             "    {}  {}",
                             name.bold(),
@@ -1781,10 +1833,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 if configured {
-                    let domain = nt
-                        .get("domain")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let domain = nt.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
                     println!(
                         "  {} (configured: {})",
                         "disconnected".yellow(),
@@ -1825,7 +1874,10 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                             .get("app_tunnel_domain")
                             .and_then(|v| v.as_str())
                             .unwrap_or("-");
-                        let mode = a.get("tunnel_mode").and_then(|v| v.as_str()).unwrap_or("none");
+                        let mode = a
+                            .get("tunnel_mode")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("none");
                         let status = if mode == "named" {
                             "running".green().to_string()
                         } else {
@@ -1840,9 +1892,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                     .collect();
 
                 use tabled::settings::Style;
-                let table = tabled::Table::new(&rows)
-                    .with(Style::blank())
-                    .to_string();
+                let table = tabled::Table::new(&rows).with(Style::blank()).to_string();
                 println!("{table}");
             }
 
@@ -1895,7 +1945,11 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                 serde_json::json!({ "app_id": app_id, "tunnel_mode": tunnel_mode }),
             )?;
 
-            println!("{} tunnel started for {bare_name} ({})", "✓".green(), tunnel_mode);
+            println!(
+                "{} tunnel started for {bare_name} ({})",
+                "✓".green(),
+                tunnel_mode
+            );
 
             // Show relevant info based on mode
             match tunnel_mode.as_str() {
@@ -1939,10 +1993,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                 params["domain"] = serde_json::json!(d);
             }
             let result = client.call("named_tunnel.connect", params)?;
-            let tunnel_domain = result
-                .get("domain")
-                .and_then(|v| v.as_str())
-                .unwrap_or("?");
+            let tunnel_domain = result.get("domain").and_then(|v| v.as_str()).unwrap_or("?");
             println!("{} named tunnel connected", "✓".green());
             println!("  domain: {}", tunnel_domain.cyan());
             Ok(())
@@ -2039,10 +2090,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
 }
 
 /// Look up an app by ID from the RPC app.list result.
-fn find_app_json(
-    client: &RpcClient,
-    app_id: &str,
-) -> anyhow::Result<serde_json::Value> {
+fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json::Value> {
     let result = client.call("app.list", serde_json::json!({}))?;
     result
         .get("apps")
@@ -2087,7 +2135,10 @@ fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
 
         if status.success() {
             println!("{}", "CA certificate trusted successfully!".green().bold());
-            println!("HTTPS connections to *.{} will now be trusted.", _cfg.domain_suffix);
+            println!(
+                "HTTPS connections to *.{} will now be trusted.",
+                _cfg.domain_suffix
+            );
         } else {
             eprintln!("{}", "Failed to add CA to System keychain.".red());
             eprintln!("You can manually trust it:");

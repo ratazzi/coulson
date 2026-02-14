@@ -32,7 +32,12 @@ pub fn check_share_auth(
         Some(t) => t,
         None => {
             debug!(local_host = %local_host, "no _coulson_cookie, returning 403");
-            send_h2_response(send_response, 403, &[], b"403 Forbidden: missing auth cookie")?;
+            send_h2_response(
+                send_response,
+                403,
+                &[],
+                b"403 Forbidden: missing auth cookie",
+            )?;
             return Ok(ShareAuthResult::Handled);
         }
     };
@@ -119,10 +124,7 @@ fn extract_query_param<'a>(query: &'a str, key: &str) -> Option<&'a str> {
 
 /// Search all Cookie header entries for a named cookie.
 /// HTTP/2 may split cookies across multiple header entries.
-fn extract_cookie_from_headers<'a>(
-    headers: &'a http::HeaderMap,
-    name: &str,
-) -> Option<&'a str> {
+fn extract_cookie_from_headers<'a>(headers: &'a http::HeaderMap, name: &str) -> Option<&'a str> {
     for value in headers.get_all("cookie") {
         if let Ok(s) = value.to_str() {
             if let Some(v) = extract_cookie(s, name) {

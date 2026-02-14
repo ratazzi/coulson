@@ -173,13 +173,9 @@ pub async fn start_quick_tunnel(
         mgr.lock().remove(&aid);
     });
 
-    manager.lock().insert(
-        app_id,
-        TunnelHandle {
-            task,
-            credentials,
-        },
-    );
+    manager
+        .lock()
+        .insert(app_id, TunnelHandle { task, credentials });
 
     Ok(hostname)
 }

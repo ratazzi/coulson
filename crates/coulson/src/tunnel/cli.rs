@@ -49,9 +49,7 @@ pub async fn start_quick_tunnel_cli(
     let task = tokio::spawn(async move {
         // Keep draining stderr to prevent SIGPIPE
         let mut lines = lines;
-        tokio::spawn(async move {
-            while let Ok(Some(_)) = lines.next_line().await {}
-        });
+        tokio::spawn(async move { while let Ok(Some(_)) = lines.next_line().await {} });
         let status = child.wait().await;
         match status {
             Ok(s) => warn!(app_id = %aid, status = %s, "cloudflared exited"),

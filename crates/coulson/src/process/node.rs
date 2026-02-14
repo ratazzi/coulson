@@ -52,7 +52,9 @@ impl ProcessProvider for NodeProvider {
     }
 
     fn resolve(&self, _app: &ManagedApp) -> anyhow::Result<ProcessSpec> {
-        anyhow::bail!("Node provider is not yet implemented. Coming soon: npm run dev / node server.js")
+        anyhow::bail!(
+            "Node provider is not yet implemented. Coming soon: npm run dev / node server.js"
+        )
     }
 }
 
@@ -63,10 +65,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "coulson-test-node-{label}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("coulson-test-node-{label}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir

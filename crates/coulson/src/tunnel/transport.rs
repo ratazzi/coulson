@@ -271,8 +271,7 @@ async fn try_connect(
                         .expect("build tokio runtime for control stream");
                     let local = tokio::task::LocalSet::new();
                     rt.block_on(local.run_until(async {
-                        rpc::handle_control_stream(request, send_response, &creds, conn_index)
-                            .await
+                        rpc::handle_control_stream(request, send_response, &creds, conn_index).await
                     }))
                 });
 
@@ -288,10 +287,7 @@ async fn try_connect(
             StreamType::UpdateConfiguration => {
                 // CF edge pushes config updates; acknowledge and ignore.
                 debug!("received update-configuration stream, acknowledging");
-                let response = http::Response::builder()
-                    .status(200)
-                    .body(())
-                    .unwrap();
+                let response = http::Response::builder().status(200).body(()).unwrap();
                 if let Err(err) = send_response.send_response(response, true) {
                     warn!(error = %err, "failed to ack update-configuration");
                 }
@@ -325,12 +321,7 @@ async fn try_connect(
                                 .uri
                                 .authority()
                                 .map(|a| a.as_str())
-                                .or_else(|| {
-                                    parts
-                                        .headers
-                                        .get("host")
-                                        .and_then(|v| v.to_str().ok())
-                                })
+                                .or_else(|| parts.headers.get("host").and_then(|v| v.to_str().ok()))
                                 .unwrap_or(tunnel_domain);
                             let local_host = proxy::map_tunnel_host_to_local(
                                 original_host,
@@ -342,8 +333,7 @@ async fn try_connect(
                             // Fail-close: reject on DB error to avoid bypassing auth.
                             let domain_prefix =
                                 crate::store::domain_to_db(&local_host, local_suffix);
-                            let share_required = match store
-                                .is_share_auth_required(&domain_prefix)
+                            let share_required = match store.is_share_auth_required(&domain_prefix)
                             {
                                 Ok(v) => v,
                                 Err(e) => {
@@ -388,7 +378,9 @@ async fn try_connect(
                                         }
                                     }
                                 } else {
-                                    error!("share_auth required but signer not configured, denying");
+                                    error!(
+                                        "share_auth required but signer not configured, denying"
+                                    );
                                     let resp = http::Response::builder()
                                         .status(503)
                                         .header("content-type", "text/plain")

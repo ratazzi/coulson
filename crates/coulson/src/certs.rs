@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use rcgen::{
-    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose,
-    SanType,
+    BasicConstraints, CertificateParams, DnType, IsCa, Issuer, KeyPair, KeyUsagePurpose, SanType,
 };
 use tracing::info;
 
@@ -51,24 +50,23 @@ impl CertManager {
         let suffix_meta_path = certs_dir.join("server.suffix");
 
         // Generate CA if not present
-        let (ca_params, ca_key_pem, ca_cert_pem, ca_regenerated) =
-            if ca_cert_path.exists() && ca_key_path.exists() {
-                let cert_pem = fs::read_to_string(&ca_cert_path)
-                    .context("failed to read CA cert")?;
-                let key_pem = fs::read_to_string(&ca_key_path)
-                    .context("failed to read CA key")?;
-                (build_ca_params()?, key_pem, cert_pem, false)
-            } else {
-                info!("generating self-signed CA certificate");
-                let ca_params = build_ca_params()?;
-                let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
-                let cert = ca_params.self_signed(&ca_key)?;
-                let cert_pem = cert.pem();
-                let key_pem = ca_key.serialize_pem();
-                fs::write(&ca_cert_path, &cert_pem).context("failed to write CA cert")?;
-                write_private_key(&ca_key_path, &key_pem)?;
-                (ca_params, key_pem, cert_pem, true)
-            };
+        let (ca_params, ca_key_pem, ca_cert_pem, ca_regenerated) = if ca_cert_path.exists()
+            && ca_key_path.exists()
+        {
+            let cert_pem = fs::read_to_string(&ca_cert_path).context("failed to read CA cert")?;
+            let key_pem = fs::read_to_string(&ca_key_path).context("failed to read CA key")?;
+            (build_ca_params()?, key_pem, cert_pem, false)
+        } else {
+            info!("generating self-signed CA certificate");
+            let ca_params = build_ca_params()?;
+            let ca_key = KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+            let cert = ca_params.self_signed(&ca_key)?;
+            let cert_pem = cert.pem();
+            let key_pem = ca_key.serialize_pem();
+            fs::write(&ca_cert_path, &cert_pem).context("failed to write CA cert")?;
+            write_private_key(&ca_key_path, &key_pem)?;
+            (ca_params, key_pem, cert_pem, true)
+        };
 
         // Re-sign server cert if: CA was regenerated, suffix changed, or cert files missing
         let need_server_cert = ca_regenerated
