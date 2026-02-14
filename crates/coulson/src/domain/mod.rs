@@ -1,3 +1,6 @@
+use std::fmt;
+use std::str::FromStr;
+
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -73,6 +76,53 @@ impl DomainName {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TunnelMode {
+    #[default]
+    None,
+    Quick,
+    Named,
+    Global,
+}
+
+impl TunnelMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Quick => "quick",
+            Self::Named => "named",
+            Self::Global => "global",
+        }
+    }
+
+    pub fn is_exposed(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+impl fmt::Display for TunnelMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for TunnelMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "none" => Ok(Self::None),
+            "quick" => Ok(Self::Quick),
+            "named" => Ok(Self::Named),
+            "global" => Ok(Self::Global),
+            other => Err(format!(
+                "invalid tunnel_mode: {other}, must be none/global/quick/named"
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BackendTarget {
@@ -120,7 +170,7 @@ pub struct AppSpec {
     pub listen_port: Option<u16>,
     pub tunnel_url: Option<String>,
     pub tunnel_exposed: bool,
-    pub tunnel_mode: String,
+    pub tunnel_mode: TunnelMode,
     pub app_tunnel_id: Option<String>,
     pub app_tunnel_domain: Option<String>,
     pub app_tunnel_dns_id: Option<String>,

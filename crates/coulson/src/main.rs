@@ -31,7 +31,7 @@ use tracing::{debug, error, info};
 use tabled::Tabled;
 
 use crate::config::CoulsonConfig;
-use crate::domain::BackendTarget;
+use crate::domain::{BackendTarget, TunnelMode};
 use crate::process::{ProcessManagerHandle, ProviderRegistry};
 use crate::rpc_client::RpcClient;
 use crate::share::ShareSigner;
@@ -1914,8 +1914,8 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
         TunnelCommands::Start { name, mode } => {
             let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
 
-            let tunnel_mode = match mode.as_deref() {
-                Some(m @ ("quick" | "global" | "named")) => m.to_string(),
+            let tunnel_mode: TunnelMode = match mode.as_deref() {
+                Some(m @ ("quick" | "global" | "named")) => m.parse().unwrap(),
                 Some(m) => bail!("invalid mode: {m}, must be quick/global/named"),
                 None => {
                     // Auto-infer mode:
@@ -1928,49 +1928,52 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                         .and_then(|v| v.as_str())
                         .is_some();
                     if has_creds {
-                        "named".to_string()
+                        TunnelMode::Named
                     } else {
                         let global_connected = client
                             .call("named_tunnel.status", serde_json::json!({}))
                             .ok()
                             .and_then(|v| v.get("connected").and_then(|c| c.as_bool()))
                             .unwrap_or(false);
-                        if global_connected { "global" } else { "quick" }.to_string()
+                        if global_connected {
+                            TunnelMode::Global
+                        } else {
+                            TunnelMode::Quick
+                        }
                     }
                 }
             };
 
             let result = client.call(
                 "app.update",
-                serde_json::json!({ "app_id": app_id, "tunnel_mode": tunnel_mode }),
+                serde_json::json!({ "app_id": app_id, "tunnel_mode": tunnel_mode.as_str() }),
             )?;
 
             println!(
-                "{} tunnel started for {bare_name} ({})",
+                "{} tunnel started for {bare_name} ({tunnel_mode})",
                 "✓".green(),
-                tunnel_mode
             );
 
             // Show relevant info based on mode
-            match tunnel_mode.as_str() {
-                "quick" => {
+            match tunnel_mode {
+                TunnelMode::Quick => {
                     let url = result
                         .get("tunnel_url")
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
                     println!("  {}", url.cyan());
                 }
-                "named" => {
+                TunnelMode::Named => {
                     let domain = result
                         .get("tunnel_domain")
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
                     println!("  domain: {}", domain.cyan());
                 }
-                "global" => {
+                TunnelMode::Global => {
                     println!("  {}", "app exposed via global named tunnel".dimmed());
                 }
-                _ => {}
+                TunnelMode::None => {}
             }
 
             Ok(())

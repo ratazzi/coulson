@@ -7,7 +7,7 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use thiserror::Error;
 use time::OffsetDateTime;
 
-use crate::domain::{AppId, AppKind, AppSpec, BackendTarget, DomainName};
+use crate::domain::{AppId, AppKind, AppSpec, BackendTarget, DomainName, TunnelMode};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -171,7 +171,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
-            tunnel_mode: "none".to_string(),
+            tunnel_mode: TunnelMode::None,
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -242,7 +242,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
-            tunnel_mode: "none".to_string(),
+            tunnel_mode: TunnelMode::None,
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -312,7 +312,7 @@ impl AppRepository {
             listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
-            tunnel_mode: "none".to_string(),
+            tunnel_mode: TunnelMode::None,
             app_tunnel_id: None,
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
@@ -815,13 +815,13 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    pub fn set_tunnel_mode(&self, app_id: &str, mode: &str) -> anyhow::Result<bool> {
+    pub fn set_tunnel_mode(&self, app_id: &str, mode: TunnelMode) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        let exposed = if mode != "none" { 1i64 } else { 0i64 };
+        let exposed = if mode.is_exposed() { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
         let changed = conn.execute(
             "UPDATE apps SET tunnel_mode = ?1, tunnel_exposed = ?2, updated_at = ?3 WHERE id = ?4",
-            params![mode, exposed, now, app_id],
+            params![mode.as_str(), exposed, now, app_id],
         )?;
         Ok(changed > 0)
     }
@@ -1028,7 +1028,9 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
         tunnel_mode: row
             .get::<_, String>(20)
-            .unwrap_or_else(|_| "none".to_string()),
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_default(),
         app_tunnel_id: row.get::<_, Option<String>>(21).unwrap_or(None),
         app_tunnel_domain: row.get::<_, Option<String>>(22).unwrap_or(None),
         app_tunnel_dns_id: row.get::<_, Option<String>>(23).unwrap_or(None),
