@@ -167,7 +167,8 @@ pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> any
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_client(stream, state).await {
-                let is_broken_pipe = err.downcast_ref::<std::io::Error>()
+                let is_broken_pipe = err
+                    .downcast_ref::<std::io::Error>()
                     .is_some_and(|e| e.kind() == std::io::ErrorKind::BrokenPipe);
                 if is_broken_pipe {
                     debug!(error = %err, "control client disconnected");
@@ -331,7 +332,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            match state.store.insert_static_dir(&params.name, &domain, &params.static_root, params.listen_port) {
+            match state.store.insert_static_dir(
+                &params.name,
+                &domain,
+                &params.static_root,
+                params.listen_port,
+            ) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());
@@ -456,7 +462,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 let old_mode = &app.tunnel_mode;
 
                 // Check if named mode has required params
-                if new_mode == "named" && params.app_tunnel_domain.is_none() && app.app_tunnel_domain.is_none() {
+                if new_mode == "named"
+                    && params.app_tunnel_domain.is_none()
+                    && app.app_tunnel_domain.is_none()
+                {
                     return render_err(
                         req.request_id,
                         ControlError::InvalidParams(
@@ -486,7 +495,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             // (app_tunnel_id, app_tunnel_domain, app_tunnel_dns_id, app_tunnel_creds)
                             // so the tunnel can be reconnected via `start` without re-creating CF resources.
                             // Use `tunnel.app_teardown` to fully destroy the CF tunnel and DNS.
-                            let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
+                            let _ =
+                                tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
                             let _ = state.store.set_tunnel_mode(&params.app_id, "none");
                         }
                         _ => {}
@@ -504,7 +514,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             {
                                 Ok(hostname) => {
                                     let url = format!("https://{hostname}");
-                                    let _ = state.store.update_tunnel_url(&params.app_id, Some(&url));
+                                    let _ =
+                                        state.store.update_tunnel_url(&params.app_id, Some(&url));
                                     let _ = state.store.set_tunnel_mode(&params.app_id, "quick");
                                     return ok_response(
                                         req.request_id,
@@ -515,16 +526,28 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             }
                         }
                         "named" => {
-                            let tunnel_domain = params
-                                .app_tunnel_domain
-                                .as_deref()
-                                .or(app.app_tunnel_domain.as_deref())
-                                .unwrap()
-                                .to_string();
+                            let tunnel_domain =
+                                match params
+                                    .app_tunnel_domain
+                                    .as_deref()
+                                    .or(app.app_tunnel_domain.as_deref())
+                                {
+                                    Some(d) => d.to_string(),
+                                    None => return render_err(
+                                        req.request_id,
+                                        ControlError::InvalidParams(
+                                            "app_tunnel_domain is required for named tunnel mode"
+                                                .to_string(),
+                                        ),
+                                    ),
+                                };
 
                             // Reconnect using saved credentials if available
                             // (skip when domain changed — that requires a full rebuild)
-                            if !named_domain_changed && params.app_tunnel_token.is_none() && app.app_tunnel_creds.is_some() {
+                            if !named_domain_changed
+                                && params.app_tunnel_token.is_none()
+                                && app.app_tunnel_creds.is_some()
+                            {
                                 let creds: tunnel::TunnelCredentials = match serde_json::from_str(
                                     app.app_tunnel_creds.as_ref().unwrap(),
                                 ) {
@@ -626,29 +649,58 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             };
 
                             let tunnel_name = format!("coulson-{}", params.app_id);
-                            let (credentials, tunnel_id) =
-                                match tunnel::named::create_named_tunnel(&api_token, &account_id, &tunnel_name).await {
-                                    Ok(v) => v,
-                                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                                };
+                            let (credentials, tunnel_id) = match tunnel::named::create_named_tunnel(
+                                &api_token,
+                                &account_id,
+                                &tunnel_name,
+                            )
+                            .await
+                            {
+                                Ok(v) => v,
+                                Err(e) => return internal_error(req.request_id, e.to_string()),
+                            };
 
                             let mut dns_record_id: Option<String> = None;
                             let mut zone_id_used: Option<String> = None;
                             if auto_dns {
-                                match tunnel::named::find_zone_id(&api_token, &tunnel_domain).await {
+                                match tunnel::named::find_zone_id(&api_token, &tunnel_domain).await
+                                {
                                     Ok(zid) => {
                                         zone_id_used = Some(zid.clone());
-                                        match tunnel::named::create_dns_cname(&api_token, &zid, &tunnel_domain, &tunnel_id).await {
+                                        match tunnel::named::create_dns_cname(
+                                            &api_token,
+                                            &zid,
+                                            &tunnel_domain,
+                                            &tunnel_id,
+                                        )
+                                        .await
+                                        {
                                             Ok(rid) => dns_record_id = Some(rid),
                                             Err(e) => {
-                                                let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
-                                                return internal_error(req.request_id, format!("failed to create DNS CNAME: {e}"));
+                                                let _ = tunnel::named::delete_named_tunnel(
+                                                    &api_token,
+                                                    &account_id,
+                                                    &tunnel_id,
+                                                )
+                                                .await;
+                                                return internal_error(
+                                                    req.request_id,
+                                                    format!("failed to create DNS CNAME: {e}"),
+                                                );
                                             }
                                         }
                                     }
                                     Err(e) => {
-                                        let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
-                                        return internal_error(req.request_id, format!("failed to find zone for domain: {e}"));
+                                        let _ = tunnel::named::delete_named_tunnel(
+                                            &api_token,
+                                            &account_id,
+                                            &tunnel_id,
+                                        )
+                                        .await;
+                                        return internal_error(
+                                            req.request_id,
+                                            format!("failed to find zone for domain: {e}"),
+                                        );
                                     }
                                 }
                             }
@@ -663,9 +715,15 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             .await
                             {
                                 if let (Some(rid), Some(zid)) = (&dns_record_id, &zone_id_used) {
-                                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid).await;
+                                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid)
+                                        .await;
                                 }
-                                let _ = tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
+                                let _ = tunnel::named::delete_named_tunnel(
+                                    &api_token,
+                                    &account_id,
+                                    &tunnel_id,
+                                )
+                                .await;
                                 return internal_error(req.request_id, e.to_string());
                             }
 
@@ -846,12 +904,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             let routing = routing_for_app(&app, state.listen_http.port());
 
-            match tunnel::start_quick_tunnel(
-                state.tunnels.clone(),
-                params.app_id.clone(),
-                routing,
-            )
-            .await
+            match tunnel::start_quick_tunnel(state.tunnels.clone(), params.app_id.clone(), routing)
+                .await
             {
                 Ok(hostname) => {
                     let url = format!("https://{}", hostname);
@@ -932,10 +986,16 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Ok(v) => v,
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
-            if let Err(e) = state.store.set_setting("named_tunnel.credentials", &creds_json) {
+            if let Err(e) = state
+                .store
+                .set_setting("named_tunnel.credentials", &creds_json)
+            {
                 return internal_error(req.request_id, e.to_string());
             }
-            if let Err(e) = state.store.set_setting("named_tunnel.domain", &params.domain) {
+            if let Err(e) = state
+                .store
+                .set_setting("named_tunnel.domain", &params.domain)
+            {
                 return internal_error(req.request_id, e.to_string());
             }
             if let Err(e) = state
@@ -991,9 +1051,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     _ => {
                         return render_err(
                             req.request_id,
-                            ControlError::Internal(
-                                "account_id not found in settings".to_string(),
-                            ),
+                            ControlError::Internal("account_id not found in settings".to_string()),
                         );
                     }
                 };
@@ -1067,7 +1125,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     Ok(v) => v,
                     Err(e) => return internal_error(req.request_id, e.to_string()),
                 };
-                if let Err(e) = state.store.set_setting("named_tunnel.credentials", &creds_json) {
+                if let Err(e) = state
+                    .store
+                    .set_setting("named_tunnel.credentials", &creds_json)
+                {
                     return internal_error(req.request_id, e.to_string());
                 }
                 if let Err(e) = state.store.set_setting("named_tunnel.domain", domain) {
@@ -1122,21 +1183,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             }
         }
-        "named_tunnel.disconnect" => {
-            match state.named_tunnel.lock().take() {
-                Some(handle) => {
-                    handle.task.abort();
-                    info!("named tunnel disconnected");
-                    Ok(json!({ "disconnected": true }))
-                }
-                None => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams("no named tunnel connected".to_string()),
-                    );
-                }
+        "named_tunnel.disconnect" => match state.named_tunnel.lock().take() {
+            Some(handle) => {
+                handle.task.abort();
+                info!("named tunnel disconnected");
+                Ok(json!({ "disconnected": true }))
             }
-        }
+            None => {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("no named tunnel connected".to_string()),
+                );
+            }
+        },
         "named_tunnel.status" => {
             let guard = state.named_tunnel.lock();
             if let Some(handle) = guard.as_ref() {
@@ -1179,7 +1238,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             if params.api_token.trim().is_empty() || params.account_id.trim().is_empty() {
                 return render_err(
                     req.request_id,
-                    ControlError::InvalidParams("api_token and account_id are required".to_string()),
+                    ControlError::InvalidParams(
+                        "api_token and account_id are required".to_string(),
+                    ),
                 );
             }
             if let Err(e) = state.store.set_setting("cf.api_token", &params.api_token) {
@@ -1297,12 +1358,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                         }
                     }
                     Err(e) => {
-                        let _ = tunnel::named::delete_named_tunnel(
-                            &api_token,
-                            &account_id,
-                            &tunnel_id,
-                        )
-                        .await;
+                        let _ =
+                            tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id)
+                                .await;
                         return internal_error(
                             req.request_id,
                             format!("failed to find zone for domain: {e}"),
@@ -1368,9 +1426,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Ok(None) => {
                     return render_err(
                         req.request_id,
-                        ControlError::InvalidParams(
-                            "CF credentials not configured".to_string(),
-                        ),
+                        ControlError::InvalidParams("CF credentials not configured".to_string()),
                     );
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
@@ -1430,10 +1486,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
 
             // Clear tunnel fields in DB
-            if let Err(e) =
-                state
-                    .store
-                    .update_app_tunnel(&params.app_id, None, None, None, None)
+            if let Err(e) = state
+                .store
+                .update_app_tunnel(&params.app_id, None, None, None, None)
             {
                 return internal_error(req.request_id, e.to_string());
             }
