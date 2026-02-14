@@ -2,42 +2,107 @@
   <defs>
     <linearGradient id="snow-surface" x1="0%" y1="0%" x2="0%" y2="100%">
       <stop offset="0%" style="stop-color:#ffffff;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#f0f4f8;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#e8edf4;stop-opacity:1" />
     </linearGradient>
 
-    <linearGradient id="sapphire-glass" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#a1c4fd;stop-opacity:0.8" />
-      <stop offset="100%" style="stop-color:#c2e9fb;stop-opacity:0.4" />
+    <!-- Glacier ice in sunlight: luminous pale azure -->
+    <linearGradient id="glacier-body" x1="20%" y1="0%" x2="80%" y2="100%">
+      <stop offset="0%" style="stop-color:#3a8cc8;stop-opacity:0.85" />
+      <stop offset="50%" style="stop-color:#5caad8;stop-opacity:0.75" />
+      <stop offset="100%" style="stop-color:#82c4ea;stop-opacity:0.65" />
     </linearGradient>
 
+    <!-- Recessed channel floor -->
+    <linearGradient id="channel-floor" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#8ec4e0;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#b0d8ed;stop-opacity:1" />
+    </linearGradient>
+
+    <!-- Primary sunlight caustic: strong top-left highlight -->
+    <linearGradient id="ice-caustic" x1="10%" y1="0%" x2="60%" y2="75%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:0.55" />
+      <stop offset="25%" style="stop-color:#ffffff;stop-opacity:0.12" />
+      <stop offset="100%" style="stop-color:#ffffff;stop-opacity:0" />
+    </linearGradient>
+
+    <!-- Secondary facet highlight: bottom-right shimmer -->
+    <linearGradient id="ice-facet" x1="85%" y1="15%" x2="25%" y2="85%">
+      <stop offset="0%" style="stop-color:#ffffff;stop-opacity:0.2" />
+      <stop offset="50%" style="stop-color:#ffffff;stop-opacity:0.03" />
+      <stop offset="100%" style="stop-color:#ffffff;stop-opacity:0" />
+    </linearGradient>
+
+    <!-- Depth tint: subtle darkening at bottom for 3D volume -->
+    <linearGradient id="depth-tint" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" style="stop-color:#000000;stop-opacity:0" />
+      <stop offset="70%" style="stop-color:#1a4a78;stop-opacity:0.08" />
+      <stop offset="100%" style="stop-color:#0e3860;stop-opacity:0.15" />
+    </linearGradient>
+
+    <!-- Inner cut shadow: deeply carved channel -->
     <filter id="inner-cut-shadow" x="-50%" y="-50%" width="200%" height="200%">
-      <feOffset dx="0" dy="4"/>
-      <feGaussianBlur stdDeviation="4"/>
+      <feOffset dx="0" dy="6"/>
+      <feGaussianBlur stdDeviation="4.5"/>
       <feComposite operator="out" in="SourceGraphic" result="inverse"/>
-      <feFlood flood-color="#001f3f" flood-opacity="0.6" result="color"/>
+      <feFlood flood-color="#082850" flood-opacity="0.85" result="color"/>
+      <feComposite operator="in" in="color" in2="inverse" result="shadow"/>
+      <feComposite operator="over" in="shadow" in2="SourceGraphic"/>
+    </filter>
+
+    <!-- Top inner shadow for bidirectional carved depth -->
+    <filter id="inner-top-shadow" x="-50%" y="-50%" width="200%" height="200%">
+      <feOffset dx="0" dy="-3"/>
+      <feGaussianBlur stdDeviation="2.5"/>
+      <feComposite operator="out" in="SourceGraphic" result="inverse"/>
+      <feFlood flood-color="#082a4a" flood-opacity="0.35" result="color"/>
       <feComposite operator="in" in="color" in2="inverse" result="shadow"/>
       <feComposite operator="over" in="shadow" in2="SourceGraphic"/>
     </filter>
 
     <filter id="crisp-shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.15"/>
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.18"/>
     </filter>
   </defs>
 
-  <!-- Squircle background (824x824 centered in 1024, matching macOS icon grid) -->
+  <!-- Squircle background -->
   <rect x="100" y="100" width="824" height="824" rx="186" ry="186" fill="url(#snow-surface)" filter="url(#crisp-shadow)" />
 
   <!-- Ice Inlay C -->
-  <g transform="translate(512, 512) scale(3.2)">
-    <!-- Recessed Channel -->
+  <g transform="translate(512, 512) scale(3.7)">
+    <!-- Layer 1: Recessed channel floor -->
     <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
-          fill="#d1e8ff" filter="url(#inner-cut-shadow)"/>
+          fill="url(#channel-floor)" filter="url(#inner-cut-shadow)"/>
 
-    <!-- Sapphire Glass Body -->
+    <!-- Layer 2: Top inner shadow -->
     <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
-          fill="url(#sapphire-glass)" stroke="white" stroke-width="1" opacity="0.8"/>
+          fill="transparent" filter="url(#inner-top-shadow)"/>
 
-    <!-- Inner Glow -->
-    <path d="M 50,-30 A 60,60 0 1,0 50,30" fill="none" stroke="#3399ff" stroke-width="4" opacity="0.3" filter="blur(4px)"/>
+    <!-- Layer 3: Glacier glass body -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
+          fill="url(#glacier-body)" stroke="rgba(255,255,255,0.35)" stroke-width="0.5"/>
+
+    <!-- Layer 4: Depth tint (volumetric darkening at bottom) -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
+          fill="url(#depth-tint)"/>
+
+    <!-- Layer 5: Primary sunlight caustic -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
+          fill="url(#ice-caustic)"/>
+
+    <!-- Layer 6: Secondary facet highlight -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30 L 25,15 A 30,30 0 1,1 25,-15 Z"
+          fill="url(#ice-facet)"/>
+
+    <!-- Outer edge: soft blue glow -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30" fill="none" stroke="#1a6baa" stroke-width="2.5" opacity="0.15" filter="blur(2px)"/>
+
+    <!-- Inner edge: soft blue glow -->
+    <path d="M 25,15 A 30,30 0 1,1 25,-15" fill="none" stroke="#1a6baa" stroke-width="1.8" opacity="0.12" filter="blur(1.5px)"/>
+
+    <!-- Crisp outer edge highlight (light catching carved rim) -->
+    <path d="M 50,-30 A 60,60 0 1,0 50,30" fill="none" stroke="#ffffff" stroke-width="0.6" opacity="0.5" transform="translate(-0.4,-0.4)"/>
+
+    <!-- Crisp inner edge highlight -->
+    <path d="M 25,15 A 30,30 0 1,1 25,-15" fill="none" stroke="#ffffff" stroke-width="0.4" opacity="0.3" transform="translate(0.3,0.3)"/>
   </g>
 </svg>
