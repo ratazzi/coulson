@@ -22,6 +22,20 @@ pub enum ScanUpsertResult {
     SkippedManual,
 }
 
+pub struct StaticAppInput<'a> {
+    pub name: &'a str,
+    pub domain: &'a DomainName,
+    pub path_prefix: Option<&'a str>,
+    pub target_host: &'a str,
+    pub target_port: u16,
+    pub timeout_ms: Option<u64>,
+    pub cors_enabled: bool,
+    pub basic_auth_user: Option<&'a str>,
+    pub basic_auth_pass: Option<&'a str>,
+    pub spa_rewrite: bool,
+    pub listen_port: Option<u16>,
+}
+
 pub struct AppRepository {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) domain_suffix: String,
@@ -135,40 +149,26 @@ impl AppRepository {
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn insert_static(
-        &self,
-        name: &str,
-        domain: &DomainName,
-        path_prefix: Option<&str>,
-        target_host: &str,
-        target_port: u16,
-        timeout_ms: Option<u64>,
-        cors_enabled: bool,
-        basic_auth_user: Option<&str>,
-        basic_auth_pass: Option<&str>,
-        spa_rewrite: bool,
-        listen_port: Option<u16>,
-    ) -> anyhow::Result<AppSpec> {
+    pub fn insert_static(&self, input: &StaticAppInput) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
-        let path_prefix_db = path_prefix_to_db(path_prefix);
-        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+        let path_prefix_db = path_prefix_to_db(input.path_prefix);
+        let domain_db = domain_to_db(&input.domain.0, &self.domain_suffix);
         let app = AppSpec {
             id: AppId::new(),
-            name: name.to_string(),
+            name: input.name.to_string(),
             kind: AppKind::Static,
-            domain: domain.clone(),
-            path_prefix: path_prefix.map(ToOwned::to_owned),
+            domain: input.domain.clone(),
+            path_prefix: input.path_prefix.map(ToOwned::to_owned),
             target: BackendTarget::Tcp {
-                host: target_host.to_string(),
-                port: target_port,
+                host: input.target_host.to_string(),
+                port: input.target_port,
             },
-            timeout_ms,
-            cors_enabled,
-            basic_auth_user: basic_auth_user.map(ToOwned::to_owned),
-            basic_auth_pass: basic_auth_pass.map(ToOwned::to_owned),
-            spa_rewrite,
-            listen_port,
+            timeout_ms: input.timeout_ms,
+            cors_enabled: input.cors_enabled,
+            basic_auth_user: input.basic_auth_user.map(ToOwned::to_owned),
+            basic_auth_pass: input.basic_auth_pass.map(ToOwned::to_owned),
+            spa_rewrite: input.spa_rewrite,
+            listen_port: input.listen_port,
             tunnel_url: None,
             tunnel_exposed: false,
             tunnel_mode: TunnelMode::None,
@@ -191,17 +191,17 @@ impl AppRepository {
                 "static",
                 domain_db,
                 path_prefix_db,
-                target_host,
-                i64::from(target_port),
+                input.target_host,
+                i64::from(input.target_port),
                 app.timeout_ms.map(|v| v as i64),
                 if app.enabled { 1 } else { 0 },
                 app.created_at.unix_timestamp(),
                 app.updated_at.unix_timestamp(),
-                if cors_enabled { 1 } else { 0 },
-                basic_auth_user,
-                basic_auth_pass,
-                if spa_rewrite { 1 } else { 0 },
-                listen_port.map(|v| v as i64),
+                if input.cors_enabled { 1 } else { 0 },
+                input.basic_auth_user,
+                input.basic_auth_pass,
+                if input.spa_rewrite { 1 } else { 0 },
+                input.listen_port.map(|v| v as i64),
             ],
         );
 
@@ -354,107 +354,17 @@ impl AppRepository {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn upsert_static(
-        &self,
-        name: &str,
-        domain: &DomainName,
-        path_prefix: Option<&str>,
-        target_host: &str,
-        target_port: u16,
-        timeout_ms: Option<u64>,
-        cors_enabled: bool,
-        basic_auth_user: Option<&str>,
-        basic_auth_pass: Option<&str>,
-        spa_rewrite: bool,
-        listen_port: Option<u16>,
-        enabled: bool,
-    ) -> anyhow::Result<AppSpec> {
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        let conn = self.conn.lock();
-        let path_prefix_db = path_prefix_to_db(path_prefix);
-        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
-
-        let existing_id: Option<String> = conn
-            .query_row(
-                "SELECT id FROM apps WHERE domain = ?1 AND path_prefix = ?2",
-                params![domain_db, path_prefix_db],
-                |row| row.get(0),
-            )
-            .optional()?;
-
-        if let Some(id) = existing_id {
-            conn.execute(
-                "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, enabled = ?6, updated_at = ?7, scan_managed = 0, scan_source = NULL, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12 WHERE id = ?13",
-                params![
-                    name,
-                    path_prefix_db,
-                    target_host,
-                    i64::from(target_port),
-                    timeout_ms.map(|v| v as i64),
-                    if enabled { 1 } else { 0 },
-                    now,
-                    if cors_enabled { 1 } else { 0 },
-                    basic_auth_user,
-                    basic_auth_pass,
-                    if spa_rewrite { 1 } else { 0 },
-                    listen_port.map(|v| v as i64),
-                    id
-                ],
-            )?;
-        } else {
-            let created = AppId::new().0;
-            conn.execute(
-                "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![
-                    created,
-                    name,
-                    "static",
-                    domain_db,
-                    path_prefix_db,
-                    target_host,
-                    i64::from(target_port),
-                    timeout_ms.map(|v| v as i64),
-                    if enabled { 1 } else { 0 },
-                    now,
-                    now,
-                    if cors_enabled { 1 } else { 0 },
-                    basic_auth_user,
-                    basic_auth_pass,
-                    if spa_rewrite { 1 } else { 0 },
-                    listen_port.map(|v| v as i64),
-                ],
-            )?;
-        }
-
-        let suffix = &self.domain_suffix;
-        let app = Self::read_app_by_route(&conn, &domain_db, &path_prefix_db, suffix)?;
-        Ok(app)
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_scanned_static(
         &self,
-        name: &str,
-        domain: &DomainName,
-        path_prefix: Option<&str>,
-        target_host: &str,
-        target_port: u16,
+        input: &StaticAppInput,
         socket_path: Option<&str>,
-        timeout_ms: Option<u64>,
-        cors_enabled: bool,
-        basic_auth_user: Option<&str>,
-        basic_auth_pass: Option<&str>,
-        spa_rewrite: bool,
-        listen_port: Option<u16>,
         enabled: bool,
         source: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
-        let path_prefix_db = path_prefix_to_db(path_prefix);
-        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+        let path_prefix_db = path_prefix_to_db(input.path_prefix);
+        let domain_db = domain_to_db(&input.domain.0, &self.domain_suffix);
 
         let existing: Option<(String, i64)> = conn
             .query_row(
@@ -470,19 +380,19 @@ impl AppRepository {
                 conn.execute(
                     "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, socket_path = ?12, listen_port = ?13 WHERE id = ?14",
                     params![
-                        name,
+                        input.name,
                         path_prefix_db,
-                        target_host,
-                        i64::from(target_port),
-                        timeout_ms.map(|v| v as i64),
+                        input.target_host,
+                        i64::from(input.target_port),
+                        input.timeout_ms.map(|v| v as i64),
                         now,
                         source,
-                        if cors_enabled { 1 } else { 0 },
-                        basic_auth_user,
-                        basic_auth_pass,
-                        if spa_rewrite { 1 } else { 0 },
+                        if input.cors_enabled { 1 } else { 0 },
+                        input.basic_auth_user,
+                        input.basic_auth_pass,
+                        if input.spa_rewrite { 1 } else { 0 },
                         socket_path,
-                        listen_port.map(|v| v as i64),
+                        input.listen_port.map(|v| v as i64),
                         id
                     ],
                 )?;
@@ -495,23 +405,23 @@ impl AppRepository {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     params![
                         created,
-                        name,
+                        input.name,
                         "static",
                         domain_db,
                         path_prefix_db,
-                        target_host,
-                        i64::from(target_port),
-                        timeout_ms.map(|v| v as i64),
+                        input.target_host,
+                        i64::from(input.target_port),
+                        input.timeout_ms.map(|v| v as i64),
                         if enabled { 1 } else { 0 },
                         source,
                         now,
                         now,
-                        if cors_enabled { 1 } else { 0 },
-                        basic_auth_user,
-                        basic_auth_pass,
-                        if spa_rewrite { 1 } else { 0 },
+                        if input.cors_enabled { 1 } else { 0 },
+                        input.basic_auth_user,
+                        input.basic_auth_pass,
+                        if input.spa_rewrite { 1 } else { 0 },
                         socket_path,
-                        listen_port.map(|v| v as i64),
+                        input.listen_port.map(|v| v as i64),
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -704,7 +614,6 @@ impl AppRepository {
         Self::query_apps(&conn, true, &self.domain_suffix)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn update_settings(
         &self,
         app_id: &str,
@@ -1147,19 +1056,19 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());
 
-        repo.insert_static(
-            "myapp",
-            &domain,
-            None,
-            "127.0.0.1",
-            9001,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
-        )
+        repo.insert_static(&StaticAppInput {
+            name: "myapp",
+            domain: &domain,
+            path_prefix: None,
+            target_host: "127.0.0.1",
+            target_port: 9001,
+            timeout_ms: None,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            listen_port: None,
+        })
         .expect("insert");
         let apps = repo.list_enabled().expect("list");
         assert_eq!(apps.len(), 1);
@@ -1202,19 +1111,19 @@ mod tests {
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());
 
-        repo.insert_static(
-            "myapp",
-            &domain,
-            None,
-            "127.0.0.1",
-            9001,
-            None,
-            false,
-            None,
-            None,
-            false,
-            None,
-        )
+        repo.insert_static(&StaticAppInput {
+            name: "myapp",
+            domain: &domain,
+            path_prefix: None,
+            target_host: "127.0.0.1",
+            target_port: 9001,
+            timeout_ms: None,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            listen_port: None,
+        })
         .expect("insert");
 
         // Verify raw DB stores only prefix

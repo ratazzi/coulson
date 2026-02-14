@@ -9,7 +9,7 @@ use tracing::{debug, error, info};
 
 use crate::domain::{DomainName, TunnelMode};
 use crate::scanner;
-use crate::store::StoreError;
+use crate::store::{StaticAppInput, StoreError};
 use crate::tunnel;
 use crate::SharedState;
 
@@ -272,19 +272,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
 
-            match state.store.insert_static(
-                &params.name,
-                &domain,
-                path_prefix.as_deref(),
-                &params.target_host,
-                params.target_port,
-                params.timeout_ms,
-                params.cors_enabled,
-                params.basic_auth_user.as_deref(),
-                params.basic_auth_pass.as_deref(),
-                params.spa_rewrite,
-                params.listen_port,
-            ) {
+            match state.store.insert_static(&StaticAppInput {
+                name: &params.name,
+                domain: &domain,
+                path_prefix: path_prefix.as_deref(),
+                target_host: &params.target_host,
+                target_port: params.target_port,
+                timeout_ms: params.timeout_ms,
+                cors_enabled: params.cors_enabled,
+                basic_auth_user: params.basic_auth_user.as_deref(),
+                basic_auth_pass: params.basic_auth_pass.as_deref(),
+                spa_rewrite: params.spa_rewrite,
+                listen_port: params.listen_port,
+            }) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());

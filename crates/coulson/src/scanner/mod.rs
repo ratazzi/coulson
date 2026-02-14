@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use crate::domain::{AppKind, DomainName};
 use crate::process::ProviderRegistry;
-use crate::store::{domain_to_db, route_key, ScanUpsertResult};
+use crate::store::{domain_to_db, route_key, ScanUpsertResult, StaticAppInput};
 use crate::SharedState;
 
 #[derive(Debug, Deserialize)]
@@ -121,18 +121,20 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
             )?
         } else {
             state.store.upsert_scanned_static(
-                &app.name,
-                &app.domain,
-                app.path_prefix.as_deref(),
-                &app.target_host,
-                app.target_port,
+                &StaticAppInput {
+                    name: &app.name,
+                    domain: &app.domain,
+                    path_prefix: app.path_prefix.as_deref(),
+                    target_host: &app.target_host,
+                    target_port: app.target_port,
+                    timeout_ms: app.timeout_ms,
+                    cors_enabled: app.cors_enabled,
+                    basic_auth_user: app.basic_auth_user.as_deref(),
+                    basic_auth_pass: app.basic_auth_pass.as_deref(),
+                    spa_rewrite: app.spa_rewrite,
+                    listen_port: app.listen_port,
+                },
                 app.socket_path.as_deref(),
-                app.timeout_ms,
-                app.cors_enabled,
-                app.basic_auth_user.as_deref(),
-                app.basic_auth_pass.as_deref(),
-                app.spa_rewrite,
-                app.listen_port,
                 app.enabled,
                 "apps_root",
             )?
