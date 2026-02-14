@@ -474,23 +474,31 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 if *old_mode != new_mode || named_domain_changed {
                     let routing = routing_for_app(&app, state.listen_http.port());
 
-                    // Teardown old mode
+                    // Teardown old mode (best-effort: log errors and continue)
                     match old_mode {
                         TunnelMode::Quick => {
                             let _ = tunnel::stop_tunnel(&state.tunnels, &params.app_id);
-                            let _ = state.store.update_tunnel_url(&params.app_id, None);
-                            let _ = state
+                            if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
+                                tracing::warn!(error = %e, "failed to clear tunnel_url during teardown");
+                            }
+                            if let Err(e) = state
                                 .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::None);
+                                .set_tunnel_mode(&params.app_id, TunnelMode::None)
+                            {
+                                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
+                            }
                         }
                         TunnelMode::Named => {
                             // Stop the tunnel connection but preserve credentials
                             // so the tunnel can be reconnected via `start` without re-creating CF resources.
                             let _ =
                                 tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
-                            let _ = state
+                            if let Err(e) = state
                                 .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::None);
+                                .set_tunnel_mode(&params.app_id, TunnelMode::None)
+                            {
+                                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
+                            }
                         }
                         _ => {}
                     }
@@ -507,11 +515,17 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             {
                                 Ok(hostname) => {
                                     let url = format!("https://{hostname}");
-                                    let _ =
-                                        state.store.update_tunnel_url(&params.app_id, Some(&url));
-                                    let _ = state
+                                    if let Err(e) =
+                                        state.store.update_tunnel_url(&params.app_id, Some(&url))
+                                    {
+                                        return internal_error(req.request_id, e.to_string());
+                                    }
+                                    if let Err(e) = state
                                         .store
-                                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick);
+                                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick)
+                                    {
+                                        return internal_error(req.request_id, e.to_string());
+                                    }
                                     return ok_response(
                                         req.request_id,
                                         json!({ "updated": true, "tunnel_mode": "quick", "tunnel_url": url }),
@@ -560,9 +574,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 {
                                     return internal_error(req.request_id, e.to_string());
                                 }
-                                let _ = state
+                                if let Err(e) = state
                                     .store
-                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named);
+                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named)
+                                {
+                                    return internal_error(req.request_id, e.to_string());
+                                }
                                 return ok_response(
                                     req.request_id,
                                     json!({
@@ -599,16 +616,21 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                     Ok(v) => v,
                                     Err(e) => return internal_error(req.request_id, e.to_string()),
                                 };
-                                let _ = state.store.update_app_tunnel(
+                                if let Err(e) = state.store.update_app_tunnel(
                                     &params.app_id,
                                     Some(&tunnel_id),
                                     Some(&tunnel_domain),
                                     None,
                                     Some(&creds_json),
-                                );
-                                let _ = state
+                                ) {
+                                    return internal_error(req.request_id, e.to_string());
+                                }
+                                if let Err(e) = state
                                     .store
-                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named);
+                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named)
+                                {
+                                    return internal_error(req.request_id, e.to_string());
+                                }
 
                                 return ok_response(
                                     req.request_id,
@@ -730,16 +752,21 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 Ok(v) => v,
                                 Err(e) => return internal_error(req.request_id, e.to_string()),
                             };
-                            let _ = state.store.update_app_tunnel(
+                            if let Err(e) = state.store.update_app_tunnel(
                                 &params.app_id,
                                 Some(&tunnel_id),
                                 Some(&tunnel_domain),
                                 dns_record_id.as_deref(),
                                 Some(&creds_json),
-                            );
-                            let _ = state
+                            ) {
+                                return internal_error(req.request_id, e.to_string());
+                            }
+                            if let Err(e) = state
                                 .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::Named);
+                                .set_tunnel_mode(&params.app_id, TunnelMode::Named)
+                            {
+                                return internal_error(req.request_id, e.to_string());
+                            }
 
                             return ok_response(
                                 req.request_id,
@@ -754,7 +781,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                         }
                         // None / Global — teardown already done above, just set mode
                         _ => {
-                            let _ = state.store.set_tunnel_mode(&params.app_id, new_mode);
+                            if let Err(e) = state.store.set_tunnel_mode(&params.app_id, new_mode) {
+                                return internal_error(req.request_id, e.to_string());
+                            }
                             return ok_response(
                                 req.request_id,
                                 json!({ "updated": true, "tunnel_mode": new_mode.as_str() }),
@@ -913,9 +942,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     if let Err(e) = state.store.update_tunnel_url(&params.app_id, Some(&url)) {
                         return internal_error(req.request_id, e.to_string());
                     }
-                    let _ = state
+                    if let Err(e) = state
                         .store
-                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick);
+                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick)
+                    {
+                        return internal_error(req.request_id, e.to_string());
+                    }
                     Ok(json!({ "tunnel_url": url, "hostname": hostname }))
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
@@ -934,9 +966,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
                         return internal_error(req.request_id, e.to_string());
                     }
-                    let _ = state
+                    if let Err(e) = state
                         .store
-                        .set_tunnel_mode(&params.app_id, TunnelMode::None);
+                        .set_tunnel_mode(&params.app_id, TunnelMode::None)
+                    {
+                        return internal_error(req.request_id, e.to_string());
+                    }
                     Ok(json!({ "stopped": true }))
                 }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
@@ -1090,10 +1125,16 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             }
 
-            // Clear stored credentials
-            let _ = state.store.delete_setting("named_tunnel.credentials");
-            let _ = state.store.delete_setting("named_tunnel.domain");
-            let _ = state.store.delete_setting("named_tunnel.account_id");
+            // Clear stored credentials (best-effort during teardown)
+            for key in [
+                "named_tunnel.credentials",
+                "named_tunnel.domain",
+                "named_tunnel.account_id",
+            ] {
+                if let Err(e) = state.store.delete_setting(key) {
+                    tracing::warn!(error = %e, key, "failed to delete setting during teardown");
+                }
+            }
 
             Ok(json!({ "torn_down": true }))
         }
@@ -1407,9 +1448,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             ) {
                 return internal_error(req.request_id, e.to_string());
             }
-            let _ = state
+            if let Err(e) = state
                 .store
-                .set_tunnel_mode(&params.app_id, TunnelMode::Named);
+                .set_tunnel_mode(&params.app_id, TunnelMode::Named)
+            {
+                return internal_error(req.request_id, e.to_string());
+            }
 
             let cname_target = format!("{tunnel_id}.cfargotunnel.com");
             Ok(json!({
@@ -1471,15 +1515,23 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             // Stop running tunnel connection (ignore if not running)
             let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
 
+            let mut warnings: Vec<String> = Vec::new();
+
             // Delete DNS record if auto-created
             if let Some(dns_id) = &app.app_tunnel_dns_id {
-                // Find zone_id from the domain
                 if let Some(domain) = &app.app_tunnel_domain {
-                    if let Ok(zone_id) = tunnel::named::find_zone_id(&api_token, domain).await {
-                        if let Err(e) =
-                            tunnel::named::delete_dns_record(&api_token, &zone_id, dns_id).await
-                        {
-                            error!(error = %e, "failed to delete DNS record, continuing teardown");
+                    match tunnel::named::find_zone_id(&api_token, domain).await {
+                        Ok(zone_id) => {
+                            if let Err(e) =
+                                tunnel::named::delete_dns_record(&api_token, &zone_id, dns_id).await
+                            {
+                                error!(error = %e, "failed to delete DNS record, continuing teardown");
+                                warnings.push(format!("DNS record deletion failed: {e}"));
+                            }
+                        }
+                        Err(e) => {
+                            error!(error = %e, "failed to find zone for DNS cleanup, continuing teardown");
+                            warnings.push(format!("DNS zone lookup failed: {e}"));
                         }
                     }
                 }
@@ -1490,6 +1542,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await
             {
                 error!(error = %e, "failed to delete CF tunnel, continuing teardown");
+                warnings.push(format!("CF tunnel deletion failed: {e}"));
             }
 
             // Clear tunnel fields in DB
@@ -1499,11 +1552,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             {
                 return internal_error(req.request_id, e.to_string());
             }
-            let _ = state
+            if let Err(e) = state
                 .store
-                .set_tunnel_mode(&params.app_id, TunnelMode::None);
+                .set_tunnel_mode(&params.app_id, TunnelMode::None)
+            {
+                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
+                warnings.push(format!("failed to reset tunnel_mode: {e}"));
+            }
 
-            Ok(json!({ "torn_down": true }))
+            if warnings.is_empty() {
+                Ok(json!({ "torn_down": true }))
+            } else {
+                Ok(json!({ "torn_down": true, "partial": true, "warnings": warnings }))
+            }
         }
         "tunnel.app_status" => {
             let params: AppIdParams = match serde_json::from_value(req.params) {
