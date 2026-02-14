@@ -176,25 +176,50 @@ async fn tls_connect(
     Ok(tls_stream)
 }
 
+const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+const INITIAL_BACKOFF_SECS: u64 = 2;
+const MAX_BACKOFF_SECS: u64 = 60;
+
 /// Run a single tunnel connection to Cloudflare edge with reconnection.
+/// Gives up after MAX_CONSECUTIVE_ERRORS consecutive failures.
+/// A successful connection (even if later closed) resets the counter.
 pub async fn run_tunnel_connection(
     credentials: &TunnelCredentials,
     routing: TunnelRouting,
     conn_index: u8,
 ) -> anyhow::Result<()> {
     let tls_config = build_tls_config();
+    let mut consecutive_errors: u32 = 0;
 
     loop {
         match try_connect(credentials, &routing, conn_index, &tls_config).await {
             Ok(()) => {
+                consecutive_errors = 0;
                 info!("tunnel connection closed normally, reconnecting...");
             }
             Err(err) => {
-                error!(error = %err, "tunnel connection error, reconnecting...");
+                consecutive_errors += 1;
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                    error!(
+                        error = %err,
+                        attempts = consecutive_errors,
+                        "tunnel connection failed, giving up"
+                    );
+                    return Err(err);
+                }
+                error!(
+                    error = %err,
+                    attempt = consecutive_errors,
+                    "tunnel connection error, reconnecting..."
+                );
             }
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        let backoff = std::cmp::min(
+            INITIAL_BACKOFF_SECS * 2u64.saturating_pow(consecutive_errors.saturating_sub(1)),
+            MAX_BACKOFF_SECS,
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
     }
 }
 
