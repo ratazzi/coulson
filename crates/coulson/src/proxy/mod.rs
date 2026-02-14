@@ -72,8 +72,8 @@ struct ProxyCtx {
     target: Option<BackendTarget>,
     timeout_ms: Option<u64>,
     cors_enabled: bool,
-    #[allow(dead_code)]
     spa_rewrite: bool,
+    is_upgrade: bool,
 }
 
 #[async_trait]
@@ -161,6 +161,7 @@ impl ProxyHttp for BridgeProxy {
         ctx.timeout_ms = route.timeout_ms;
         ctx.cors_enabled = route.cors_enabled;
         ctx.spa_rewrite = route.spa_rewrite;
+        ctx.is_upgrade = session.req_header().headers.get("upgrade").is_some();
         Ok(false)
     }
 
@@ -180,8 +181,10 @@ impl ProxyHttp for BridgeProxy {
                     let timeout = Duration::from_millis(timeout_ms);
                     peer.options.connection_timeout = Some(timeout);
                     peer.options.total_connection_timeout = Some(timeout);
-                    peer.options.read_timeout = Some(timeout);
-                    peer.options.idle_timeout = Some(timeout);
+                    if !ctx.is_upgrade {
+                        peer.options.read_timeout = Some(timeout);
+                        peer.options.idle_timeout = Some(timeout);
+                    }
                 }
                 Ok(peer)
             }
@@ -191,8 +194,10 @@ impl ProxyHttp for BridgeProxy {
                     let timeout = Duration::from_millis(timeout_ms);
                     peer.options.connection_timeout = Some(timeout);
                     peer.options.total_connection_timeout = Some(timeout);
-                    peer.options.read_timeout = Some(timeout);
-                    peer.options.idle_timeout = Some(timeout);
+                    if !ctx.is_upgrade {
+                        peer.options.read_timeout = Some(timeout);
+                        peer.options.idle_timeout = Some(timeout);
+                    }
                 }
                 Ok(Box::new(peer))
             }
@@ -384,6 +389,7 @@ impl ProxyHttp for DedicatedProxy {
         ctx.timeout_ms = route.timeout_ms;
         ctx.cors_enabled = route.cors_enabled;
         ctx.spa_rewrite = route.spa_rewrite;
+        ctx.is_upgrade = session.req_header().headers.get("upgrade").is_some();
         Ok(false)
     }
 
@@ -403,8 +409,10 @@ impl ProxyHttp for DedicatedProxy {
                     let timeout = Duration::from_millis(timeout_ms);
                     peer.options.connection_timeout = Some(timeout);
                     peer.options.total_connection_timeout = Some(timeout);
-                    peer.options.read_timeout = Some(timeout);
-                    peer.options.idle_timeout = Some(timeout);
+                    if !ctx.is_upgrade {
+                        peer.options.read_timeout = Some(timeout);
+                        peer.options.idle_timeout = Some(timeout);
+                    }
                 }
                 Ok(peer)
             }
@@ -414,8 +422,10 @@ impl ProxyHttp for DedicatedProxy {
                     let timeout = Duration::from_millis(timeout_ms);
                     peer.options.connection_timeout = Some(timeout);
                     peer.options.total_connection_timeout = Some(timeout);
-                    peer.options.read_timeout = Some(timeout);
-                    peer.options.idle_timeout = Some(timeout);
+                    if !ctx.is_upgrade {
+                        peer.options.read_timeout = Some(timeout);
+                        peer.options.idle_timeout = Some(timeout);
+                    }
                 }
                 Ok(Box::new(peer))
             }
