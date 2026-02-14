@@ -113,10 +113,10 @@ fn build_ca_params() -> anyhow::Result<CertificateParams> {
     params.key_usages.push(KeyUsagePurpose::KeyCertSign);
     params.key_usages.push(KeyUsagePurpose::CrlSign);
 
-    // 10 years
+    const CA_VALIDITY_DAYS: i64 = 3650; // 10 years
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now;
-    params.not_after = now + time::Duration::days(3650);
+    params.not_after = now + time::Duration::days(CA_VALIDITY_DAYS);
 
     Ok(params)
 }
@@ -141,10 +141,10 @@ fn generate_server_cert(
         SanType::DnsName(domain_suffix.to_string().try_into()?),
     ];
 
-    // 1 year
+    const SERVER_CERT_VALIDITY_DAYS: i64 = 365; // 1 year
     let now = time::OffsetDateTime::now_utc();
     params.not_before = now;
-    params.not_after = now + time::Duration::days(365);
+    params.not_after = now + time::Duration::days(SERVER_CERT_VALIDITY_DAYS);
 
     let cert = params.signed_by(&server_key, &issuer)?;
     // Full chain: server cert + CA cert (so clients can verify without having CA pre-installed)

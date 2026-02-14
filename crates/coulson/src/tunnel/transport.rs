@@ -238,10 +238,11 @@ async fn try_connect(
 
     let tls_stream = tls_connect(*edge_addr, tls_config.clone()).await?;
 
+    const H2_WINDOW_SIZE: u32 = 1 << 20; // 1MB, matching cloudflared
     let mut h2_conn = server::Builder::new()
         .max_concurrent_streams(u32::MAX)
-        .initial_window_size(1 << 20) // 1MB, matching cloudflared
-        .max_frame_size(1 << 20) // 1MB
+        .initial_window_size(H2_WINDOW_SIZE)
+        .max_frame_size(H2_WINDOW_SIZE)
         .handshake(tls_stream)
         .await
         .context("HTTP/2 handshake failed")?;

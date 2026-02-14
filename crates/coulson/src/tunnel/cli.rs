@@ -83,15 +83,19 @@ async fn extract_hostname(
     let reader = BufReader::new(stderr);
     let mut lines = reader.lines();
 
-    let result = timeout(Duration::from_secs(30), async {
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(m) = re.find(&line) {
-                let hostname = m.as_str().strip_prefix("https://").unwrap().to_string();
-                return Ok((hostname, lines));
+    const CLOUDFLARED_STARTUP_TIMEOUT_SECS: u64 = 30;
+    let result = timeout(
+        Duration::from_secs(CLOUDFLARED_STARTUP_TIMEOUT_SECS),
+        async {
+            while let Ok(Some(line)) = lines.next_line().await {
+                if let Some(m) = re.find(&line) {
+                    let hostname = m.as_str().strip_prefix("https://").unwrap().to_string();
+                    return Ok((hostname, lines));
+                }
             }
-        }
-        bail!("cloudflared exited without providing a tunnel URL")
-    })
+            bail!("cloudflared exited without providing a tunnel URL")
+        },
+    )
     .await;
 
     match result {

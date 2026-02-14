@@ -177,7 +177,12 @@ impl ProcessManager {
             .spawn()
             .with_context(|| format!("failed to spawn {} for {app_id}", spec.command.display()))?;
 
-        provider::wait_for_uds_ready(&spec.socket_path, Duration::from_secs(30)).await?;
+        const UDS_READY_TIMEOUT_SECS: u64 = 30;
+        provider::wait_for_uds_ready(
+            &spec.socket_path,
+            Duration::from_secs(UDS_READY_TIMEOUT_SECS),
+        )
+        .await?;
 
         let path_str = spec.socket_path.to_string_lossy().to_string();
         let now = Instant::now();

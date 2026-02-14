@@ -176,7 +176,8 @@ pub async fn wait_for_uds_ready(path: &Path, timeout: Duration) -> Result<()> {
                         path.display()
                     );
                 }
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                const UDS_POLL_INTERVAL_MS: u64 = 100;
+                tokio::time::sleep(Duration::from_millis(UDS_POLL_INTERVAL_MS)).await;
             }
         }
     }
