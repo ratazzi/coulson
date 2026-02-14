@@ -76,7 +76,9 @@ pub async fn create_named_tunnel(
         anyhow::bail!("failed to create named tunnel: {msg}");
     }
 
-    let result = body.result.unwrap();
+    let result = body
+        .result
+        .ok_or_else(|| anyhow::anyhow!("CF API returned success but no result body"))?;
     let credentials = TunnelCredentials {
         tunnel_id: result.id.clone(),
         account_tag: account_id.to_string(),
@@ -225,7 +227,11 @@ pub async fn create_dns_cname(
         anyhow::bail!("failed to create DNS CNAME: {msg}");
     }
 
-    Ok(body.result.unwrap().id)
+    let record_id = body
+        .result
+        .ok_or_else(|| anyhow::anyhow!("CF API returned success but no result body"))?
+        .id;
+    Ok(record_id)
 }
 
 /// Delete a DNS record by zone_id and record_id.

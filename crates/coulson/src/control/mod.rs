@@ -622,19 +622,14 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                     Ok(v) => v,
                                     Err(e) => return internal_error(req.request_id, e.to_string()),
                                 };
-                                if let Err(e) = state.store.update_app_tunnel(
+                                if let Err(e) = state.store.set_app_tunnel_state(
                                     &params.app_id,
                                     Some(&tunnel_id),
                                     Some(&tunnel_domain),
                                     None,
                                     Some(&creds_json),
+                                    TunnelMode::Named,
                                 ) {
-                                    return internal_error(req.request_id, e.to_string());
-                                }
-                                if let Err(e) = state
-                                    .store
-                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named)
-                                {
                                     return internal_error(req.request_id, e.to_string());
                                 }
 
@@ -748,19 +743,14 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 Ok(v) => v,
                                 Err(e) => return internal_error(req.request_id, e.to_string()),
                             };
-                            if let Err(e) = state.store.update_app_tunnel(
+                            if let Err(e) = state.store.set_app_tunnel_state(
                                 &params.app_id,
                                 Some(&tunnel_id),
                                 Some(&tunnel_domain),
                                 dns_record_id.as_deref(),
                                 Some(&creds_json),
+                                TunnelMode::Named,
                             ) {
-                                return internal_error(req.request_id, e.to_string());
-                            }
-                            if let Err(e) = state
-                                .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::Named)
-                            {
                                 return internal_error(req.request_id, e.to_string());
                             }
 
@@ -1366,19 +1356,14 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Ok(v) => v,
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
-            if let Err(e) = state.store.update_app_tunnel(
+            if let Err(e) = state.store.set_app_tunnel_state(
                 &params.app_id,
                 Some(&tunnel_id),
                 Some(&params.domain),
                 dns_record_id.as_deref(),
                 Some(&creds_json),
+                TunnelMode::Named,
             ) {
-                return internal_error(req.request_id, e.to_string());
-            }
-            if let Err(e) = state
-                .store
-                .set_tunnel_mode(&params.app_id, TunnelMode::Named)
-            {
                 return internal_error(req.request_id, e.to_string());
             }
 
@@ -1451,19 +1436,16 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 warnings.push(format!("CF tunnel deletion failed: {e}"));
             }
 
-            // Clear tunnel fields in DB
-            if let Err(e) = state
-                .store
-                .update_app_tunnel(&params.app_id, None, None, None, None)
-            {
+            // Clear tunnel fields in DB (atomic: tunnel fields + mode in one update)
+            if let Err(e) = state.store.set_app_tunnel_state(
+                &params.app_id,
+                None,
+                None,
+                None,
+                None,
+                TunnelMode::None,
+            ) {
                 return internal_error(req.request_id, e.to_string());
-            }
-            if let Err(e) = state
-                .store
-                .set_tunnel_mode(&params.app_id, TunnelMode::None)
-            {
-                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
-                warnings.push(format!("failed to reset tunnel_mode: {e}"));
             }
 
             if warnings.is_empty() {

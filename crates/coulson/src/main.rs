@@ -1915,7 +1915,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
             let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
 
             let tunnel_mode: TunnelMode = match mode.as_deref() {
-                Some(m @ ("quick" | "global" | "named")) => m.parse().unwrap(),
+                Some(m @ ("quick" | "global" | "named")) => m.parse().expect("validated mode"),
                 Some(m) => bail!("invalid mode: {m}, must be quick/global/named"),
                 None => {
                     // Auto-infer mode:

@@ -695,19 +695,21 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    pub fn update_app_tunnel(
+    pub fn set_app_tunnel_state(
         &self,
         app_id: &str,
         tunnel_id: Option<&str>,
         tunnel_domain: Option<&str>,
         dns_id: Option<&str>,
         creds_json: Option<&str>,
+        mode: TunnelMode,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
+        let exposed = if mode.is_exposed() { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
         let changed = conn.execute(
-            "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, updated_at = ?5 WHERE id = ?6",
-            params![tunnel_id, tunnel_domain, dns_id, creds_json, now, app_id],
+            "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, tunnel_mode = ?5, tunnel_exposed = ?6, updated_at = ?7 WHERE id = ?8",
+            params![tunnel_id, tunnel_domain, dns_id, creds_json, mode.as_str(), exposed, now, app_id],
         )?;
         Ok(changed > 0)
     }
