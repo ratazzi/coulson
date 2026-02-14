@@ -30,6 +30,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+           let icon = NSImage(contentsOf: iconURL)
+        {
+            NSApplication.shared.applicationIconImage = icon
+        }
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
@@ -39,9 +44,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         self.vm = vm
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem?.button?.image = NSImage(
-            systemSymbolName: "point.3.connected.trianglepath.dotted",
-            accessibilityDescription: "Coulson")
+        if let iconURL = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
+           let icon2xURL = Bundle.module.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+           let rep1x = NSImageRep(contentsOf: iconURL),
+           let rep2x = NSImageRep(contentsOf: icon2xURL)
+        {
+            let image = NSImage(size: NSSize(width: 18, height: 18))
+            rep1x.size = NSSize(width: 18, height: 18)
+            rep2x.size = NSSize(width: 18, height: 18)
+            image.addRepresentation(rep1x)
+            image.addRepresentation(rep2x)
+            image.isTemplate = true
+            statusItem?.button?.image = image
+        } else {
+            statusItem?.button?.image = NSImage(
+                systemSymbolName: "point.3.connected.trianglepath.dotted",
+                accessibilityDescription: "Coulson")
+        }
 
         let menu = NSMenu()
         menu.delegate = self

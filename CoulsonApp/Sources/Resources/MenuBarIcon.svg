@@ -1,0 +1,7 @@
+<svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+  <!-- Template image: pure black shape, macOS applies color automatically -->
+  <g transform="translate(9, 9) scale(1.5)">
+    <path d="M 3.75,-2.25 A 4.5,4.5 0 1,0 3.75,2.25 L 1.875,1.125 A 2.25,2.25 0 1,1 1.875,-1.125 Z"
+          fill="#000000"/>
+  </g>
+</svg>

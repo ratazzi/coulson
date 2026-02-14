@@ -12,7 +12,16 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "CoulsonApp",
-            path: "Sources"
+            path: "Sources",
+            exclude: [
+                "Resources/AppIcon.svg",
+                "Resources/MenuBarIcon.svg",
+            ],
+            resources: [
+                .copy("Resources/MenuBarIcon.png"),
+                .copy("Resources/MenuBarIcon@2x.png"),
+                .copy("Resources/AppIcon.png"),
+            ]
         ),
     ]
 )
