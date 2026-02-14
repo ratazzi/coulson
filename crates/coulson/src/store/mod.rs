@@ -41,6 +41,18 @@ pub struct AppRepository {
     pub(crate) domain_suffix: String,
 }
 
+fn check_insert(result: rusqlite::Result<usize>, app: AppSpec) -> anyhow::Result<AppSpec> {
+    match result {
+        Ok(_) => Ok(app),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            Err(StoreError::DomainConflict.into())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 impl AppRepository {
     pub fn new(path: &Path, domain_suffix: &str) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
@@ -205,15 +217,7 @@ impl AppRepository {
             ],
         );
 
-        match result {
-            Ok(_) => Ok(app),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(StoreError::DomainConflict.into())
-            }
-            Err(e) => Err(e.into()),
-        }
+        check_insert(result, app)
     }
 
     pub fn insert_static_dir(
@@ -272,15 +276,7 @@ impl AppRepository {
             ],
         );
 
-        match result {
-            Ok(_) => Ok(app),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(StoreError::DomainConflict.into())
-            }
-            Err(e) => Err(e.into()),
-        }
+        check_insert(result, app)
     }
 
     pub fn insert_unix_socket(
@@ -343,15 +339,7 @@ impl AppRepository {
             ],
         );
 
-        match result {
-            Ok(_) => Ok(app),
-            Err(rusqlite::Error::SqliteFailure(err, _))
-                if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-            {
-                Err(StoreError::DomainConflict.into())
-            }
-            Err(e) => Err(e.into()),
-        }
+        check_insert(result, app)
     }
 
     pub fn upsert_scanned_static(

@@ -211,6 +211,32 @@ async fn handle_client(stream: UnixStream, state: SharedState) -> anyhow::Result
     Ok(())
 }
 
+macro_rules! require_setting {
+    ($state:expr, $req:ident, $key:expr, $msg:expr) => {
+        match $state.store.get_setting($key) {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return render_err(
+                    $req.request_id,
+                    ControlError::InvalidParams($msg.to_string()),
+                );
+            }
+            Err(e) => return internal_error($req.request_id, e.to_string()),
+        }
+    };
+}
+
+macro_rules! parse_params {
+    ($req:ident) => {
+        match serde_json::from_value($req.params) {
+            Ok(v) => v,
+            Err(e) => {
+                return render_err($req.request_id, ControlError::InvalidParams(e.to_string()));
+            }
+        }
+    };
+}
+
 async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> ResponseEnvelope {
     let result = match req.method.as_str() {
         "health.ping" => Ok(json!({ "pong": true })),
@@ -222,12 +248,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(json!({ "apps": apps }))
         }
         "app.create_tcp" | "app.create_static" => {
-            let params: CreateTcpParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: CreateTcpParams = parse_params!(req);
 
             if params.name.trim().is_empty() {
                 return render_err(
@@ -300,12 +321,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "app.create_static_dir" => {
-            let params: CreateStaticDirParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: CreateStaticDirParams = parse_params!(req);
 
             if params.name.trim().is_empty() {
                 return render_err(
@@ -353,12 +369,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "app.create_unix_socket" => {
-            let params: CreateUnixSocketParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: CreateUnixSocketParams = parse_params!(req);
 
             if params.name.trim().is_empty() {
                 return render_err(
@@ -415,12 +426,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "app.update" => {
-            let params: UpdateSettingsParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: UpdateSettingsParams = parse_params!(req);
             match state.store.update_settings(
                 &params.app_id,
                 params.cors_enabled,
@@ -646,28 +652,18 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             // API-based: create tunnel via CF API
                             let auto_dns = params.app_tunnel_auto_dns.unwrap_or(false);
 
-                            let api_token = match state.store.get_setting("cf.api_token") {
-                                Ok(Some(v)) => v,
-                                _ => {
-                                    return render_err(
-                                        req.request_id,
-                                        ControlError::InvalidParams(
-                                            "CF credentials not configured, run tunnel.configure first".to_string(),
-                                        ),
-                                    );
-                                }
-                            };
-                            let account_id = match state.store.get_setting("cf.account_id") {
-                                Ok(Some(v)) => v,
-                                _ => {
-                                    return render_err(
-                                        req.request_id,
-                                        ControlError::InvalidParams(
-                                            "cf.account_id not configured".to_string(),
-                                        ),
-                                    );
-                                }
-                            };
+                            let api_token = require_setting!(
+                                state,
+                                req,
+                                "cf.api_token",
+                                "CF credentials not configured, run tunnel.configure first"
+                            );
+                            let account_id = require_setting!(
+                                state,
+                                req,
+                                "cf.account_id",
+                                "cf.account_id not configured"
+                            );
 
                             let tunnel_name = format!("coulson-{}", params.app_id);
                             let (credentials, tunnel_id) = match tunnel::named::create_named_tunnel(
@@ -796,12 +792,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(json!({ "updated": true }))
         }
         "app.delete" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
             match state.store.delete(&params.app_id) {
                 Ok(found) => {
                     if !found {
@@ -816,12 +807,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "app.start" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
             match state.store.set_enabled(&params.app_id, true) {
                 Ok(found) => {
                     if !found {
@@ -836,12 +822,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "app.stop" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
             match state.store.set_enabled(&params.app_id, false) {
                 Ok(found) => {
                     if !found {
@@ -879,12 +860,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(json!({ "processes": infos }))
         }
         "process.restart" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
             let app = match state.store.get_by_id(&params.app_id) {
                 Ok(Some(app)) => app,
                 Ok(None) => return render_err(req.request_id, ControlError::NotFound),
@@ -916,12 +892,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
         "tunnel.start" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
 
             // Look up the app to get its target port
             let app = match state.store.get_by_id(&params.app_id) {
@@ -954,12 +925,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "tunnel.stop" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
 
             match tunnel::stop_tunnel(&state.tunnels, &params.app_id) {
                 Ok(()) => {
@@ -982,12 +948,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(json!({ "tunnels": tunnels }))
         }
         "named_tunnel.setup" => {
-            let params: NamedTunnelSetupParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: NamedTunnelSetupParams = parse_params!(req);
 
             if params.domain.trim().is_empty() {
                 return render_err(
@@ -1073,12 +1034,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }))
         }
         "named_tunnel.teardown" => {
-            let params: NamedTunnelTeardownParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: NamedTunnelTeardownParams = parse_params!(req);
 
             // Disconnect if active (scope the lock to avoid holding across await)
             let active_handle = state.named_tunnel.lock().take();
@@ -1146,12 +1102,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            let params: NamedTunnelConnectParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: NamedTunnelConnectParams = parse_params!(req);
 
             // If token+domain provided, decode and persist before connecting
             if let (Some(token), Some(domain)) = (&params.token, &params.domain) {
@@ -1275,12 +1226,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "tunnel.configure" => {
-            let params: TunnelConfigureParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: TunnelConfigureParams = parse_params!(req);
             if params.api_token.trim().is_empty() || params.account_id.trim().is_empty() {
                 return render_err(
                     req.request_id,
@@ -1303,12 +1249,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(json!({ "configured": has_token && has_account }))
         }
         "tunnel.app_setup" => {
-            let params: AppTunnelSetupParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppTunnelSetupParams = parse_params!(req);
 
             if params.domain.trim().is_empty() {
                 return render_err(
@@ -1318,28 +1259,14 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
 
             // Read CF credentials from settings
-            let api_token = match state.store.get_setting("cf.api_token") {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams(
-                            "CF credentials not configured, run tunnel.configure first".to_string(),
-                        ),
-                    );
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
-            let account_id = match state.store.get_setting("cf.account_id") {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams("cf.account_id not configured".to_string()),
-                    );
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let api_token = require_setting!(
+                state,
+                req,
+                "cf.api_token",
+                "CF credentials not configured, run tunnel.configure first"
+            );
+            let account_id =
+                require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Look up app and get target port
             let app = match state.store.get_by_id(&params.app_id) {
@@ -1464,34 +1391,13 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }))
         }
         "tunnel.app_teardown" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
 
             // Read CF credentials
-            let api_token = match state.store.get_setting("cf.api_token") {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams("CF credentials not configured".to_string()),
-                    );
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
-            let account_id = match state.store.get_setting("cf.account_id") {
-                Ok(Some(v)) => v,
-                Ok(None) => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams("cf.account_id not configured".to_string()),
-                    );
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let api_token =
+                require_setting!(state, req, "cf.api_token", "CF credentials not configured");
+            let account_id =
+                require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Get app info
             let app = match state.store.get_by_id(&params.app_id) {
@@ -1567,12 +1473,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "tunnel.app_status" => {
-            let params: AppIdParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
+            let params: AppIdParams = parse_params!(req);
 
             let app = match state.store.get_by_id(&params.app_id) {
                 Ok(Some(app)) => app,
