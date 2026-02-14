@@ -211,6 +211,16 @@ async fn handle_client(stream: UnixStream, state: SharedState) -> anyhow::Result
     Ok(())
 }
 
+macro_rules! find_app {
+    ($state:expr, $req:ident, $app_id:expr) => {
+        match $state.store.get_by_id($app_id) {
+            Ok(Some(app)) => app,
+            Ok(None) => return render_err($req.request_id, ControlError::NotFound),
+            Err(e) => return internal_error($req.request_id, e.to_string()),
+        }
+    };
+}
+
 macro_rules! require_setting {
     ($state:expr, $req:ident, $key:expr, $msg:expr) => {
         match $state.store.get_setting($key) {
@@ -448,13 +458,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             // Handle tunnel_mode change
             if let Some(new_mode) = params.tunnel_mode {
-                let app = match state.store.get_by_id(&params.app_id) {
-                    Ok(Some(app)) => app,
-                    Ok(None) => {
-                        return render_err(req.request_id, ControlError::NotFound);
-                    }
-                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                };
+                let app = find_app!(state, req, &params.app_id);
 
                 let old_mode = &app.tunnel_mode;
 
@@ -851,11 +855,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "process.restart" => {
             let params: AppIdParams = parse_params!(req);
-            let app = match state.store.get_by_id(&params.app_id) {
-                Ok(Some(app)) => app,
-                Ok(None) => return render_err(req.request_id, ControlError::NotFound),
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let app = find_app!(state, req, &params.app_id);
             let (root, kind) = match &app.target {
                 crate::domain::BackendTarget::Managed { root, kind, .. } => {
                     (root.clone(), kind.clone())
@@ -885,13 +885,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             let params: AppIdParams = parse_params!(req);
 
             // Look up the app to get its target port
-            let app = match state.store.get_by_id(&params.app_id) {
-                Ok(Some(app)) => app,
-                Ok(None) => {
-                    return render_err(req.request_id, ControlError::NotFound);
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let app = find_app!(state, req, &params.app_id);
 
             let routing = routing_for_app(&app, state.listen_http.port());
 
@@ -1259,13 +1253,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Look up app and get target port
-            let app = match state.store.get_by_id(&params.app_id) {
-                Ok(Some(app)) => app,
-                Ok(None) => {
-                    return render_err(req.request_id, ControlError::NotFound);
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let app = find_app!(state, req, &params.app_id);
 
             let routing = routing_for_app(&app, state.listen_http.port());
 
@@ -1385,13 +1373,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Get app info
-            let app = match state.store.get_by_id(&params.app_id) {
-                Ok(Some(app)) => app,
-                Ok(None) => {
-                    return render_err(req.request_id, ControlError::NotFound);
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let app = find_app!(state, req, &params.app_id);
 
             let tunnel_id = match &app.app_tunnel_id {
                 Some(id) => id.clone(),
@@ -1457,13 +1439,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "tunnel.app_status" => {
             let params: AppIdParams = parse_params!(req);
 
-            let app = match state.store.get_by_id(&params.app_id) {
-                Ok(Some(app)) => app,
-                Ok(None) => {
-                    return render_err(req.request_id, ControlError::NotFound);
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
+            let app = find_app!(state, req, &params.app_id);
 
             let connected = state.app_tunnels.lock().contains_key(&params.app_id);
             let configured = app.app_tunnel_id.is_some();
