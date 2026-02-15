@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
@@ -13,86 +11,148 @@ use crate::scanner;
 use crate::SharedState;
 
 // ---------------------------------------------------------------------------
-// Tera template engine (compiled into the binary)
+// Tera template engine
 // ---------------------------------------------------------------------------
 
-static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
-    let mut tera = Tera::default();
-    tera.add_raw_templates(vec![
-        ("base.html", include_str!("templates/base.html")),
-        (
-            "pages/index.html",
-            include_str!("templates/pages/index.html"),
-        ),
-        (
-            "pages/warnings.html",
-            include_str!("templates/pages/warnings.html"),
-        ),
-        (
-            "pages/app_detail.html",
-            include_str!("templates/pages/app_detail.html"),
-        ),
-        (
-            "pages/not_found.html",
-            include_str!("templates/pages/not_found.html"),
-        ),
-        (
-            "partials/stats.html",
-            include_str!("templates/partials/stats.html"),
-        ),
-        (
-            "partials/app_table.html",
-            include_str!("templates/partials/app_table.html"),
-        ),
-        (
-            "partials/app_row.html",
-            include_str!("templates/partials/app_row.html"),
-        ),
-        (
-            "partials/empty_state.html",
-            include_str!("templates/partials/empty_state.html"),
-        ),
-        (
-            "partials/toast.html",
-            include_str!("templates/partials/toast.html"),
-        ),
-        (
-            "partials/detail/urls.html",
-            include_str!("templates/partials/detail/urls.html"),
-        ),
-        (
-            "partials/detail/info.html",
-            include_str!("templates/partials/detail/info.html"),
-        ),
-        (
-            "partials/detail/features.html",
-            include_str!("templates/partials/detail/features.html"),
-        ),
-        (
-            "partials/detail/tunnel.html",
-            include_str!("templates/partials/detail/tunnel.html"),
-        ),
-        (
-            "partials/detail/danger.html",
-            include_str!("templates/partials/detail/danger.html"),
-        ),
-        (
-            "pages/requests.html",
-            include_str!("templates/pages/requests.html"),
-        ),
-        (
-            "pages/request_detail.html",
-            include_str!("templates/pages/request_detail.html"),
-        ),
-        (
-            "partials/request_row.html",
-            include_str!("templates/partials/request_row.html"),
-        ),
-    ])
-    .expect("template parse error");
-    tera.autoescape_on(vec![".html"]);
-    tera
-});
+/// In debug builds, reload templates from disk on every request so you can
+/// edit HTML and refresh the browser without recompiling.
+/// In release builds, templates are compiled into the binary via include_str!.
+fn templates() -> &'static Tera {
+    #[cfg(debug_assertions)]
+    {
+        use std::path::Path;
+
+        // Tera glob relative to the crate source directory.
+        // CARGO_MANIFEST_DIR is set at compile time but the path stays valid
+        // as long as you run from a normal cargo build (not a relocated binary).
+        const TEMPLATE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/src/dashboard/templates");
+
+        // Leak a fresh Tera on every call so the returned reference is 'static.
+        // The tiny allocation is negligible for dev use.
+        let glob = format!("{}/**/*.html", TEMPLATE_DIR);
+        let mut tera = Tera::new(&glob).unwrap_or_else(|e| {
+            tracing::error!("template reload error: {e}");
+            Tera::default()
+        });
+        // Tera::new uses filesystem paths as template names; remap them to
+        // the short names used by the rest of the code (e.g. "pages/index.html").
+        let prefix = format!("{}/", TEMPLATE_DIR);
+        let renames: Vec<(String, Option<String>)> = tera
+            .get_template_names()
+            .filter_map(|name| {
+                let short = name.strip_prefix(&prefix)?;
+                Some((name.to_string(), Some(short.to_string())))
+            })
+            .collect();
+        if !renames.is_empty() {
+            // Re-read with short names by adding raw templates read from disk.
+            let pairs: Vec<(String, String)> = renames
+                .iter()
+                .filter_map(|(_long, short)| {
+                    let short = short.as_ref()?;
+                    let full_path = Path::new(TEMPLATE_DIR).join(short);
+                    std::fs::read_to_string(&full_path)
+                        .ok()
+                        .map(|c| (short.clone(), c))
+                })
+                .collect();
+            let raw: Vec<(&str, &str)> = pairs
+                .iter()
+                .map(|(n, c)| (n.as_str(), c.as_str()))
+                .collect();
+            let mut fresh = Tera::default();
+            fresh.add_raw_templates(raw).unwrap_or_else(|e| {
+                tracing::error!("template parse error: {e}");
+            });
+            fresh.autoescape_on(vec![".html"]);
+            return Box::leak(Box::new(fresh));
+        }
+        tera.autoescape_on(vec![".html"]);
+        Box::leak(Box::new(tera))
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        use std::sync::LazyLock;
+        static TEMPLATES: LazyLock<Tera> = LazyLock::new(|| {
+            let mut tera = Tera::default();
+            tera.add_raw_templates(vec![
+                ("base.html", include_str!("templates/base.html")),
+                (
+                    "pages/index.html",
+                    include_str!("templates/pages/index.html"),
+                ),
+                (
+                    "pages/warnings.html",
+                    include_str!("templates/pages/warnings.html"),
+                ),
+                (
+                    "pages/app_detail.html",
+                    include_str!("templates/pages/app_detail.html"),
+                ),
+                (
+                    "pages/not_found.html",
+                    include_str!("templates/pages/not_found.html"),
+                ),
+                (
+                    "partials/stats.html",
+                    include_str!("templates/partials/stats.html"),
+                ),
+                (
+                    "partials/app_table.html",
+                    include_str!("templates/partials/app_table.html"),
+                ),
+                (
+                    "partials/app_row.html",
+                    include_str!("templates/partials/app_row.html"),
+                ),
+                (
+                    "partials/empty_state.html",
+                    include_str!("templates/partials/empty_state.html"),
+                ),
+                (
+                    "partials/toast.html",
+                    include_str!("templates/partials/toast.html"),
+                ),
+                (
+                    "partials/detail/urls.html",
+                    include_str!("templates/partials/detail/urls.html"),
+                ),
+                (
+                    "partials/detail/info.html",
+                    include_str!("templates/partials/detail/info.html"),
+                ),
+                (
+                    "partials/detail/features.html",
+                    include_str!("templates/partials/detail/features.html"),
+                ),
+                (
+                    "partials/detail/tunnel.html",
+                    include_str!("templates/partials/detail/tunnel.html"),
+                ),
+                (
+                    "partials/detail/danger.html",
+                    include_str!("templates/partials/detail/danger.html"),
+                ),
+                (
+                    "pages/requests.html",
+                    include_str!("templates/pages/requests.html"),
+                ),
+                (
+                    "pages/request_detail.html",
+                    include_str!("templates/pages/request_detail.html"),
+                ),
+                (
+                    "partials/request_row.html",
+                    include_str!("templates/partials/request_row.html"),
+                ),
+            ])
+            .expect("template parse error");
+            tera.autoescape_on(vec![".html"]);
+            tera
+        });
+        &TEMPLATES
+    }
+}
 
 // ---------------------------------------------------------------------------
 // View models (serializable structs for template context)
@@ -363,7 +423,7 @@ fn render_page(
     ctx.insert("title", "Coulson");
     ctx.insert("active_nav", "");
     customize(&mut ctx);
-    TEMPLATES
+    templates()
         .render(template, &ctx)
         .unwrap_or_else(|e| format!("<html><body><pre>Template error: {e}</pre></body></html>"))
 }
@@ -375,7 +435,7 @@ fn render_not_found(state: &SharedState) -> String {
 }
 
 fn render_partial(template: &str, ctx: &Context) -> String {
-    TEMPLATES.render(template, ctx).unwrap_or_default()
+    templates().render(template, ctx).unwrap_or_default()
 }
 
 fn stats_context(apps: &[AppSpec]) -> Context {
@@ -1256,7 +1316,7 @@ mod tests {
     #[test]
     fn templates_parse_correctly() {
         // Force initialization — will panic if any template has syntax errors
-        let _ = &*TEMPLATES;
+        let _ = templates();
     }
 
     #[test]
