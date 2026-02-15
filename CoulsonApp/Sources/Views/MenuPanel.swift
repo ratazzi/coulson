@@ -19,6 +19,14 @@ enum MenuBuilder {
         dashboard.target = target
         menu.addItem(dashboard)
 
+        let webDashboard = NSMenuItem(
+            title: "Open Web Dashboard", action: #selector(AppDelegate.openWebDashboard),
+            keyEquivalent: "D")
+        webDashboard.image = NSImage(
+            systemSymbolName: "globe", accessibilityDescription: nil)
+        webDashboard.target = target
+        menu.addItem(webDashboard)
+
         menu.addItem(.separator())
 
         // Daemon status (production mode only)

@@ -108,6 +108,16 @@ extension AppDelegate {
         }
     }
 
+    @objc func openWebDashboard() {
+        Task { @MainActor in
+            guard let vm = self.vm, let port = vm.proxyPort else { return }
+            let urlStr = "http://\(vm.domainSuffix):\(port)/"
+            if let url = URL(string: urlStr) {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
     @objc func toggleApp(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app
