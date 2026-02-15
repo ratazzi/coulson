@@ -92,6 +92,7 @@ struct ProxyCtx {
     inspect_status: Option<u16>,
     inspect_resp_headers: Option<String>,
     inspect_resp_body: Option<Vec<u8>>,
+    inspect_tx: Option<tokio::sync::broadcast::Sender<crate::InspectEvent>>,
 }
 
 #[async_trait]
@@ -192,6 +193,7 @@ impl ProxyHttp for BridgeProxy {
             ctx.inspect_app_id = route.app_id.clone();
             ctx.inspect_store = Some(self.shared.store.clone());
             ctx.inspect_max_requests = self.shared.inspect_max_requests;
+            ctx.inspect_tx = Some(self.shared.inspect_tx.clone());
             ctx.inspect_start = Some(std::time::Instant::now());
             ctx.inspect_method = Some(session.req_header().method.to_string());
             let uri = &session.req_header().uri;
@@ -410,6 +412,7 @@ struct DedicatedProxy {
     rules: Arc<RwLock<Vec<RouteRule>>>,
     store: std::sync::Arc<crate::store::AppRepository>,
     inspect_max_requests: usize,
+    inspect_tx: tokio::sync::broadcast::Sender<crate::InspectEvent>,
 }
 
 #[async_trait]
@@ -464,6 +467,7 @@ impl ProxyHttp for DedicatedProxy {
             ctx.inspect_app_id = route.app_id.clone();
             ctx.inspect_store = Some(self.store.clone());
             ctx.inspect_max_requests = self.inspect_max_requests;
+            ctx.inspect_tx = Some(self.inspect_tx.clone());
             ctx.inspect_start = Some(std::time::Instant::now());
             ctx.inspect_method = Some(session.req_header().method.to_string());
             let uri = &session.req_header().uri;
@@ -599,6 +603,7 @@ pub fn run_dedicated_proxy_blocking(
     rules: Arc<RwLock<Vec<RouteRule>>>,
     store: std::sync::Arc<crate::store::AppRepository>,
     inspect_max_requests: usize,
+    inspect_tx: tokio::sync::broadcast::Sender<crate::InspectEvent>,
 ) -> anyhow::Result<()> {
     let bind = format!("0.0.0.0:{port}");
     let mut server = Server::new(None)?;
@@ -610,6 +615,7 @@ pub fn run_dedicated_proxy_blocking(
             rules,
             store,
             inspect_max_requests,
+            inspect_tx,
         },
     );
     service.add_tcp(&bind);
@@ -1278,6 +1284,19 @@ fn inspect_capture_resp_body(ctx: &mut ProxyCtx, body: &Option<Bytes>, end_of_st
             response_body: ctx.inspect_resp_body.take(),
             response_time_ms: elapsed,
         };
+        if let Some(tx) = ctx.inspect_tx.take() {
+            let event = crate::InspectEvent {
+                app_id: captured.app_id.clone(),
+                request_id: captured.id.clone(),
+                method: captured.method.clone(),
+                path: captured.path.clone(),
+                query_string: captured.query_string.clone(),
+                status_code: captured.status_code,
+                response_time_ms: captured.response_time_ms,
+                timestamp: captured.timestamp,
+            };
+            let _ = tx.send(event);
+        }
         if let Some(store) = ctx.inspect_store.take() {
             let max = ctx.inspect_max_requests;
             tokio::spawn(async move {

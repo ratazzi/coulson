@@ -38,6 +38,18 @@ use crate::rpc_client::RpcClient;
 use crate::share::ShareSigner;
 use crate::store::AppRepository;
 
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct InspectEvent {
+    pub app_id: String,
+    pub request_id: String,
+    pub method: String,
+    pub path: String,
+    pub query_string: Option<String>,
+    pub status_code: Option<u16>,
+    pub response_time_ms: Option<u64>,
+    pub timestamp: i64,
+}
+
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
 
 #[derive(Clone)]
@@ -76,6 +88,7 @@ pub struct SharedState {
     pub lan_access: bool,
     pub share_signer: Arc<ShareSigner>,
     pub inspect_max_requests: usize,
+    pub inspect_tx: broadcast::Sender<InspectEvent>,
 }
 
 impl SharedState {
@@ -323,6 +336,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
     let share_signer = Arc::new(ShareSigner::load_or_generate(&store)?);
 
     let (route_tx, _rx) = broadcast::channel(32);
+    let (inspect_tx, _) = broadcast::channel(256);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
     let registry = Arc::new(process::default_registry());
     let process_manager = process::new_process_manager(idle_timeout, Arc::clone(&registry));
@@ -344,6 +358,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         lan_access: cfg.lan_access,
         share_signer,
         inspect_max_requests: cfg.inspect_max_requests,
+        inspect_tx,
     })
 }
 
@@ -954,9 +969,11 @@ fn sync_dedicated_proxies(
         let port = *port;
         let store = state.store.clone();
         let max_requests = state.inspect_max_requests;
+        let inspect_tx = state.inspect_tx.clone();
         info!(port, "starting dedicated proxy");
         let handle = tokio::task::spawn_blocking(move || {
-            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, rules, store, max_requests)
+            if let Err(err) =
+                proxy::run_dedicated_proxy_blocking(port, rules, store, max_requests, inspect_tx)
             {
                 error!(error = %err, port, "dedicated proxy exited with error");
             }

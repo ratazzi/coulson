@@ -5,6 +5,7 @@ use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use serde::Serialize;
 use tera::{Context, Tera};
+use tokio::sync::broadcast;
 
 use crate::domain::{AppKind, AppSpec, BackendTarget};
 use crate::runtime;
@@ -196,6 +197,10 @@ pub async fn handle(session: &mut Session, state: &SharedState) -> Result<()> {
             if path == "/warnings" {
                 return page_warnings(session, state).await;
             }
+            // /apps/{id}/requests/stream (SSE)
+            if let Some(id) = parse_app_requests_stream(&path) {
+                return sse_requests(session, state, id).await;
+            }
             // /apps/{id}/requests/{req_id}
             if let Some((app_id, req_id)) = parse_app_request_detail(&path) {
                 return page_request_detail(session, state, app_id, req_id).await;
@@ -318,6 +323,20 @@ fn parse_app_requests_clear(path: &str) -> Option<&str> {
         return None;
     }
     if tail == "requests/clear" {
+        Some(id)
+    } else {
+        None
+    }
+}
+
+/// Match `/apps/{id}/requests/stream`
+fn parse_app_requests_stream(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/apps/")?;
+    let (id, tail) = rest.split_once('/')?;
+    if id.is_empty() {
+        return None;
+    }
+    if tail == "requests/stream" {
         Some(id)
     } else {
         None
@@ -644,6 +663,12 @@ async fn action_toggle_bool(
 // ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
+struct HeaderPair {
+    name: String,
+    value: String,
+}
+
+#[derive(Serialize)]
 struct RequestView {
     id: String,
     method: String,
@@ -659,6 +684,8 @@ struct RequestView {
     request_body_display: Option<String>,
     response_headers_display: Option<String>,
     response_body_display: Option<String>,
+    request_headers_list: Vec<HeaderPair>,
+    response_headers_list: Vec<HeaderPair>,
 }
 
 impl RequestView {
@@ -702,6 +729,12 @@ impl RequestView {
             .as_ref()
             .map(|h| format_headers_json(h));
         let response_body_display = req.response_body.as_ref().map(|b| body_to_display(b));
+        let request_headers_list = parse_headers_list(&req.request_headers);
+        let response_headers_list = req
+            .response_headers
+            .as_ref()
+            .map(|h| parse_headers_list(h))
+            .unwrap_or_default();
 
         Self {
             id: req.id.clone(),
@@ -717,6 +750,8 @@ impl RequestView {
             request_body_display,
             response_headers_display,
             response_body_display,
+            request_headers_list,
+            response_headers_list,
         }
     }
 }
@@ -734,6 +769,17 @@ fn format_headers_json(json_str: &str) -> String {
     let mut lines: Vec<String> = headers.iter().map(|(k, v)| format!("{k}: {v}")).collect();
     lines.sort();
     lines.join("\n")
+}
+
+fn parse_headers_list(json_str: &str) -> Vec<HeaderPair> {
+    let headers: std::collections::HashMap<String, String> =
+        serde_json::from_str(json_str).unwrap_or_default();
+    let mut pairs: Vec<HeaderPair> = headers
+        .into_iter()
+        .map(|(name, value)| HeaderPair { name, value })
+        .collect();
+    pairs.sort_by(|a, b| a.name.cmp(&b.name));
+    pairs
 }
 
 fn body_to_display(bytes: &[u8]) -> String {
@@ -981,6 +1027,43 @@ async fn show_replay_error(
         ctx.insert("replay", &replay_view);
     });
     write_html(session, 200, &page).await
+}
+
+// ---------------------------------------------------------------------------
+// SSE handler
+// ---------------------------------------------------------------------------
+
+async fn sse_requests(session: &mut Session, state: &SharedState, app_id: &str) -> Result<()> {
+    let mut resp = ResponseHeader::build(200, None)?;
+    resp.insert_header("content-type", "text/event-stream")?;
+    resp.insert_header("cache-control", "no-cache")?;
+    resp.insert_header("x-accel-buffering", "no")?;
+    session.write_response_header(Box::new(resp), false).await?;
+
+    let mut rx = state.inspect_tx.subscribe();
+    let app_id = app_id.to_string();
+
+    loop {
+        match rx.recv().await {
+            Ok(event) if event.app_id == app_id => {
+                let data = serde_json::to_string(&event).unwrap_or_default();
+                let sse = format!("data: {data}\n\n");
+                if session
+                    .write_response_body(Some(Bytes::from(sse)), false)
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Ok(_) => continue,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => break,
+        }
+    }
+
+    let _ = session.write_response_body(Some(Bytes::new()), true).await;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
