@@ -45,7 +45,13 @@ pub fn ensure_runtime_paths(cfg: &CoulsonConfig) -> anyhow::Result<()> {
 }
 
 pub async fn wait_for_shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT handler");
+    tokio::select! {
+        _ = sigterm.recv() => { tracing::info!("received SIGTERM, shutting down"); }
+        _ = sigint.recv() => { tracing::info!("received SIGINT, shutting down"); }
+    }
 }
 
 #[derive(Serialize)]
