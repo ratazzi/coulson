@@ -8,8 +8,10 @@ class AppRecordBox: NSObject {
 
 @MainActor
 enum MenuBuilder {
-    static func build(menu: NSMenu, vm: CoulsonViewModel, target: AppDelegate) {
-        // Open Dashboard ⌘D
+    static func build(
+        menu: NSMenu, vm: CoulsonViewModel, updater: UpdaterController?, target: AppDelegate
+    ) {
+        // Open Dashboard
         let dashboard = NSMenuItem(
             title: "Open Dashboard", action: #selector(AppDelegate.openDashboard),
             keyEquivalent: "d")
@@ -18,6 +20,54 @@ enum MenuBuilder {
         menu.addItem(dashboard)
 
         menu.addItem(.separator())
+
+        // Daemon status (production mode only)
+        if DaemonManager.isProductionApp {
+            let dm = vm.daemonManager
+            if dm.isDaemonRunning {
+                let status = NSMenuItem(
+                    title: "Daemon: Running (v\(dm.daemonVersion ?? "?"))",
+                    action: nil, keyEquivalent: "")
+                status.image = statusDot(enabled: true)
+                status.isEnabled = false
+                menu.addItem(status)
+
+                let restart = NSMenuItem(
+                    title: "Restart Daemon",
+                    action: #selector(AppDelegate.restartDaemon),
+                    keyEquivalent: "")
+                restart.image = NSImage(
+                    systemSymbolName: "arrow.clockwise", accessibilityDescription: nil)
+                restart.target = target
+                menu.addItem(restart)
+
+                let stop = NSMenuItem(
+                    title: "Stop Daemon",
+                    action: #selector(AppDelegate.stopDaemon),
+                    keyEquivalent: "")
+                stop.image = NSImage(
+                    systemSymbolName: "stop.fill", accessibilityDescription: nil)
+                stop.target = target
+                menu.addItem(stop)
+            } else {
+                let status = NSMenuItem(
+                    title: "Daemon: Offline", action: nil, keyEquivalent: "")
+                status.image = statusDot(enabled: false)
+                status.isEnabled = false
+                menu.addItem(status)
+
+                let start = NSMenuItem(
+                    title: "Start Daemon",
+                    action: #selector(AppDelegate.startDaemon),
+                    keyEquivalent: "")
+                start.image = NSImage(
+                    systemSymbolName: "play.fill", accessibilityDescription: nil)
+                start.target = target
+                menu.addItem(start)
+            }
+
+            menu.addItem(.separator())
+        }
 
         // Apps
         let apps = vm.sortedApps
@@ -36,7 +86,31 @@ enum MenuBuilder {
 
         menu.addItem(.separator())
 
-        // Quit ⌘Q
+        // Settings
+        let settings = NSMenuItem(
+            title: "Settings...",
+            action: #selector(AppDelegate.openSettings),
+            keyEquivalent: ",")
+        settings.image = NSImage(
+            systemSymbolName: "gearshape", accessibilityDescription: nil)
+        settings.target = target
+        menu.addItem(settings)
+
+        // Check for Updates (production mode)
+        if DaemonManager.isProductionApp, let updater, updater.canCheckForUpdates {
+            let update = NSMenuItem(
+                title: "Check for Updates...",
+                action: #selector(AppDelegate.checkForUpdates),
+                keyEquivalent: "")
+            update.image = NSImage(
+                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+            update.target = target
+            menu.addItem(update)
+        }
+
+        menu.addItem(.separator())
+
+        // Quit
         let quit = NSMenuItem(
             title: "Quit Coulson", action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q")

@@ -1,10 +1,16 @@
 import AppKit
+import Sparkle
 import SwiftUI
+
+extension Notification.Name {
+    static let openSettings = Notification.Name("com.coulson.openSettings")
+}
 
 @main
 struct CoulsonAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var vm = CoulsonViewModel()
+    @StateObject private var updater = UpdaterController()
 
     var body: some Scene {
         WindowGroup("Coulson") {
@@ -12,7 +18,11 @@ struct CoulsonAppMain: App {
                 .environmentObject(vm)
                 .frame(minWidth: 360, minHeight: 320)
                 .task {
-                    appDelegate.setupStatusBar(vm: vm)
+                    appDelegate.setupStatusBar(vm: vm, updater: updater)
+                    if DaemonManager.isProductionApp {
+                        updater.start()
+                        await vm.daemonManager.ensureRunning()
+                    }
                 }
         }
         .defaultSize(width: 420, height: 520)
@@ -23,6 +33,7 @@ struct CoulsonAppMain: App {
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private(set) var vm: CoulsonViewModel?
+    private(set) var updater: UpdaterController?
     private var refreshTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -30,7 +41,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+        if let iconURL = Bundle.appResources.url(forResource: "AppIcon", withExtension: "png"),
            let icon = NSImage(contentsOf: iconURL)
         {
             NSApplication.shared.applicationIconImage = icon
@@ -39,13 +50,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor
-    func setupStatusBar(vm: CoulsonViewModel) {
+    func setupStatusBar(vm: CoulsonViewModel, updater: UpdaterController) {
         guard statusItem == nil else { return }
         self.vm = vm
+        self.updater = updater
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let iconURL = Bundle.module.url(forResource: "MenuBarIcon", withExtension: "png"),
-           let icon2xURL = Bundle.module.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+        if let iconURL = Bundle.appResources.url(forResource: "MenuBarIcon", withExtension: "png"),
+           let icon2xURL = Bundle.appResources.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
            let rep1x = NSImageRep(contentsOf: iconURL),
            let rep2x = NSImageRep(contentsOf: icon2xURL)
         {
@@ -82,7 +94,7 @@ extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let vm else { return }
-        MenuBuilder.build(menu: menu, vm: vm, target: self)
+        MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
     }
 }
 
@@ -103,17 +115,25 @@ extension AppDelegate {
     }
 
     @objc func openInBrowser(_ sender: NSMenuItem) {
-        guard let box = sender.representedObject as? AppRecordBox, let vm else { return }
-        if let url = URL(string: box.app.primaryURL(proxyPort: vm.proxyPort)) {
-            NSWorkspace.shared.open(url)
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        let app = box.app
+        Task { @MainActor in
+            guard let vm = self.vm else { return }
+            if let url = URL(string: app.primaryURL(proxyPort: vm.proxyPort)) {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 
     @objc func copyURL(_ sender: NSMenuItem) {
-        guard let box = sender.representedObject as? AppRecordBox, let vm else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(
-            box.app.primaryURL(proxyPort: vm.proxyPort), forType: .string)
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        let app = box.app
+        Task { @MainActor in
+            guard let vm = self.vm else { return }
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(
+                app.primaryURL(proxyPort: vm.proxyPort), forType: .string)
+        }
     }
 
     @objc func openLogs(_ sender: NSMenuItem) {
@@ -149,5 +169,59 @@ extension AppDelegate {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app
         Task { @MainActor in _ = await vm?.deleteApp(app) }
+    }
+
+    @objc func startDaemon() {
+        guard let vm else { return }
+        Task { @MainActor in
+            do {
+                try vm.daemonManager.install()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await vm.refreshHealth()
+            } catch {
+                vm.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @objc func stopDaemon() {
+        guard let vm else { return }
+        Task { @MainActor in
+            do {
+                try vm.daemonManager.stop()
+                try? await Task.sleep(nanoseconds: 500_000_000)
+                await vm.refreshHealth()
+            } catch {
+                vm.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @objc func restartDaemon() {
+        guard let vm else { return }
+        Task { @MainActor in
+            do {
+                try vm.daemonManager.restart()
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                await vm.refreshHealth()
+            } catch {
+                vm.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
+    @objc func openSettings() {
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        for window in NSApplication.shared.windows where window.title.contains("Coulson") {
+            window.makeKeyAndOrderFront(nil)
+        }
+        // Post notification so DashboardView can navigate to settings
+        NotificationCenter.default.post(name: .openSettings, object: nil)
+    }
+
+    @objc func checkForUpdates() {
+        Task { @MainActor in
+            updater?.checkForUpdates()
+        }
     }
 }

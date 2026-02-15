@@ -12,9 +12,11 @@ final class CoulsonViewModel: ObservableObject {
     @Published var globalTunnelCnameTarget: String?
     @Published var errorMessage: String?
 
-    private let client: UDSControlClient
+    let client: UDSControlClient
     let domainSuffix: String
-    let proxyPort: Int?
+    @Published var proxyPort: Int?
+    @Published var httpsPort: Int?
+    let daemonManager: DaemonManager
     private var autoRefreshTask: Task<Void, Never>?
 
     init() {
@@ -28,8 +30,9 @@ final class CoulsonViewModel: ObservableObject {
            let port = Int(portStr) {
             self.proxyPort = port
         } else {
-            self.proxyPort = 80
+            self.proxyPort = nil
         }
+        self.daemonManager = DaemonManager(client: client)
     }
 
     func tunnelURL(for app: AppRecord) -> String? {
@@ -124,10 +127,18 @@ final class CoulsonViewModel: ObservableObject {
 
     func refreshHealth() async {
         do {
-            _ = try client.request(method: "health.ping", params: [:])
+            let result = try client.request(method: "health.ping", params: [:])
             isHealthy = true
+            daemonManager.updateFromPing(version: result["version"] as? String)
+            if let port = result["http_port"] as? Int {
+                proxyPort = port
+            }
+            if let port = result["https_port"] as? Int {
+                httpsPort = port
+            }
         } catch {
             isHealthy = false
+            daemonManager.updateFromPing(version: nil)
         }
     }
 

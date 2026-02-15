@@ -29,6 +29,9 @@ struct DashboardView: View {
         }
         .task { await vm.startAutoRefresh() }
         .onDisappear { vm.stopAutoRefresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
+            path.append(DashboardDestination.settings)
+        }
     }
 }
 

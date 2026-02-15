@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 struct SettingsView: View {
@@ -6,14 +7,56 @@ struct SettingsView: View {
     @State private var tokenInput = ""
     @State private var domainInput = ""
     @State private var isConnecting = false
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                tunnelSection
+        Form {
+            // MARK: - General
+
+            Section {
+                Toggle("Launch at Login", isOn: $launchAtLogin)
+                    .disabled(!DaemonManager.isProductionApp)
+                    .onChange(of: launchAtLogin) { newValue in
+                        do {
+                            if newValue {
+                                try SMAppService.mainApp.register()
+                            } else {
+                                try SMAppService.mainApp.unregister()
+                            }
+                        } catch {
+                            vm.errorMessage = "Failed to update login item: \(error.localizedDescription)"
+                            launchAtLogin = !newValue
+                        }
+                    }
+
+                if let version = vm.daemonManager.daemonVersion {
+                    LabeledContent("Daemon Version", value: version)
+                }
+            } header: {
+                Text("General")
+            } footer: {
+                if !DaemonManager.isProductionApp {
+                    Text("Launch at Login requires the Coulson.app bundle.")
+                }
             }
-            .padding(16)
+
+            // MARK: - Tunnel
+
+            Section {
+                if vm.globalTunnelConnected {
+                    connectedRows
+                } else if vm.globalTunnelConfigured {
+                    disconnectedConfiguredRows
+                } else {
+                    setupRows
+                }
+            } header: {
+                Text("Cloudflare Tunnel")
+            } footer: {
+                Text("Expose all local apps to the internet via Cloudflare Tunnel. Each app gets a public URL like appname.\(exampleDomain).")
+            }
         }
+        .formStyle(.grouped)
         .navigationTitle("Settings")
         .alert("Error", isPresented: Binding(
             get: { vm.errorMessage != nil },
@@ -25,215 +68,116 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Tunnel Section
-
-    @ViewBuilder
-    private var tunnelSection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Label("Cloudflare Wildcard Tunnel", systemImage: "globe")
-                .font(.headline)
-
-            Text("Expose all local apps to the internet via Cloudflare Tunnel. Each app gets a public URL like appname.\(exampleDomain).")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-
-            if vm.globalTunnelConnected {
-                connectedView
-            } else if vm.globalTunnelConfigured {
-                disconnectedConfiguredView
-            } else {
-                setupForm
-            }
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 10)
-                .fill(Color.primary.opacity(0.03))
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-        )
-    }
-
     private var exampleDomain: String {
         vm.namedTunnelDomain ?? "example.com"
     }
 
-    // MARK: - Connected
+    // MARK: - Tunnel: Connected
 
-    private var connectedView: some View {
-        VStack(alignment: .leading, spacing: 10) {
+    @ViewBuilder
+    private var connectedRows: some View {
+        LabeledContent("Status") {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(.green)
-                    .frame(width: 8, height: 8)
-                Text("Connected")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.green)
+                Circle().fill(.green).frame(width: 8, height: 8)
+                Text("Connected").foregroundStyle(.green)
             }
-
-            if let domain = vm.namedTunnelDomain {
-                infoRow("Domain", domain)
-            }
-            if let cname = vm.globalTunnelCnameTarget {
-                cnameRow(cname)
-            }
-
-            Button(role: .destructive) {
-                Task {
-                    isConnecting = true
-                    await vm.disconnectGlobalTunnel()
-                    isConnecting = false
-                }
-            } label: {
-                Text("Disconnect")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(isConnecting)
         }
-    }
 
-    // MARK: - Disconnected (configured)
-
-    private var disconnectedConfiguredView: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(.orange)
-                    .frame(width: 8, height: 8)
-                Text("Disconnected")
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            if let domain = vm.namedTunnelDomain {
-                infoRow("Domain", domain)
-            }
-
-            Button {
-                Task {
-                    isConnecting = true
-                    await vm.reconnectGlobalTunnel()
-                    isConnecting = false
-                }
-            } label: {
-                Text("Reconnect")
-                    .frame(maxWidth: .infinity)
-            }
-            .disabled(isConnecting)
-        }
-    }
-
-    // MARK: - Setup Form
-
-    private var setupForm: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            // Step-by-step guide
-            VStack(alignment: .leading, spacing: 8) {
-                stepRow(1, "Go to Cloudflare Zero Trust \u{2192} Networks \u{2192} Tunnels, create a tunnel")
-                stepRow(2, "Copy the tunnel token (the long string after `--token`)")
-                stepRow(3, "Fill in the token and your domain below, then Connect")
-                stepRow(4, "Add a wildcard DNS record (shown after connecting)")
-            }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Token")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                SecureField("eyJh...  (from tunnel install command)", text: $tokenInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13, design: .monospaced))
-
-                Text("Domain")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-                TextField("example.com", text: $domainInput)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(size: 13))
-            }
-
-            Button {
-                Task {
-                    isConnecting = true
-                    await vm.connectGlobalTunnel(token: tokenInput, domain: domainInput)
-                    if vm.globalTunnelConnected {
-                        tokenInput = ""
-                        domainInput = ""
-                    }
-                    isConnecting = false
-                }
-            } label: {
-                HStack {
-                    if isConnecting {
-                        ProgressView()
-                            .controlSize(.small)
-                    }
-                    Text("Connect")
-                }
-                .frame(maxWidth: .infinity)
-            }
-            .disabled(tokenInput.isEmpty || domainInput.isEmpty || isConnecting)
-        }
-    }
-
-    // MARK: - Helpers
-
-    private func stepRow(_ number: Int, _ text: String) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text("\(number)")
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-                .foregroundStyle(.white)
-                .frame(width: 18, height: 18)
-                .background(Circle().fill(.secondary))
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private func infoRow(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .frame(width: 60, alignment: .leading)
-            Text(value)
-                .font(.system(size: 12, design: .monospaced))
-                .textSelection(.enabled)
-            Spacer()
-        }
-        .padding(.vertical, 2)
-    }
-
-    private func cnameRow(_ cname: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("DNS")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 60, alignment: .leading)
-                Text("*.\(vm.namedTunnelDomain ?? "domain") \u{2192} \(cname)")
-                    .font(.system(size: 12, design: .monospaced))
+        if let domain = vm.namedTunnelDomain {
+            LabeledContent("Domain") {
+                Text(domain).font(.system(.body, design: .monospaced))
                     .textSelection(.enabled)
-                Spacer(minLength: 4)
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(cname, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .help("Copy CNAME target")
             }
-            Text("Add this CNAME record in your DNS provider if not already set.")
-                .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
         }
-        .padding(.vertical, 2)
+
+        if let cname = vm.globalTunnelCnameTarget {
+            LabeledContent("CNAME Target") {
+                HStack(spacing: 6) {
+                    Text(cname).font(.system(.body, design: .monospaced))
+                        .textSelection(.enabled)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(cname, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Copy CNAME target")
+                }
+            }
+        }
+
+        Button(role: .destructive) {
+            Task {
+                isConnecting = true
+                await vm.disconnectGlobalTunnel()
+                isConnecting = false
+            }
+        } label: {
+            Text("Disconnect")
+        }
+        .disabled(isConnecting)
+    }
+
+    // MARK: - Tunnel: Disconnected (configured)
+
+    @ViewBuilder
+    private var disconnectedConfiguredRows: some View {
+        LabeledContent("Status") {
+            HStack(spacing: 6) {
+                Circle().fill(.orange).frame(width: 8, height: 8)
+                Text("Disconnected").foregroundStyle(.secondary)
+            }
+        }
+
+        if let domain = vm.namedTunnelDomain {
+            LabeledContent("Domain") {
+                Text(domain).font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+            }
+        }
+
+        Button {
+            Task {
+                isConnecting = true
+                await vm.reconnectGlobalTunnel()
+                isConnecting = false
+            }
+        } label: {
+            Text("Reconnect")
+        }
+        .disabled(isConnecting)
+    }
+
+    // MARK: - Tunnel: Setup
+
+    @ViewBuilder
+    private var setupRows: some View {
+        SecureField("Tunnel Token", text: $tokenInput)
+            .font(.system(.body, design: .monospaced))
+        TextField("Domain", text: $domainInput, prompt: Text("example.com"))
+
+        Button {
+            Task {
+                isConnecting = true
+                await vm.connectGlobalTunnel(token: tokenInput, domain: domainInput)
+                if vm.globalTunnelConnected {
+                    tokenInput = ""
+                    domainInput = ""
+                }
+                isConnecting = false
+            }
+        } label: {
+            HStack {
+                if isConnecting {
+                    ProgressView().controlSize(.small)
+                }
+                Text("Connect")
+            }
+        }
+        .disabled(tokenInput.isEmpty || domainInput.isEmpty || isConnecting)
     }
 }

@@ -9,9 +9,15 @@ let package = Package(
     products: [
         .executable(name: "CoulsonApp", targets: ["CoulsonApp"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.0"),
+    ],
     targets: [
         .executableTarget(
             name: "CoulsonApp",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle"),
+            ],
             path: "Sources",
             exclude: [
                 "Resources/AppIcon.svg",
