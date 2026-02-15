@@ -249,7 +249,12 @@ macro_rules! parse_params {
 
 async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> ResponseEnvelope {
     let result = match req.method.as_str() {
-        "health.ping" => Ok(json!({ "pong": true, "version": env!("CARGO_PKG_VERSION") })),
+        "health.ping" => Ok(json!({
+            "pong": true,
+            "version": env!("CARGO_PKG_VERSION"),
+            "http_port": state.listen_http.port(),
+            "https_port": state.listen_https.map(|a| a.port()),
+        })),
         "app.list" => {
             let apps = match state.store.list_all() {
                 Ok(v) => v,
