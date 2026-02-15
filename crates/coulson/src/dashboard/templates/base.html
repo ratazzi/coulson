@@ -60,5 +60,14 @@ Stimulus.register("toast", class extends Controller {
 <footer class="mx-auto max-w-6xl px-6 py-6 mt-8 border-t border-zinc-200 dark:border-zinc-800">
   <p class="text-xs text-zinc-400 dark:text-zinc-600">Coulson — local development gateway</p>
 </footer>
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  document.querySelectorAll('time[data-ts]').forEach(function(el) {
+    if (!el.textContent) {
+      el.textContent = new Date(parseInt(el.getAttribute('data-ts'), 10)).toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    }
+  });
+});
+</script>
 </body>
 </html>

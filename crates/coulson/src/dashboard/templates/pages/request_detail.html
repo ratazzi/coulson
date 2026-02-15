@@ -9,7 +9,7 @@
       <span class="font-mono text-[15px]">{{ req.path }}{% if req.query_string %}<span class="text-zinc-400">?{{ req.query_string }}</span>{% endif %}</span>
     </h1>
     <p class="mt-1.5 text-sm text-zinc-500 dark:text-zinc-400">
-      {{ req.time_display }}
+      <time data-ts="{{ req.timestamp_ms }}"></time>
       {% if req.status_code %}&mdash; <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code }}</span>{% endif %}
       {% if req.response_time_ms %}&mdash; {{ req.response_time_ms }}ms{% endif %}
     </p>

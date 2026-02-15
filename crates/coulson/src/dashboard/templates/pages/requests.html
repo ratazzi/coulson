@@ -36,6 +36,23 @@
 </div>
 {% endif %}
 
+<!-- Filter bar -->
+<div id="filter-bar" class="{% if requests | length == 0 %}hidden{% endif %} mb-4 flex items-center gap-3 flex-wrap">
+  <div id="method-filters" class="flex items-center gap-1">
+    <button data-filter-method="" class="filter-method-btn active px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">All</button>
+    <button data-filter-method="GET" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">GET</button>
+    <button data-filter-method="POST" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">POST</button>
+    <button data-filter-method="PUT" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">PUT</button>
+    <button data-filter-method="PATCH" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">PATCH</button>
+    <button data-filter-method="DELETE" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">DELETE</button>
+  </div>
+  <div class="relative flex-1 max-w-xs">
+    <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
+    <input id="path-filter" type="text" placeholder="Filter by path..." class="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-md border border-zinc-200 bg-white text-zinc-700 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:placeholder-zinc-500 dark:focus:ring-zinc-100/10 dark:focus:border-zinc-600">
+  </div>
+  <span id="visible-count" class="text-xs text-zinc-400 dark:text-zinc-500"></span>
+</div>
+
 <div id="requests-table" class="{% if requests | length == 0 %}hidden{% endif %} rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 overflow-hidden">
   <table class="w-full text-sm">
     <thead>
@@ -65,18 +82,89 @@
 </div>
 {% endif %}
 
-{% if app.inspect_enabled %}
 <script>
 (function() {
   var appId = '{{ app.id }}';
   var tbody = document.getElementById('requests-tbody');
-  if (!tbody) return;
+  var activeMethod = '';
+  var pathQuery = '';
+  var activeCls = 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900';
 
+  function formatLocalTime(ms) {
+    return new Date(ms).toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  }
+
+  // Format server-rendered <time data-ts> elements to local time
+  // (base.html also does this on DOMContentLoaded as a fallback for other pages)
+  document.querySelectorAll('time[data-ts]').forEach(function(el) {
+    el.textContent = formatLocalTime(parseInt(el.getAttribute('data-ts'), 10));
+  });
+  var inactiveCls = 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700';
+
+  // -- Filter logic --
+  function matchesFilter(row) {
+    if (activeMethod && row.getAttribute('data-method') !== activeMethod) return false;
+    if (pathQuery && row.getAttribute('data-path').indexOf(pathQuery) === -1) return false;
+    return true;
+  }
+
+  function applyFilters() {
+    if (!tbody) return;
+    var rows = tbody.querySelectorAll('tr');
+    var visible = 0;
+    for (var i = 0; i < rows.length; i++) {
+      if (matchesFilter(rows[i])) {
+        rows[i].style.display = '';
+        visible++;
+      } else {
+        rows[i].style.display = 'none';
+      }
+    }
+    var hint = document.getElementById('visible-count');
+    if (hint) {
+      if (activeMethod || pathQuery) {
+        hint.textContent = visible + ' / ' + rows.length + ' shown';
+      } else {
+        hint.textContent = '';
+      }
+    }
+  }
+
+  // -- Method buttons --
+  var btns = document.querySelectorAll('.filter-method-btn');
+  for (var i = 0; i < btns.length; i++) {
+    btns[i].addEventListener('click', function() {
+      activeMethod = this.getAttribute('data-filter-method');
+      for (var j = 0; j < btns.length; j++) {
+        btns[j].className = 'filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + inactiveCls;
+      }
+      this.className = 'filter-method-btn active px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + activeCls;
+      applyFilters();
+    });
+  }
+
+  // -- Path input --
+  var pathInput = document.getElementById('path-filter');
+  var debounceTimer;
+  if (pathInput) {
+    pathInput.addEventListener('input', function() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(function() {
+        pathQuery = pathInput.value.toLowerCase();
+        applyFilters();
+      }, 150);
+    });
+  }
+
+  // -- SSE --
+  {% if app.inspect_enabled %}
   var evtSource = new EventSource('/apps/' + appId + '/requests/stream');
   evtSource.onmessage = function(e) {
     var d = JSON.parse(e.data);
     var row = document.createElement('tr');
     row.className = 'hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer';
+    row.setAttribute('data-method', d.method);
+    row.setAttribute('data-path', d.path);
     row.onclick = function() { window.location = '/apps/' + appId + '/requests/' + d.request_id; };
 
     var methodColors = {
@@ -101,7 +189,7 @@
       sc = 'bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-300';
     }
 
-    var ts = new Date(d.timestamp).toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
+    var ts = formatLocalTime(d.timestamp);
     var qs = d.query_string ? '<span class="text-zinc-400">?' + d.query_string + '</span>' : '';
     var statusHtml = d.status_code
       ? '<span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ' + sc + '">' + d.status_code + '</span>'
@@ -109,23 +197,27 @@
     var duration = d.response_time_ms ? d.response_time_ms + 'ms' : '\u2014';
 
     row.innerHTML =
-      '<td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono">' + ts + '</td>' +
+      '<td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono"><time data-ts="' + d.timestamp + '">' + ts + '</time></td>' +
       '<td class="px-4 py-2.5"><span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ' + mc + '">' + d.method + '</span></td>' +
       '<td class="px-4 py-2.5 font-mono text-sm max-w-xs truncate">' + d.path + qs + '</td>' +
       '<td class="px-4 py-2.5">' + statusHtml + '</td>' +
       '<td class="px-4 py-2.5 text-right text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">' + duration + '</td>';
 
+    if (!matchesFilter(row)) row.style.display = 'none';
     tbody.prepend(row);
 
     var empty = document.getElementById('empty-state');
     if (empty) empty.remove();
     var table = document.getElementById('requests-table');
     if (table) table.classList.remove('hidden');
+    var filterBar = document.getElementById('filter-bar');
+    if (filterBar) filterBar.classList.remove('hidden');
 
     var counter = document.getElementById('request-count');
     if (counter) counter.textContent = tbody.children.length;
+    applyFilters();
   };
+  {% endif %}
 })();
 </script>
-{% endif %}
 {% endblock content %}

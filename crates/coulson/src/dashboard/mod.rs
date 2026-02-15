@@ -678,7 +678,7 @@ struct RequestView {
     status_code: Option<u16>,
     status_color: &'static str,
     response_time_ms: Option<u64>,
-    time_display: String,
+    timestamp_ms: i64,
     // Detail fields
     request_headers_display: String,
     request_body_display: Option<String>,
@@ -711,17 +711,6 @@ impl RequestView {
             None => "bg-zinc-50 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
         };
 
-        let ts_secs = req.timestamp / 1000;
-        let time_display = time::OffsetDateTime::from_unix_timestamp(ts_secs)
-            .map(|dt| {
-                dt.format(
-                    &time::format_description::parse("[hour]:[minute]:[second]")
-                        .unwrap_or_default(),
-                )
-                .unwrap_or_default()
-            })
-            .unwrap_or_default();
-
         let request_headers_display = format_headers_json(&req.request_headers);
         let request_body_display = req.request_body.as_ref().map(|b| body_to_display(b));
         let response_headers_display = req
@@ -745,7 +734,7 @@ impl RequestView {
             status_code: req.status_code,
             status_color,
             response_time_ms: req.response_time_ms,
-            time_display,
+            timestamp_ms: req.timestamp,
             request_headers_display,
             request_body_display,
             response_headers_display,

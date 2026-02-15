@@ -1,5 +1,5 @@
-      <tr class="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer" onclick="window.location='/apps/{{ app.id }}/requests/{{ req.id }}'">
-        <td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono">{{ req.time_display }}</td>
+      <tr class="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer" data-method="{{ req.method }}" data-path="{{ req.path }}" onclick="window.location='/apps/{{ app.id }}/requests/{{ req.id }}'">
+        <td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono"><time data-ts="{{ req.timestamp_ms }}"></time></td>
         <td class="px-4 py-2.5">
           <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.method_color }}">{{ req.method }}</span>
         </td>
