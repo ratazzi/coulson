@@ -1,0 +1,15 @@
+      <tr class="hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer" onclick="window.location='/apps/{{ app.id }}/requests/{{ req.id }}'">
+        <td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono">{{ req.time_display }}</td>
+        <td class="px-4 py-2.5">
+          <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.method_color }}">{{ req.method }}</span>
+        </td>
+        <td class="px-4 py-2.5 font-mono text-sm max-w-xs truncate">{{ req.path }}{% if req.query_string %}<span class="text-zinc-400">?{{ req.query_string }}</span>{% endif %}</td>
+        <td class="px-4 py-2.5">
+{% if req.status_code %}
+          <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code }}</span>
+{% else %}
+          <span class="text-xs text-zinc-400">—</span>
+{% endif %}
+        </td>
+        <td class="px-4 py-2.5 text-right text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">{% if req.response_time_ms %}{{ req.response_time_ms }}ms{% else %}—{% endif %}</td>
+      </tr>

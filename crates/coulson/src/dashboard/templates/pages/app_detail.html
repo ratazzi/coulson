@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Apps</a>
+
+<div class="flex items-start justify-between mb-8">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">{{ app.name }}</h1>
+    <p class="mt-1 text-sm text-zinc-500 dark:text-zinc-400 font-mono">{{ app.domain }}</p>
+  </div>
+  <div class="flex items-center gap-3">
+{% if app.enabled %}
+    <span class="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-900/30 dark:text-emerald-400 dark:ring-emerald-400/20"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>Running</span>
+{% else %}
+    <span class="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-3 py-1 text-xs font-medium text-zinc-600 ring-1 ring-inset ring-zinc-500/10 dark:bg-zinc-800 dark:text-zinc-400 dark:ring-zinc-400/20"><span class="h-1.5 w-1.5 rounded-full bg-zinc-400"></span>Stopped</span>
+{% endif %}
+    <form method="post" action="/apps/{{ app.id }}/toggle">
+      <button type="submit" class="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium shadow-sm transition-colors {% if app.enabled %}bg-zinc-100 text-zinc-700 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700{% else %}bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-400 dark:text-zinc-900{% endif %}">{% if app.enabled %}Disable{% else %}Enable{% endif %}</button>
+    </form>
+  </div>
+</div>
+
+<div class="grid gap-6">
+{% include "partials/detail/urls.html" %}
+{% include "partials/detail/info.html" %}
+{% include "partials/detail/features.html" %}
+{% include "partials/detail/tunnel.html" %}
+{% include "partials/detail/danger.html" %}
+</div>
+{% endblock content %}

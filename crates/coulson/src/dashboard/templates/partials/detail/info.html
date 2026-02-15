@@ -1,0 +1,40 @@
+<div class="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+  <div class="px-5 py-3 border-b border-zinc-100 dark:border-zinc-800">
+    <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Info</h2>
+  </div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Kind</span>
+    <span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{ app.kind_badge_color }}">{{ app.kind_label }}</span>
+  </div>
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Target</span>
+    <span class="font-mono text-sm">{{ app.target_display }}</span>
+  </div>
+{% if app.target_port %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Port</span>
+    <span class="font-mono text-sm">{{ app.target_port }}</span>
+  </div>
+{% endif %}
+{% if app.path_prefix %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Path Prefix</span>
+    <span class="font-mono text-sm">{{ app.path_prefix }}</span>
+  </div>
+{% endif %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Timeout</span>
+    <span class="text-sm">{{ app.timeout_display }}</span>
+  </div>
+{% if app.listen_port %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Listen Port</span>
+    <span class="font-mono text-sm">{{ app.listen_port }}</span>
+  </div>
+{% endif %}
+</div>

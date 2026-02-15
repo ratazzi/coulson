@@ -1,0 +1,4 @@
+<div data-controller="toast" class="pointer-events-auto rounded-lg border {% if success %}border-emerald-200 dark:border-emerald-800/50{% else %}border-red-200 dark:border-red-800/50{% endif %} bg-white px-4 py-3 shadow-lg dark:bg-zinc-900 flex items-start gap-3">
+  <svg class="h-5 w-5 flex-shrink-0 {% if success %}text-emerald-500{% else %}text-red-500{% endif %}" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor">{% if success %}<path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>{% else %}<path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"/>{% endif %}</svg>
+  <p class="text-sm text-zinc-700 dark:text-zinc-300">{{ message }}</p>
+</div>

@@ -16,6 +16,7 @@ use parking_lot::RwLock;
 
 use crate::domain::BackendTarget;
 use crate::process::ProcessManagerHandle;
+use crate::store::CapturedRequest;
 use crate::{RouteRule, SharedState};
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,8 @@ struct BridgeProxy {
     process_manager: ProcessManagerHandle,
 }
 
+const INSPECT_BODY_MAX: usize = 65536;
+
 #[derive(Default)]
 struct ProxyCtx {
     target: Option<BackendTarget>,
@@ -75,6 +78,20 @@ struct ProxyCtx {
     cors_enabled: bool,
     spa_rewrite: bool,
     is_upgrade: bool,
+    // Request inspector fields
+    inspect: bool,
+    inspect_app_id: Option<String>,
+    inspect_store: Option<std::sync::Arc<crate::store::AppRepository>>,
+    inspect_max_requests: usize,
+    inspect_start: Option<std::time::Instant>,
+    inspect_method: Option<String>,
+    inspect_path: Option<String>,
+    inspect_query: Option<String>,
+    inspect_req_headers: Option<String>,
+    inspect_req_body: Option<Vec<u8>>,
+    inspect_status: Option<u16>,
+    inspect_resp_headers: Option<String>,
+    inspect_resp_body: Option<Vec<u8>>,
 }
 
 #[async_trait]
@@ -107,6 +124,13 @@ impl ProxyHttp for BridgeProxy {
             write_error_page(session, 400, "missing_host").await?;
             return Ok(true);
         };
+
+        // Dashboard interception
+        if crate::dashboard::is_dashboard_host(&host, &self.shared.domain_suffix) {
+            crate::dashboard::handle(session, &self.shared).await?;
+            return Ok(true);
+        }
+
         let req_path = session.req_header().uri.path().to_string();
 
         let route = {
@@ -160,6 +184,26 @@ impl ProxyHttp for BridgeProxy {
         // --- SPA Rewrite ---
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
             let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
+        }
+
+        // --- Request Inspector ---
+        if route.inspect_enabled {
+            ctx.inspect = true;
+            ctx.inspect_app_id = route.app_id.clone();
+            ctx.inspect_store = Some(self.shared.store.clone());
+            ctx.inspect_max_requests = self.shared.inspect_max_requests;
+            ctx.inspect_start = Some(std::time::Instant::now());
+            ctx.inspect_method = Some(session.req_header().method.to_string());
+            let uri = &session.req_header().uri;
+            ctx.inspect_path = Some(uri.path().to_string());
+            ctx.inspect_query = uri.query().map(|q| q.to_string());
+            let headers: std::collections::HashMap<String, String> = session
+                .req_header()
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            ctx.inspect_req_headers = serde_json::to_string(&headers).ok();
         }
 
         ctx.target = Some(resolved_target);
@@ -229,13 +273,23 @@ impl ProxyHttp for BridgeProxy {
         Ok(())
     }
 
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        inspect_capture_req_body(ctx, body);
+        Ok(())
+    }
+
     fn upstream_response_filter(
         &self,
         _session: &mut Session,
         upstream_response: &mut ResponseHeader,
         ctx: &mut Self::CTX,
     ) -> Result<()> {
-        // --- CORS Headers ---
         if ctx.cors_enabled {
             upstream_response
                 .insert_header("access-control-allow-origin", "*")
@@ -253,7 +307,19 @@ impl ProxyHttp for BridgeProxy {
                 .insert_header("access-control-expose-headers", "*")
                 .ok();
         }
+        inspect_capture_response_meta(ctx, upstream_response);
         Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        inspect_capture_resp_body(ctx, body, end_of_stream);
+        Ok(None)
     }
 }
 
@@ -342,6 +408,8 @@ fn run_proxy_blocking(
 #[derive(Clone)]
 struct DedicatedProxy {
     rules: Arc<RwLock<Vec<RouteRule>>>,
+    store: std::sync::Arc<crate::store::AppRepository>,
+    inspect_max_requests: usize,
 }
 
 #[async_trait]
@@ -388,6 +456,26 @@ impl ProxyHttp for DedicatedProxy {
         // SPA Rewrite
         if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
             let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
+        }
+
+        // --- Request Inspector ---
+        if route.inspect_enabled {
+            ctx.inspect = true;
+            ctx.inspect_app_id = route.app_id.clone();
+            ctx.inspect_store = Some(self.store.clone());
+            ctx.inspect_max_requests = self.inspect_max_requests;
+            ctx.inspect_start = Some(std::time::Instant::now());
+            ctx.inspect_method = Some(session.req_header().method.to_string());
+            let uri = &session.req_header().uri;
+            ctx.inspect_path = Some(uri.path().to_string());
+            ctx.inspect_query = uri.query().map(|q| q.to_string());
+            let headers: std::collections::HashMap<String, String> = session
+                .req_header()
+                .headers
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            ctx.inspect_req_headers = serde_json::to_string(&headers).ok();
         }
 
         ctx.target = Some(route.target);
@@ -440,6 +528,17 @@ impl ProxyHttp for DedicatedProxy {
         }
     }
 
+    async fn request_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<()> {
+        inspect_capture_req_body(ctx, body);
+        Ok(())
+    }
+
     async fn upstream_request_filter(
         &self,
         _session: &mut Session,
@@ -479,19 +578,40 @@ impl ProxyHttp for DedicatedProxy {
                 .insert_header("access-control-expose-headers", "*")
                 .ok();
         }
+        inspect_capture_response_meta(ctx, upstream_response);
         Ok(())
+    }
+
+    fn response_body_filter(
+        &self,
+        _session: &mut Session,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+        ctx: &mut Self::CTX,
+    ) -> Result<Option<Duration>> {
+        inspect_capture_resp_body(ctx, body, end_of_stream);
+        Ok(None)
     }
 }
 
 pub fn run_dedicated_proxy_blocking(
     port: u16,
     rules: Arc<RwLock<Vec<RouteRule>>>,
+    store: std::sync::Arc<crate::store::AppRepository>,
+    inspect_max_requests: usize,
 ) -> anyhow::Result<()> {
     let bind = format!("0.0.0.0:{port}");
     let mut server = Server::new(None)?;
     server.bootstrap();
 
-    let mut service = http_proxy_service(&server.configuration, DedicatedProxy { rules });
+    let mut service = http_proxy_service(
+        &server.configuration,
+        DedicatedProxy {
+            rules,
+            store,
+            inspect_max_requests,
+        },
+    );
     service.add_tcp(&bind);
     server.add_service(service);
     server.run_forever();
@@ -1101,6 +1221,74 @@ fn select_route(candidates: Option<&Vec<RouteRule>>, path: &str) -> Option<Route
     None
 }
 
+// ---------------------------------------------------------------------------
+// Request Inspector helpers (shared by BridgeProxy and DedicatedProxy)
+// ---------------------------------------------------------------------------
+
+fn inspect_capture_req_body(ctx: &mut ProxyCtx, body: &Option<Bytes>) {
+    if !ctx.inspect {
+        return;
+    }
+    if let Some(ref chunk) = body {
+        let buf = ctx.inspect_req_body.get_or_insert_with(Vec::new);
+        let remaining = INSPECT_BODY_MAX.saturating_sub(buf.len());
+        if remaining > 0 {
+            buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+    }
+}
+
+fn inspect_capture_response_meta(ctx: &mut ProxyCtx, upstream_response: &ResponseHeader) {
+    if !ctx.inspect {
+        return;
+    }
+    ctx.inspect_status = Some(upstream_response.status.as_u16());
+    let headers: std::collections::HashMap<String, String> = upstream_response
+        .headers
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    ctx.inspect_resp_headers = serde_json::to_string(&headers).ok();
+}
+
+fn inspect_capture_resp_body(ctx: &mut ProxyCtx, body: &Option<Bytes>, end_of_stream: bool) {
+    if !ctx.inspect {
+        return;
+    }
+    if let Some(ref chunk) = body {
+        let buf = ctx.inspect_resp_body.get_or_insert_with(Vec::new);
+        let remaining = INSPECT_BODY_MAX.saturating_sub(buf.len());
+        if remaining > 0 {
+            buf.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+    }
+    if end_of_stream {
+        let elapsed = ctx.inspect_start.map(|s| s.elapsed().as_millis() as u64);
+        let captured = CapturedRequest {
+            id: uuid::Uuid::now_v7().to_string(),
+            app_id: ctx.inspect_app_id.take().unwrap_or_default(),
+            timestamp: time::OffsetDateTime::now_utc().unix_timestamp_nanos() as i64 / 1_000_000,
+            method: ctx.inspect_method.take().unwrap_or_default(),
+            path: ctx.inspect_path.take().unwrap_or_default(),
+            query_string: ctx.inspect_query.take(),
+            request_headers: ctx.inspect_req_headers.take().unwrap_or_default(),
+            request_body: ctx.inspect_req_body.take(),
+            status_code: ctx.inspect_status.take(),
+            response_headers: ctx.inspect_resp_headers.take(),
+            response_body: ctx.inspect_resp_body.take(),
+            response_time_ms: elapsed,
+        };
+        if let Some(store) = ctx.inspect_store.take() {
+            let max = ctx.inspect_max_requests;
+            tokio::spawn(async move {
+                if let Err(e) = store.insert_request_log(&captured, max) {
+                    tracing::warn!(error = %e, "failed to save captured request");
+                }
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1129,6 +1317,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         let out = resolve_target(&routes, "www.myapp.coulson.local", "coulson.local", "/")
@@ -1160,6 +1350,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         let out = resolve_target(
@@ -1197,6 +1389,8 @@ mod tests {
                     spa_rewrite: false,
                     listen_port: None,
                     static_root: None,
+                    app_id: None,
+                    inspect_enabled: false,
                 },
                 RouteRule {
                     target: BackendTarget::Tcp {
@@ -1211,6 +1405,8 @@ mod tests {
                     spa_rewrite: false,
                     listen_port: None,
                     static_root: None,
+                    app_id: None,
+                    inspect_enabled: false,
                 },
             ],
         );
@@ -1245,6 +1441,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
@@ -1273,6 +1471,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         routes.insert(
@@ -1290,6 +1490,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
@@ -1318,6 +1520,8 @@ mod tests {
                 spa_rewrite: false,
                 listen_port: None,
                 static_root: None,
+                app_id: None,
+                inspect_enabled: false,
             }],
         );
         assert!(resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/").is_none());

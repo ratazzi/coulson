@@ -144,6 +144,30 @@ impl AppRepository {
             &conn,
             "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
         )?;
+        add_column_if_missing(
+            &conn,
+            "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS request_logs (
+              id TEXT PRIMARY KEY,
+              app_id TEXT NOT NULL,
+              timestamp INTEGER NOT NULL,
+              method TEXT NOT NULL,
+              path TEXT NOT NULL,
+              query_string TEXT,
+              request_headers TEXT NOT NULL,
+              request_body BLOB,
+              status_code INTEGER,
+              response_headers TEXT,
+              response_body BLOB,
+              response_time_ms INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_request_logs_app_ts
+              ON request_logs(app_id, timestamp DESC);
+            "#,
+        )?;
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -188,6 +212,7 @@ impl AppRepository {
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
+            inspect_enabled: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -251,6 +276,7 @@ impl AppRepository {
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
+            inspect_enabled: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -313,6 +339,7 @@ impl AppRepository {
             app_tunnel_domain: None,
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
+            inspect_enabled: false,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -861,9 +888,98 @@ impl AppRepository {
         }
         Ok(apps)
     }
+
+    // -----------------------------------------------------------------------
+    // Inspect (request recording) methods
+    // -----------------------------------------------------------------------
+
+    pub fn set_inspect_enabled(&self, app_id: &str, enabled: bool) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE apps SET inspect_enabled = ? WHERE id = ?",
+            params![enabled as i64, app_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn insert_request_log(
+        &self,
+        req: &CapturedRequest,
+        max_per_app: usize,
+    ) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO request_logs (id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+            params![
+                req.id,
+                req.app_id,
+                req.timestamp,
+                req.method,
+                req.path,
+                req.query_string,
+                req.request_headers,
+                req.request_body,
+                req.status_code,
+                req.response_headers,
+                req.response_body,
+                req.response_time_ms,
+            ],
+        )?;
+        // Prune old entries beyond max
+        conn.execute(
+            "DELETE FROM request_logs WHERE app_id = ?1 AND id NOT IN (SELECT id FROM request_logs WHERE app_id = ?1 ORDER BY timestamp DESC LIMIT ?2)",
+            params![req.app_id, max_per_app as i64],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_request_logs(
+        &self,
+        app_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<CapturedRequest>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ?",
+        )?;
+        let mut rows = stmt.query(params![app_id, limit as i64])?;
+        let mut results = Vec::new();
+        while let Some(row) = rows.next()? {
+            results.push(row_to_captured_request(row)?);
+        }
+        Ok(results)
+    }
+
+    pub fn get_request_log(&self, req_id: &str) -> anyhow::Result<Option<CapturedRequest>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE id = ?",
+        )?;
+        let mut rows = stmt.query(params![req_id])?;
+        match rows.next()? {
+            Some(row) => Ok(Some(row_to_captured_request(row)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn delete_request_logs_for_app(&self, app_id: &str) -> anyhow::Result<()> {
+        let conn = self.conn.lock();
+        conn.execute("DELETE FROM request_logs WHERE app_id = ?", params![app_id])?;
+        Ok(())
+    }
+
+    pub fn count_request_logs(&self, app_id: &str) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM request_logs WHERE app_id = ?",
+            params![app_id],
+            |row| row.get(0),
+        )?;
+        Ok(count as usize)
+    }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root,inspect_enabled";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind_str: String = row.get(2)?;
@@ -934,6 +1050,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         app_tunnel_domain: row.get::<_, Option<String>>(22).unwrap_or(None),
         app_tunnel_dns_id: row.get::<_, Option<String>>(23).unwrap_or(None),
         app_tunnel_creds: row.get::<_, Option<String>>(24).unwrap_or(None),
+        inspect_enabled: row.get::<_, i64>(26).unwrap_or(0) == 1,
     })
 }
 
@@ -1031,6 +1148,43 @@ fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Resu
     )?;
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// CapturedRequest model
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CapturedRequest {
+    pub id: String,
+    pub app_id: String,
+    pub timestamp: i64,
+    pub method: String,
+    pub path: String,
+    pub query_string: Option<String>,
+    pub request_headers: String,
+    pub request_body: Option<Vec<u8>>,
+    pub status_code: Option<u16>,
+    pub response_headers: Option<String>,
+    pub response_body: Option<Vec<u8>>,
+    pub response_time_ms: Option<u64>,
+}
+
+fn row_to_captured_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<CapturedRequest> {
+    Ok(CapturedRequest {
+        id: row.get(0)?,
+        app_id: row.get(1)?,
+        timestamp: row.get(2)?,
+        method: row.get(3)?,
+        path: row.get(4)?,
+        query_string: row.get(5)?,
+        request_headers: row.get(6)?,
+        request_body: row.get(7)?,
+        status_code: row.get::<_, Option<i64>>(8)?.map(|v| v as u16),
+        response_headers: row.get(9)?,
+        response_body: row.get(10)?,
+        response_time_ms: row.get::<_, Option<i64>>(11)?.map(|v| v as u64),
+    })
 }
 
 #[cfg(test)]

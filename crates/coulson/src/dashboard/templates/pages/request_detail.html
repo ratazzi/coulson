@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/apps/{{ app.id }}/requests" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Requests</a>
+
+<div class="flex items-start justify-between mb-8">
+  <div>
+    <h1 class="text-2xl font-semibold tracking-tight">
+      <span class="inline-flex items-center rounded px-2 py-0.5 text-lg font-bold {{ req.method_color }} mr-2">{{ req.method }}</span>
+      <span class="font-mono">{{ req.path }}{% if req.query_string %}<span class="text-zinc-400">?{{ req.query_string }}</span>{% endif %}</span>
+    </h1>
+    <p class="mt-1.5 text-sm text-zinc-500 dark:text-zinc-400">
+      {{ req.time_display }}
+      {% if req.status_code %}&mdash; <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code }}</span>{% endif %}
+      {% if req.response_time_ms %}&mdash; {{ req.response_time_ms }}ms{% endif %}
+    </p>
+  </div>
+  <form method="post" action="/apps/{{ app.id }}/requests/{{ req.id }}/replay">
+    <button type="submit" class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors">
+      <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182"/></svg>
+      Replay
+    </button>
+  </form>
+</div>
+
+<div class="grid gap-6">
+  <!-- Request -->
+  <div class="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div class="px-5 py-3 border-b border-zinc-100 dark:border-zinc-800">
+      <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Request Headers</h2>
+    </div>
+    <div class="px-5 py-3">
+      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto">{{ req.request_headers_display }}</pre>
+    </div>
+{% if req.request_body_display %}
+    <div class="px-5 py-3 border-t border-zinc-100 dark:border-zinc-800">
+      <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400 mb-2">Request Body</h3>
+      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-3">{{ req.request_body_display }}</pre>
+    </div>
+{% endif %}
+  </div>
+
+  <!-- Response -->
+  <div class="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <div class="px-5 py-3 border-b border-zinc-100 dark:border-zinc-800">
+      <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Response Headers</h2>
+    </div>
+{% if req.response_headers_display %}
+    <div class="px-5 py-3">
+      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto">{{ req.response_headers_display }}</pre>
+    </div>
+{% endif %}
+{% if req.response_body_display %}
+    <div class="px-5 py-3 border-t border-zinc-100 dark:border-zinc-800">
+      <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400 mb-2">Response Body</h3>
+      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-3">{{ req.response_body_display }}</pre>
+    </div>
+{% endif %}
+  </div>
+
+{% if replay %}
+  <!-- Replay comparison -->
+  <div class="rounded-xl border border-blue-200 bg-white shadow-sm dark:border-blue-900/50 dark:bg-zinc-900">
+    <div class="px-5 py-3 border-b border-blue-100 dark:border-blue-900/30">
+      <h2 class="text-xs font-semibold text-blue-600 uppercase tracking-wider dark:text-blue-400">Replay Result</h2>
+    </div>
+    <div class="grid grid-cols-2 gap-0 divide-x divide-zinc-100 dark:divide-zinc-800">
+      <div class="px-5 py-3">
+        <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Original</h3>
+        <p class="text-sm mb-2">Status: <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code | default(value="—") }}</span></p>
+        {% if req.response_body_display %}<pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-3">{{ req.response_body_display }}</pre>{% endif %}
+      </div>
+      <div class="px-5 py-3">
+        <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Replay</h3>
+        <p class="text-sm mb-2">Status: <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ replay.status_color }}">{{ replay.status_code }}</span>{% if replay.status_code != req.status_code %} <span class="text-xs text-red-500 font-medium">Changed</span>{% endif %}</p>
+        {% if replay.body_display %}<pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-3">{{ replay.body_display }}</pre>{% endif %}
+      </div>
+    </div>
+  </div>
+{% endif %}
+</div>
+{% endblock content %}

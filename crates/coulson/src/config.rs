@@ -18,6 +18,7 @@ pub struct CoulsonConfig {
     pub idle_timeout_secs: u64,
     pub lan_access: bool,
     pub link_dir: bool,
+    pub inspect_max_requests: usize,
 }
 
 impl Default for CoulsonConfig {
@@ -43,6 +44,7 @@ impl Default for CoulsonConfig {
             idle_timeout_secs: 900,
             lan_access: false,
             link_dir: false,
+            inspect_max_requests: 200,
         }
     }
 }
@@ -93,6 +95,12 @@ impl CoulsonConfig {
         if let Ok(raw) = env::var("COULSON_LINK_DIR") {
             cfg.link_dir =
                 parse_bool(&raw).with_context(|| format!("invalid COULSON_LINK_DIR: {raw}"))?;
+        }
+
+        if let Ok(raw) = env::var("COULSON_INSPECT_MAX_REQUESTS") {
+            cfg.inspect_max_requests = raw
+                .parse()
+                .with_context(|| format!("invalid COULSON_INSPECT_MAX_REQUESTS: {raw}"))?;
         }
 
         if let Ok(raw) = env::var("COULSON_LAN_ACCESS") {

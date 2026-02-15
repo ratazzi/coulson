@@ -1,0 +1,18 @@
+<div id="stats-frame" class="grid grid-cols-2 md:grid-cols-4 gap-4">
+  <div class="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <p class="text-sm font-medium text-zinc-500 dark:text-zinc-400">Total Apps</p>
+    <p class="text-2xl font-semibold mt-1">{{ total }}</p>
+  </div>
+  <div class="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <p class="text-sm font-medium text-zinc-500 dark:text-zinc-400">Enabled</p>
+    <p class="text-2xl font-semibold mt-1 text-emerald-600 dark:text-emerald-400">{{ enabled_count }}</p>
+  </div>
+  <div class="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <p class="text-sm font-medium text-zinc-500 dark:text-zinc-400">Disabled</p>
+    <p class="text-2xl font-semibold mt-1 text-zinc-400 dark:text-zinc-500">{{ disabled_count }}</p>
+  </div>
+  <div class="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <p class="text-sm font-medium text-zinc-500 dark:text-zinc-400">Managed</p>
+    <p class="text-2xl font-semibold mt-1 text-blue-600 dark:text-blue-400">{{ managed_count }}</p>
+  </div>
+</div>

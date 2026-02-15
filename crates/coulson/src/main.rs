@@ -1,6 +1,7 @@
 mod certs;
 mod config;
 mod control;
+mod dashboard;
 mod domain;
 mod mdns;
 mod process;
@@ -52,6 +53,8 @@ pub struct RouteRule {
     /// Optional static file root to try before forwarding to the backend.
     /// For Managed apps this is `{app_root}/public` when the directory exists.
     pub static_root: Option<String>,
+    pub app_id: Option<String>,
+    pub inspect_enabled: bool,
 }
 
 #[derive(Clone)]
@@ -72,6 +75,7 @@ pub struct SharedState {
     pub provider_registry: Arc<ProviderRegistry>,
     pub lan_access: bool,
     pub share_signer: Arc<ShareSigner>,
+    pub inspect_max_requests: usize,
 }
 
 impl SharedState {
@@ -92,6 +96,8 @@ impl SharedState {
                 _ => None,
             };
             let rule = RouteRule {
+                app_id: Some(app.id.0.clone()),
+                inspect_enabled: app.inspect_enabled,
                 target: app.target,
                 path_prefix: app.path_prefix,
                 timeout_ms: app.timeout_ms,
@@ -337,6 +343,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         provider_registry: registry,
         lan_access: cfg.lan_access,
         share_signer,
+        inspect_max_requests: cfg.inspect_max_requests,
     })
 }
 
@@ -945,9 +952,12 @@ fn sync_dedicated_proxies(
             }
         };
         let port = *port;
+        let store = state.store.clone();
+        let max_requests = state.inspect_max_requests;
         info!(port, "starting dedicated proxy");
         let handle = tokio::task::spawn_blocking(move || {
-            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, rules) {
+            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, rules, store, max_requests)
+            {
                 error!(error = %err, port, "dedicated proxy exited with error");
             }
         });

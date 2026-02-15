@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block content %}
+{% include "partials/stats.html" %}
+<div class="mt-6">
+{% if apps | length == 0 %}
+{% include "partials/empty_state.html" %}
+{% else %}
+{% include "partials/app_table.html" %}
+{% endif %}
+</div>
+{% endblock content %}

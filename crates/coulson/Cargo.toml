@@ -46,6 +46,7 @@ tokio-util.workspace = true
 jsonwebtoken.workspace = true
 p256.workspace = true
 toml.workspace = true
+tera.workspace = true
 
 [features]
 builtin-quick-tunnel = []

@@ -1,0 +1,19 @@
+<div id="app-table-wrapper" class="rounded-xl border border-zinc-200 bg-white shadow-sm overflow-hidden dark:border-zinc-800 dark:bg-zinc-900">
+  <table class="w-full">
+    <thead>
+      <tr class="border-b border-zinc-200 dark:border-zinc-800">
+        <th class="text-left pl-4 pr-2 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400 w-8"></th>
+        <th class="text-left px-3 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Name</th>
+        <th class="text-left px-3 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Domain</th>
+        <th class="text-left px-3 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400 hidden md:table-cell">Target</th>
+        <th class="text-left px-3 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400 hidden sm:table-cell">Kind</th>
+        <th class="text-right px-4 py-3 text-xs font-medium text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Actions</th>
+      </tr>
+    </thead>
+    <tbody id="app-table-body">
+{% for app in apps %}
+{% include "partials/app_row.html" %}
+{% endfor %}
+    </tbody>
+  </table>
+</div>
