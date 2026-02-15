@@ -18,11 +18,17 @@ const IP_POLL_INTERVAL_SECS: u64 = 5;
 
 pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     let mdns = ServiceDaemon::new()?;
-    mdns.disable_interface(IfKind::IPv6)?;
     if !state.lan_access {
-        // Loopback only: no LAN broadcast, no conflicts with other machines
+        // Loopback only: restrict to IPv4+IPv6 loopback interfaces.
+        // Both are needed so macOS gets immediate A and AAAA responses
+        // (without AAAA, macOS waits ~5s for the timeout before using A).
         mdns.disable_interface(IfKind::IPv4)?;
+        mdns.disable_interface(IfKind::IPv6)?;
         mdns.enable_interface(IfKind::LoopbackV4)?;
+        mdns.enable_interface(IfKind::LoopbackV6)?;
+    } else {
+        // LAN mode: disable non-loopback IPv6 to avoid AAAA record pollution
+        mdns.disable_interface(IfKind::IPv6)?;
     }
     let mut route_rx = state.route_tx.subscribe();
 
@@ -231,7 +237,7 @@ fn register_domain(
 
     let ip_str = match lan_ip {
         Some(ip) => ip.to_string(),
-        None => "127.0.0.1".to_string(),
+        None => "127.0.0.1,::1".to_string(),
     };
 
     let mut service_info = ServiceInfo::new(
@@ -245,7 +251,7 @@ fn register_domain(
 
     match lan_ip {
         Some(ip) => service_info.set_interfaces(vec![IfKind::Addr(ip)]),
-        None => service_info.set_interfaces(vec![IfKind::LoopbackV4]),
+        None => service_info.set_interfaces(vec![IfKind::LoopbackV4, IfKind::LoopbackV6]),
     }
 
     let fullname = service_info.get_fullname().to_string();
