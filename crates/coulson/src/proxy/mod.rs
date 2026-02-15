@@ -272,6 +272,11 @@ impl ProxyHttp for BridgeProxy {
             upstream_request.insert_header("Upgrade", upgrade)?;
             upstream_request.insert_header("Connection", "Upgrade")?;
         }
+
+        let is_tls = _session.digest().is_some_and(|d| d.ssl_digest.is_some());
+        upstream_request
+            .insert_header("X-Forwarded-Proto", if is_tls { "https" } else { "http" })?;
+
         Ok(())
     }
 
@@ -556,6 +561,11 @@ impl ProxyHttp for DedicatedProxy {
             upstream_request.insert_header("Upgrade", upgrade)?;
             upstream_request.insert_header("Connection", "Upgrade")?;
         }
+
+        let is_tls = _session.digest().is_some_and(|d| d.ssl_digest.is_some());
+        upstream_request
+            .insert_header("X-Forwarded-Proto", if is_tls { "https" } else { "http" })?;
+
         Ok(())
     }
 
