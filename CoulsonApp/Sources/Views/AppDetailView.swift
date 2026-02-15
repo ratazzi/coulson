@@ -89,9 +89,9 @@ struct AppDetailView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionHeader("URLs")
             VStack(spacing: 0) {
-                ForEach(Array(app.dashboardURLs(proxyPort: vm.proxyPort).enumerated()), id: \.offset) { index, url in
+                ForEach(Array(app.dashboardURLs(proxyPort: vm.proxyPort, httpsPort: vm.httpsPort).enumerated()), id: \.offset) { index, url in
                     urlRow(url)
-                    if index < app.dashboardURLs(proxyPort: vm.proxyPort).count - 1 {
+                    if index < app.dashboardURLs(proxyPort: vm.proxyPort, httpsPort: vm.httpsPort).count - 1 {
                         Divider().padding(.leading, 12)
                     }
                 }

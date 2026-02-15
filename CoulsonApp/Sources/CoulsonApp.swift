@@ -146,6 +146,18 @@ extension AppDelegate {
         }
     }
 
+    @objc func copyHTTPSURL(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        let app = box.app
+        Task { @MainActor in
+            guard let vm = self.vm else { return }
+            if let url = app.httpsURL(httpsPort: vm.httpsPort) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(url, forType: .string)
+            }
+        }
+    }
+
     @objc func openLogs(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let dir = "/tmp/coulson/managed"

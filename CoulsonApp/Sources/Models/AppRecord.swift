@@ -61,8 +61,17 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         return "http://\(domain)\(portSuffix)/"
     }
 
-    func dashboardURLs(proxyPort: Int?) -> [String] {
+    func httpsURL(httpsPort: Int?) -> String? {
+        guard let port = httpsPort else { return nil }
+        let portSuffix = port != 443 ? ":\(port)" : ""
+        return "https://\(domain)\(portSuffix)/"
+    }
+
+    func dashboardURLs(proxyPort: Int?, httpsPort: Int?) -> [String] {
         var out = [primaryURL(proxyPort: proxyPort)]
+        if let https = httpsURL(httpsPort: httpsPort) {
+            out.append(https)
+        }
         if let host = target.host, let port = target.port {
             out.append("http://\(host):\(port)/")
         }

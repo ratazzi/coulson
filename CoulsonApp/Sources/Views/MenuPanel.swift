@@ -163,6 +163,18 @@ enum MenuBuilder {
         copy.target = target
         sub.addItem(copy)
 
+        // Copy HTTPS URL
+        if vm.httpsPort != nil {
+            let copyHTTPS = NSMenuItem(
+                title: "Copy HTTPS URL",
+                action: #selector(AppDelegate.copyHTTPSURL(_:)), keyEquivalent: "")
+            copyHTTPS.image = NSImage(
+                systemSymbolName: "lock", accessibilityDescription: nil)
+            copyHTTPS.representedObject = box
+            copyHTTPS.target = target
+            sub.addItem(copyHTTPS)
+        }
+
         // Tunnel
         if vm.globalTunnelConfigured {
             sub.addItem(.separator())
