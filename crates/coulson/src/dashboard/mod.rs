@@ -500,8 +500,9 @@ async fn page_app_detail(session: &mut Session, state: &SharedState, id: &str) -
         }
     };
     let port = state.listen_http.port();
+    let https_port = state.listen_https.map(|a| a.port());
     let app_view = AppView::from_spec(&app, port);
-    let urls = build_urls(&app, port, &state.domain_suffix);
+    let urls = build_urls(&app, port, https_port, &state.domain_suffix);
     let title = format!("{} — Detail", app.domain.0);
     let page = render_page("pages/app_detail.html", state, |ctx| {
         ctx.insert("title", &title);
@@ -511,7 +512,12 @@ async fn page_app_detail(session: &mut Session, state: &SharedState, id: &str) -
     write_html(session, 200, &page).await
 }
 
-fn build_urls(app: &AppSpec, port: u16, domain_suffix: &str) -> Vec<UrlView> {
+fn build_urls(
+    app: &AppSpec,
+    port: u16,
+    https_port: Option<u16>,
+    domain_suffix: &str,
+) -> Vec<UrlView> {
     let mut urls = Vec::new();
 
     let path = app.path_prefix.as_deref().unwrap_or("/");
@@ -519,6 +525,13 @@ fn build_urls(app: &AppSpec, port: u16, domain_suffix: &str) -> Vec<UrlView> {
         href: format!("http://{}:{}{}", &app.domain.0, port, path),
         is_link: true,
     });
+
+    if let Some(hp) = https_port {
+        urls.push(UrlView {
+            href: format!("https://{}:{}{}", &app.domain.0, hp, path),
+            is_link: true,
+        });
+    }
 
     match &app.target {
         BackendTarget::Tcp { host, port } => {
