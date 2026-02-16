@@ -17,7 +17,6 @@ final class CoulsonViewModel: ObservableObject {
     @Published var proxyPort: Int?
     @Published var httpsPort: Int?
     @Published var runtimeDir: String
-    @Published var certsDir: String
     let daemonManager: DaemonManager
     private var autoRefreshTask: Task<Void, Never>?
 
@@ -51,7 +50,6 @@ final class CoulsonViewModel: ObservableObject {
             self.proxyPort = nil
         }
         self.runtimeDir = defaultRuntime
-        self.certsDir = Self.defaultCertsDir
         self.daemonManager = DaemonManager(client: client)
     }
 
@@ -158,9 +156,6 @@ final class CoulsonViewModel: ObservableObject {
             }
             if let dir = result["runtime_dir"] as? String {
                 runtimeDir = dir
-            }
-            if let dir = result["certs_dir"] as? String {
-                certsDir = dir
             }
         } catch {
             isHealthy = false

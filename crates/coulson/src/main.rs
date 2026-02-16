@@ -2152,8 +2152,8 @@ fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json:
         .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))
 }
 
-fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
-    let ca_path = _cfg.certs_dir.join("ca.crt");
+fn run_trust(cfg: CoulsonConfig) -> anyhow::Result<()> {
+    let ca_path = cfg.certs_dir.join("ca.crt");
 
     if !ca_path.exists() {
         bail!(
@@ -2185,7 +2185,7 @@ fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
             println!("{}", "CA certificate trusted successfully!".green().bold());
             println!(
                 "HTTPS connections to *.{} will now be trusted.",
-                _cfg.domain_suffix
+                cfg.domain_suffix
             );
         } else {
             eprintln!("{}", "Failed to add CA to System keychain.".red());

@@ -7,9 +7,9 @@ final class CertTrustManager {
     private let caCertPath: String
 
     init() {
-        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
-            ?? (NSHomeDirectory() + "/.config")
-        self.caCertPath = (base as NSString).appendingPathComponent("coulson/certs/ca.crt")
+        let certsDir = ProcessInfo.processInfo.environment["COULSON_CERTS_DIR"]
+            ?? CoulsonViewModel.defaultCertsDir
+        self.caCertPath = (certsDir as NSString).appendingPathComponent("ca.crt")
     }
 
     /// Whether the CA certificate file exists on disk.

@@ -146,15 +146,8 @@ final class DaemonManager: ObservableObject {
 
     // MARK: - Private
 
-    private static var runtimeDir: String {
-        let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"]
-            ?? ProcessInfo.processInfo.environment["TMPDIR"]
-            ?? "/tmp"
-        return (base as NSString).appendingPathComponent("coulson")
-    }
-
     private func buildPlist(daemonPath: String) -> String {
-        let rtDir = Self.runtimeDir
+        let rtDir = CoulsonViewModel.defaultRuntimeDir
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
