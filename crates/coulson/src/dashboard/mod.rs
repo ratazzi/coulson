@@ -233,10 +233,16 @@ impl AppView {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Returns true if the host matches the dashboard's reserved domain
-/// (the bare domain suffix with no app prefix, e.g. "coulson.local"),
-/// or a loopback address (127.0.0.1 / localhost / [::1]).
+/// Returns true if the host matches the dashboard's dedicated domain
+/// (`dashboard.{suffix}`).
 pub fn is_dashboard_host(host: &str, domain_suffix: &str) -> bool {
+    let dashboard_host = format!("dashboard.{domain_suffix}");
+    host == dashboard_host
+}
+
+/// Returns true if the host matches the "default" entry point:
+/// bare domain suffix (e.g. "coulson.local") or IP direct access.
+pub fn is_default_host(host: &str, domain_suffix: &str) -> bool {
     host == domain_suffix
         || host == "127.0.0.1"
         || host == "localhost"
@@ -1251,18 +1257,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_host_matches_bare_suffix() {
-        assert!(is_dashboard_host("coulson.local", "coulson.local"));
+    fn dashboard_host_matches_dedicated_subdomain() {
+        assert!(is_dashboard_host(
+            "dashboard.coulson.local",
+            "coulson.local"
+        ));
+        assert!(!is_dashboard_host("coulson.local", "coulson.local"));
         assert!(!is_dashboard_host("myapp.coulson.local", "coulson.local"));
-        assert!(!is_dashboard_host("other.test", "coulson.local"));
+        assert!(!is_dashboard_host("127.0.0.1", "coulson.local"));
     }
 
     #[test]
-    fn dashboard_host_matches_loopback() {
-        assert!(is_dashboard_host("127.0.0.1", "coulson.local"));
-        assert!(is_dashboard_host("localhost", "coulson.local"));
-        assert!(is_dashboard_host("::1", "coulson.local"));
-        assert!(is_dashboard_host("[::1]", "coulson.local"));
+    fn default_host_matches_bare_suffix_and_loopback() {
+        assert!(is_default_host("coulson.local", "coulson.local"));
+        assert!(is_default_host("127.0.0.1", "coulson.local"));
+        assert!(is_default_host("localhost", "coulson.local"));
+        assert!(is_default_host("::1", "coulson.local"));
+        assert!(is_default_host("[::1]", "coulson.local"));
+        assert!(!is_default_host("myapp.coulson.local", "coulson.local"));
+        assert!(!is_default_host("dashboard.coulson.local", "coulson.local"));
     }
 
     #[test]

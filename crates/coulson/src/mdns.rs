@@ -144,8 +144,9 @@ fn sync_records(
         let routes = state.routes.read();
         routes.keys().cloned().collect()
     };
-    // Always register the bare domain suffix (dashboard host)
+    // Always register the bare domain suffix (redirect host) and dashboard subdomain
     current_domains.insert(state.domain_suffix.clone());
+    current_domains.insert(format!("dashboard.{}", state.domain_suffix));
 
     // Remove stale
     let stale: Vec<String> = registered

@@ -1214,6 +1214,45 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }))
             }
         }
+        "settings.get_default_app" => match state.store.get_setting("default_app") {
+            Ok(val) => Ok(json!({ "default_app": val })),
+            Err(e) => return internal_error(req.request_id, e.to_string()),
+        },
+        "settings.set_default_app" => {
+            let default_app: Option<String> = match req.params.get("default_app") {
+                Some(serde_json::Value::String(s)) => Some(s.clone()),
+                Some(serde_json::Value::Null) | None => None,
+                _ => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "default_app must be a string or null".to_string(),
+                        ),
+                    );
+                }
+            };
+            match default_app {
+                Some(raw) => {
+                    let app_domain = raw.trim().to_ascii_lowercase();
+                    if app_domain.is_empty() {
+                        return render_err(
+                            req.request_id,
+                            ControlError::InvalidParams("default_app cannot be empty".to_string()),
+                        );
+                    }
+                    if let Err(e) = state.store.set_setting("default_app", &app_domain) {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "default_app": app_domain }))
+                }
+                None => {
+                    if let Err(e) = state.store.delete_setting("default_app") {
+                        return internal_error(req.request_id, e.to_string());
+                    }
+                    Ok(json!({ "default_app": null }))
+                }
+            }
+        }
         "tunnel.configure" => {
             let params: TunnelConfigureParams = parse_params!(req);
             if params.api_token.trim().is_empty() || params.account_id.trim().is_empty() {

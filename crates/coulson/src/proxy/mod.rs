@@ -126,8 +126,92 @@ impl ProxyHttp for BridgeProxy {
             return Ok(true);
         };
 
-        // Dashboard interception
+        // Dashboard dedicated domain: dashboard.{suffix}
         if crate::dashboard::is_dashboard_host(&host, &self.shared.domain_suffix) {
+            crate::dashboard::handle(session, &self.shared).await?;
+            return Ok(true);
+        }
+
+        // Default host: bare suffix + IP direct access
+        if crate::dashboard::is_default_host(&host, &self.shared.domain_suffix) {
+            // If default_app is set, resolve it as the effective host
+            let effective_host = match self.shared.store.get_setting("default_app") {
+                Ok(Some(app_domain)) => Some(app_domain),
+                _ => None,
+            };
+            if let Some(ref app_domain) = effective_host {
+                // Proxy to default app — strict lookup (no default.{suffix} fallback)
+                let req_path = session.req_header().uri.path().to_string();
+                let route = {
+                    let routes = self.shared.routes.read();
+                    select_route(routes.get(app_domain.as_str()), &req_path)
+                };
+                if let Some(route) = route {
+                    // Run the same pipeline as normal routing below
+                    if mw_auth(session, &route).await? == Flow::Done {
+                        return Ok(true);
+                    }
+                    if mw_cors(session, &route).await? == Flow::Done {
+                        return Ok(true);
+                    }
+                    if mw_static(session, &route, &req_path).await? == Flow::Done {
+                        return Ok(true);
+                    }
+                    if let BackendTarget::StaticDir { ref root } = route.target {
+                        serve_static(session, root, &req_path, route.cors_enabled).await?;
+                        return Ok(true);
+                    }
+                    let resolved_target = if let BackendTarget::Managed {
+                        ref app_id,
+                        ref root,
+                        ref kind,
+                    } = route.target
+                    {
+                        let root_path = std::path::PathBuf::from(root);
+                        let socket_path = {
+                            let mut pm = self.process_manager.lock().await;
+                            pm.ensure_running(app_id, &root_path, kind)
+                                .await
+                                .map_err(|e| {
+                                    Error::explain(ErrorType::ConnectError, format!("{e}"))
+                                })?
+                        };
+                        pm_mark_active(&self.process_manager, app_id).await;
+                        BackendTarget::UnixSocket { path: socket_path }
+                    } else {
+                        route.target.clone()
+                    };
+                    if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
+                        let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
+                    }
+                    if route.inspect_enabled {
+                        ctx.inspect = true;
+                        ctx.inspect_app_id = route.app_id.clone();
+                        ctx.inspect_store = Some(self.shared.store.clone());
+                        ctx.inspect_max_requests = self.shared.inspect_max_requests;
+                        ctx.inspect_tx = Some(self.shared.inspect_tx.clone());
+                        ctx.inspect_start = Some(std::time::Instant::now());
+                        ctx.inspect_method = Some(session.req_header().method.to_string());
+                        let uri = &session.req_header().uri;
+                        ctx.inspect_path = Some(uri.path().to_string());
+                        ctx.inspect_query = uri.query().map(|q| q.to_string());
+                        let headers: std::collections::HashMap<String, String> = session
+                            .req_header()
+                            .headers
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect();
+                        ctx.inspect_req_headers = serde_json::to_string(&headers).ok();
+                    }
+                    ctx.target = Some(resolved_target);
+                    ctx.timeout_ms = route.timeout_ms;
+                    ctx.cors_enabled = route.cors_enabled;
+                    ctx.spa_rewrite = route.spa_rewrite;
+                    ctx.is_upgrade = session.req_header().headers.get("upgrade").is_some();
+                    return Ok(false);
+                }
+                // default_app route not found → fall through to dashboard
+            }
             crate::dashboard::handle(session, &self.shared).await?;
             return Ok(true);
         }
@@ -344,7 +428,7 @@ pub async fn run_proxy(
     process_manager: ProcessManagerHandle,
 ) -> anyhow::Result<()> {
     let bind = addr.to_string();
-    info!(%bind, "proxy listening (HTTP)");
+    info!("proxy listening http://{bind}");
     if let Some(ref tls) = tls {
         info!(bind = %tls.bind, "proxy listening (HTTPS)");
     }
