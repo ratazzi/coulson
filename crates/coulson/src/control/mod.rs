@@ -308,12 +308,13 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
 
+            let target_value = format!("{}:{}", params.target_host, params.target_port);
             match state.store.insert_static(&StaticAppInput {
                 name: &params.name,
                 domain: &domain,
                 path_prefix: path_prefix.as_deref(),
-                target_host: &params.target_host,
-                target_port: params.target_port,
+                target_type: "tcp",
+                target_value: &target_value,
                 timeout_ms: params.timeout_ms,
                 cors_enabled: params.cors_enabled,
                 basic_auth_user: params.basic_auth_user.as_deref(),
@@ -363,12 +364,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            match state.store.insert_static_dir(
-                &params.name,
-                &domain,
-                &params.static_root,
-                params.listen_port,
-            ) {
+            match state.store.insert_static(&StaticAppInput {
+                name: &params.name,
+                domain: &domain,
+                path_prefix: None,
+                target_type: "static_dir",
+                target_value: &params.static_root,
+                timeout_ms: None,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
+                listen_port: params.listen_port,
+            }) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());
@@ -418,14 +426,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
 
-            match state.store.insert_unix_socket(
-                &params.name,
-                &domain,
-                path_prefix.as_deref(),
-                &params.socket_path,
-                params.timeout_ms,
-                params.listen_port,
-            ) {
+            match state.store.insert_static(&StaticAppInput {
+                name: &params.name,
+                domain: &domain,
+                path_prefix: path_prefix.as_deref(),
+                target_type: "unix_socket",
+                target_value: &params.socket_path,
+                timeout_ms: params.timeout_ms,
+                cors_enabled: false,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: false,
+                listen_port: params.listen_port,
+            }) {
                 Ok(app) => {
                     if let Err(e) = state.reload_routes() {
                         return internal_error(req.request_id, e.to_string());

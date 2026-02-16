@@ -101,32 +101,32 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
     let mut updated = 0usize;
     let mut skipped_manual = 0usize;
     for app in &discovered.apps {
-        let (_, op) = if let Some(ref app_root) = app.app_root {
-            let kind_str = app_kind_to_str(app.kind);
-            state.store.upsert_scanned_managed(
+        let (_, op) = match app.target_type.as_str() {
+            "managed" => {
+                let kind_str = app_kind_to_str(app.kind);
+                state.store.upsert_scanned_managed(
+                    &app.name,
+                    &app.domain,
+                    &app.target_value,
+                    kind_str,
+                    app.enabled,
+                    "apps_root",
+                )?
+            }
+            "static_dir" => state.store.upsert_scanned_static_dir(
                 &app.name,
                 &app.domain,
-                app_root,
-                kind_str,
+                &app.target_value,
                 app.enabled,
                 "apps_root",
-            )?
-        } else if let Some(ref static_root) = app.static_root {
-            state.store.upsert_scanned_static_dir(
-                &app.name,
-                &app.domain,
-                static_root,
-                app.enabled,
-                "apps_root",
-            )?
-        } else {
-            state.store.upsert_scanned_static(
+            )?,
+            _ => state.store.upsert_scanned_static(
                 &StaticAppInput {
                     name: &app.name,
                     domain: &app.domain,
                     path_prefix: app.path_prefix.as_deref(),
-                    target_host: &app.target_host,
-                    target_port: app.target_port,
+                    target_type: &app.target_type,
+                    target_value: &app.target_value,
                     timeout_ms: app.timeout_ms,
                     cors_enabled: app.cors_enabled,
                     basic_auth_user: app.basic_auth_user.as_deref(),
@@ -134,10 +134,9 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                     spa_rewrite: app.spa_rewrite,
                     listen_port: app.listen_port,
                 },
-                app.socket_path.as_deref(),
                 app.enabled,
                 "apps_root",
-            )?
+            )?,
         };
         match op {
             ScanUpsertResult::Inserted => inserted += 1,
@@ -178,17 +177,14 @@ struct DiscoveredStaticApp {
     kind: AppKind,
     domain: DomainName,
     path_prefix: Option<String>,
-    target_host: String,
-    target_port: u16,
-    socket_path: Option<String>,
+    target_type: String,
+    target_value: String,
     timeout_ms: Option<u64>,
     cors_enabled: bool,
     basic_auth_user: Option<String>,
     basic_auth_pass: Option<String>,
     spa_rewrite: bool,
     listen_port: Option<u16>,
-    app_root: Option<String>,
-    static_root: Option<String>,
     enabled: bool,
     explicit_domain: bool,
 }
@@ -281,17 +277,14 @@ fn discover(
                     kind: AppKind::Static,
                     domain,
                     path_prefix: route.path_prefix,
-                    target_host: route.target_host,
-                    target_port: route.target_port,
-                    socket_path: None,
+                    target_type: "tcp".to_string(),
+                    target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
-                    app_root: None,
-                    static_root: None,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
                 };
@@ -329,17 +322,14 @@ fn discover(
                         kind: AppKind::Static,
                         domain: domain.clone(),
                         path_prefix: route.path_prefix,
-                        target_host: route.target_host,
-                        target_port: route.target_port,
-                        socket_path: None,
+                        target_type: "tcp".to_string(),
+                        target_value: format!("{}:{}", route.target_host, route.target_port),
                         timeout_ms: route.timeout_ms,
                         cors_enabled: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
                         listen_port: None,
-                        app_root: None,
-                        static_root: None,
                         enabled: true,
                         explicit_domain,
                     };
@@ -367,17 +357,14 @@ fn discover(
                         kind: app_kind,
                         domain,
                         path_prefix: None,
-                        target_host: String::new(),
-                        target_port: 0,
-                        socket_path: None,
+                        target_type: "managed".to_string(),
+                        target_value: root_str,
                         timeout_ms: None,
                         cors_enabled: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
                         listen_port: None,
-                        app_root: Some(root_str),
-                        static_root: None,
                         enabled: true,
                         explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
                     };
@@ -397,17 +384,14 @@ fn discover(
                         kind: AppKind::Static,
                         domain,
                         path_prefix: None,
-                        target_host: String::new(),
-                        target_port: 0,
-                        socket_path: None,
+                        target_type: "static_dir".to_string(),
+                        target_value: public_root,
                         timeout_ms: None,
                         cors_enabled: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
                         listen_port: None,
-                        app_root: None,
-                        static_root: Some(public_root),
                         enabled: true,
                         explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
                     };
@@ -445,31 +429,34 @@ fn discover(
                     kind: app_kind,
                     domain,
                     path_prefix: None,
-                    target_host: String::new(),
-                    target_port: 0,
-                    socket_path: None,
+                    target_type: "managed".to_string(),
+                    target_value: root_str,
                     timeout_ms: None,
                     cors_enabled: manifest.cors_enabled.unwrap_or(false),
                     basic_auth_user: manifest.basic_auth_user,
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     listen_port: manifest.listen_port,
-                    app_root: Some(root_str),
-                    static_root: None,
                     enabled,
                     explicit_domain,
                 };
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             } else if let Some(routes) = manifest.routes {
                 for route in routes {
+                    let socket = route.socket_path.or_else(|| manifest.socket_path.clone());
+                    let (tt, tv) = if let Some(sp) = socket {
+                        ("unix_socket".to_string(), sp)
+                    } else {
+                        let host = route.target_host.unwrap_or_else(|| "127.0.0.1".to_string());
+                        ("tcp".to_string(), format!("{host}:{}", route.target_port))
+                    };
                     let app = DiscoveredStaticApp {
                         name: name.clone(),
                         kind: AppKind::Static,
                         domain: domain.clone(),
                         path_prefix: normalize_path_prefix(route.path_prefix.as_deref()),
-                        target_host: route.target_host.unwrap_or_else(|| "127.0.0.1".to_string()),
-                        target_port: route.target_port,
-                        socket_path: route.socket_path.or_else(|| manifest.socket_path.clone()),
+                        target_type: tt,
+                        target_value: tv,
                         timeout_ms: route.timeout_ms,
                         cors_enabled: route
                             .cors_enabled
@@ -483,33 +470,36 @@ fn discover(
                             .or_else(|| manifest.basic_auth_pass.clone()),
                         spa_rewrite: route.spa_rewrite.or(manifest.spa_rewrite).unwrap_or(false),
                         listen_port: route.listen_port.or(manifest.listen_port),
-                        app_root: None,
-                        static_root: None,
                         enabled,
                         explicit_domain,
                     };
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 }
             } else {
-                let target_host = manifest
-                    .target_host
-                    .unwrap_or_else(|| "127.0.0.1".to_string());
+                let (tt, tv) = if let Some(sp) = manifest.socket_path {
+                    ("unix_socket".to_string(), sp)
+                } else {
+                    let host = manifest
+                        .target_host
+                        .unwrap_or_else(|| "127.0.0.1".to_string());
+                    (
+                        "tcp".to_string(),
+                        format!("{host}:{}", manifest.target_port),
+                    )
+                };
                 let app = DiscoveredStaticApp {
                     name,
                     kind: AppKind::Static,
                     domain,
                     path_prefix: normalize_path_prefix(manifest.path_prefix.as_deref()),
-                    target_host,
-                    target_port: manifest.target_port,
-                    socket_path: manifest.socket_path,
+                    target_type: tt,
+                    target_value: tv,
                     timeout_ms: manifest.timeout_ms,
                     cors_enabled: manifest.cors_enabled.unwrap_or(false),
                     basic_auth_user: manifest.basic_auth_user,
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
                     listen_port: manifest.listen_port,
-                    app_root: None,
-                    static_root: None,
                     enabled,
                     explicit_domain,
                 };
@@ -587,17 +577,14 @@ fn discover_from_symlink(
                 kind: AppKind::Static,
                 domain: domain.clone(),
                 path_prefix: route.path_prefix,
-                target_host: route.target_host,
-                target_port: route.target_port,
-                socket_path: None,
+                target_type: "tcp".to_string(),
+                target_value: format!("{}:{}", route.target_host, route.target_port),
                 timeout_ms: route.timeout_ms,
                 cors_enabled: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
-                app_root: None,
-                static_root: None,
                 enabled: true,
                 explicit_domain,
             });
@@ -617,17 +604,14 @@ fn discover_from_symlink(
                     kind: AppKind::Static,
                     domain: domain.clone(),
                     path_prefix: route.path_prefix,
-                    target_host: route.target_host,
-                    target_port: route.target_port,
-                    socket_path: None,
+                    target_type: "tcp".to_string(),
+                    target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
-                    app_root: None,
-                    static_root: None,
                     enabled: true,
                     explicit_domain,
                 });
@@ -648,17 +632,14 @@ fn discover_from_symlink(
                         kind: AppKind::Static,
                         domain: domain.clone(),
                         path_prefix: route.path_prefix,
-                        target_host: route.target_host,
-                        target_port: route.target_port,
-                        socket_path: None,
+                        target_type: "tcp".to_string(),
+                        target_value: format!("{}:{}", route.target_host, route.target_port),
                         timeout_ms: route.timeout_ms,
                         cors_enabled: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
                         listen_port: None,
-                        app_root: None,
-                        static_root: None,
                         enabled: true,
                         explicit_domain,
                     });
@@ -679,17 +660,14 @@ fn discover_from_symlink(
                     kind: AppKind::Static,
                     domain: domain.clone(),
                     path_prefix: route.path_prefix,
-                    target_host: route.target_host,
-                    target_port: route.target_port,
-                    socket_path: None,
+                    target_type: "tcp".to_string(),
+                    target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
-                    app_root: None,
-                    static_root: None,
                     enabled: true,
                     explicit_domain,
                 });
@@ -708,17 +686,14 @@ fn discover_from_symlink(
                     kind: app_kind,
                     domain,
                     path_prefix: None,
-                    target_host: String::new(),
-                    target_port: 0,
-                    socket_path: None,
+                    target_type: "managed".to_string(),
+                    target_value: root_str,
                     timeout_ms: None,
                     cors_enabled: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
-                    app_root: Some(root_str),
-                    static_root: None,
                     enabled: true,
                     explicit_domain,
                 }]);
@@ -730,17 +705,14 @@ fn discover_from_symlink(
                     kind: AppKind::Static,
                     domain,
                     path_prefix: None,
-                    target_host: String::new(),
-                    target_port: 0,
-                    socket_path: None,
+                    target_type: "static_dir".to_string(),
+                    target_value: public_root,
                     timeout_ms: None,
                     cors_enabled: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
                     listen_port: None,
-                    app_root: None,
-                    static_root: Some(public_root),
                     enabled: true,
                     explicit_domain,
                 }]);
@@ -755,17 +727,14 @@ fn discover_from_symlink(
                 kind: AppKind::Static,
                 domain,
                 path_prefix: None,
-                target_host,
-                target_port,
-                socket_path: None,
+                target_type: "tcp".to_string(),
+                target_value: format!("{target_host}:{target_port}"),
                 timeout_ms,
                 cors_enabled: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
-                app_root: None,
-                static_root: None,
                 enabled: true,
                 explicit_domain,
             }]);
@@ -1093,17 +1062,14 @@ mod tests {
                 kind: AppKind::Static,
                 domain: DomainName("myapp.coulson.local".to_string()),
                 path_prefix: None,
-                target_host: "127.0.0.1".to_string(),
-                target_port: 5006,
-                socket_path: None,
+                target_type: "tcp".to_string(),
+                target_value: "127.0.0.1:5006".to_string(),
                 timeout_ms: None,
                 cors_enabled: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
-                app_root: None,
-                static_root: None,
                 enabled: true,
                 explicit_domain: false,
             },
@@ -1116,23 +1082,20 @@ mod tests {
                 kind: AppKind::Static,
                 domain: DomainName("myapp.coulson.local".to_string()),
                 path_prefix: None,
-                target_host: "127.0.0.1".to_string(),
-                target_port: 5007,
-                socket_path: None,
+                target_type: "tcp".to_string(),
+                target_value: "127.0.0.1:5007".to_string(),
                 timeout_ms: None,
                 cors_enabled: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
                 listen_port: None,
-                app_root: None,
-                static_root: None,
                 enabled: true,
                 explicit_domain: true,
             },
         );
         let winner = map.get("myapp.coulson.local|").expect("winner");
-        assert_eq!(winner.target_port, 5007);
+        assert_eq!(winner.target_value, "127.0.0.1:5007");
         assert_eq!(conflicts.len(), 1);
     }
 

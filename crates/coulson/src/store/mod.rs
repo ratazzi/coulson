@@ -26,8 +26,8 @@ pub struct StaticAppInput<'a> {
     pub name: &'a str,
     pub domain: &'a DomainName,
     pub path_prefix: Option<&'a str>,
-    pub target_host: &'a str,
-    pub target_port: u16,
+    pub target_type: &'a str,
+    pub target_value: &'a str,
     pub timeout_ms: Option<u64>,
     pub cors_enabled: bool,
     pub basic_auth_user: Option<&'a str>,
@@ -82,8 +82,8 @@ impl AppRepository {
               kind TEXT NOT NULL,
               domain TEXT NOT NULL,
               path_prefix TEXT NOT NULL DEFAULT '',
-              target_host TEXT NOT NULL,
-              target_port INTEGER NOT NULL,
+              target_type TEXT NOT NULL DEFAULT 'tcp',
+              target_value TEXT NOT NULL DEFAULT '',
               timeout_ms INTEGER,
               enabled INTEGER NOT NULL,
               scan_managed INTEGER NOT NULL DEFAULT 0,
@@ -94,8 +94,6 @@ impl AppRepository {
               basic_auth_user TEXT,
               basic_auth_pass TEXT,
               spa_rewrite INTEGER NOT NULL DEFAULT 0,
-              static_root TEXT,
-              socket_path TEXT,
               listen_port INTEGER,
               tunnel_url TEXT,
               tunnel_exposed INTEGER NOT NULL DEFAULT 0,
@@ -104,7 +102,6 @@ impl AppRepository {
               app_tunnel_domain TEXT,
               app_tunnel_dns_id TEXT,
               app_tunnel_creds TEXT,
-              app_root TEXT,
               share_auth INTEGER NOT NULL DEFAULT 0,
               inspect_enabled INTEGER NOT NULL DEFAULT 0,
               UNIQUE(domain, path_prefix)
@@ -146,8 +143,6 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN basic_auth_user TEXT",
             "ALTER TABLE apps ADD COLUMN basic_auth_pass TEXT",
             "ALTER TABLE apps ADD COLUMN spa_rewrite INTEGER NOT NULL DEFAULT 0",
-            "ALTER TABLE apps ADD COLUMN static_root TEXT",
-            "ALTER TABLE apps ADD COLUMN socket_path TEXT",
             "ALTER TABLE apps ADD COLUMN listen_port INTEGER",
             "ALTER TABLE apps ADD COLUMN tunnel_url TEXT",
             "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
@@ -156,7 +151,6 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT",
             "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT",
             "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT",
-            "ALTER TABLE apps ADD COLUMN app_root TEXT",
             "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
         ] {
@@ -187,15 +181,15 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 input.name,
                 "static",
                 domain_db,
                 path_prefix_db,
-                input.target_host,
-                i64::from(input.target_port),
+                input.target_type,
+                input.target_value,
                 input.timeout_ms.map(|v| v as i64),
                 1i64,
                 now.unix_timestamp(),
@@ -210,16 +204,14 @@ impl AppRepository {
         check_insert(result)?;
         let id = conn.last_insert_rowid();
 
+        let target = backend_target_from_db(id, input.target_type, input.target_value, "static");
         Ok(AppSpec {
             id: AppId(id),
             name: input.name.to_string(),
             kind: AppKind::Static,
             domain: input.domain.clone(),
             path_prefix: input.path_prefix.map(ToOwned::to_owned),
-            target: BackendTarget::Tcp {
-                host: input.target_host.to_string(),
-                port: input.target_port,
-            },
+            target,
             timeout_ms: input.timeout_ms,
             cors_enabled: input.cors_enabled,
             basic_auth_user: input.basic_auth_user.map(ToOwned::to_owned),
@@ -240,134 +232,9 @@ impl AppRepository {
         })
     }
 
-    pub fn insert_static_dir(
-        &self,
-        name: &str,
-        domain: &DomainName,
-        static_root: &str,
-        listen_port: Option<u16>,
-    ) -> anyhow::Result<AppSpec> {
-        let now = OffsetDateTime::now_utc();
-        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
-
-        let conn = self.conn.lock();
-        let result = conn.execute(
-            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, static_root, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 0, NULL, ?8, ?9, 0, NULL, NULL, 0, ?10, ?11)",
-            params![
-                name,
-                "static",
-                domain_db,
-                "",
-                "",
-                0i64,
-                1i64,
-                now.unix_timestamp(),
-                now.unix_timestamp(),
-                static_root,
-                listen_port.map(|v| v as i64),
-            ],
-        );
-        check_insert(result)?;
-        let id = conn.last_insert_rowid();
-
-        Ok(AppSpec {
-            id: AppId(id),
-            name: name.to_string(),
-            kind: AppKind::Static,
-            domain: domain.clone(),
-            path_prefix: None,
-            target: BackendTarget::StaticDir {
-                root: static_root.to_string(),
-            },
-            timeout_ms: None,
-            cors_enabled: false,
-            basic_auth_user: None,
-            basic_auth_pass: None,
-            spa_rewrite: false,
-            listen_port,
-            tunnel_url: None,
-            tunnel_exposed: false,
-            tunnel_mode: TunnelMode::None,
-            app_tunnel_id: None,
-            app_tunnel_domain: None,
-            app_tunnel_dns_id: None,
-            app_tunnel_creds: None,
-            inspect_enabled: false,
-            enabled: true,
-            created_at: now,
-            updated_at: now,
-        })
-    }
-
-    pub fn insert_unix_socket(
-        &self,
-        name: &str,
-        domain: &DomainName,
-        path_prefix: Option<&str>,
-        socket_path: &str,
-        timeout_ms: Option<u64>,
-        listen_port: Option<u16>,
-    ) -> anyhow::Result<AppSpec> {
-        let now = OffsetDateTime::now_utc();
-        let path_prefix_db = path_prefix_to_db(path_prefix);
-        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
-
-        let conn = self.conn.lock();
-        let result = conn.execute(
-            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, 0, NULL, NULL, 0, ?11, ?12)",
-            params![
-                name,
-                "static",
-                domain_db,
-                path_prefix_db,
-                "",
-                0i64,
-                timeout_ms.map(|v| v as i64),
-                1i64,
-                now.unix_timestamp(),
-                now.unix_timestamp(),
-                socket_path,
-                listen_port.map(|v| v as i64),
-            ],
-        );
-        check_insert(result)?;
-        let id = conn.last_insert_rowid();
-
-        Ok(AppSpec {
-            id: AppId(id),
-            name: name.to_string(),
-            kind: AppKind::Static,
-            domain: domain.clone(),
-            path_prefix: path_prefix.map(ToOwned::to_owned),
-            target: BackendTarget::UnixSocket {
-                path: socket_path.to_string(),
-            },
-            timeout_ms,
-            cors_enabled: false,
-            basic_auth_user: None,
-            basic_auth_pass: None,
-            spa_rewrite: false,
-            listen_port,
-            tunnel_url: None,
-            tunnel_exposed: false,
-            tunnel_mode: TunnelMode::None,
-            app_tunnel_id: None,
-            app_tunnel_domain: None,
-            app_tunnel_dns_id: None,
-            app_tunnel_creds: None,
-            inspect_enabled: false,
-            enabled: true,
-            created_at: now,
-            updated_at: now,
-        })
-    }
-
     pub fn upsert_scanned_static(
         &self,
         input: &StaticAppInput,
-        socket_path: Option<&str>,
         enabled: bool,
         source: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
@@ -388,12 +255,12 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_host = ?3, target_port = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, socket_path = ?12, listen_port = ?13 WHERE id = ?14",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_type = ?3, target_value = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12 WHERE id = ?13",
                     params![
                         input.name,
                         path_prefix_db,
-                        input.target_host,
-                        i64::from(input.target_port),
+                        input.target_type,
+                        input.target_value,
                         input.timeout_ms.map(|v| v as i64),
                         now,
                         source,
@@ -401,7 +268,6 @@ impl AppRepository {
                         input.basic_auth_user,
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
-                        socket_path,
                         input.listen_port.map(|v| v as i64),
                         id
                     ],
@@ -410,15 +276,15 @@ impl AppRepository {
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                     params![
                         input.name,
                         "static",
                         domain_db,
                         path_prefix_db,
-                        input.target_host,
-                        i64::from(input.target_port),
+                        input.target_type,
+                        input.target_value,
                         input.timeout_ms.map(|v| v as i64),
                         if enabled { 1 } else { 0 },
                         source,
@@ -428,7 +294,6 @@ impl AppRepository {
                         input.basic_auth_user,
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
-                        socket_path,
                         input.listen_port.map(|v| v as i64),
                     ],
                 )?;
@@ -468,25 +333,25 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = ?2, target_host = '', target_port = 0, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = ?5 WHERE id = ?6",
-                    params![name, kind, now, source, app_root, id],
+                    "UPDATE apps SET name = ?1, kind = ?2, target_type = 'managed', target_value = ?3, updated_at = ?4, scan_managed = 1, scan_source = ?5 WHERE id = ?6",
+                    params![name, kind, app_root, now, source, id],
                 )?;
                 ScanUpsertResult::Updated
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, app_root)
-                     VALUES (?1, ?2, ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
+                     VALUES (?1, ?2, ?3, ?4, 'managed', ?5, NULL, ?6, 1, ?7, ?8, ?9)",
                     params![
                         name,
                         kind,
                         domain_db,
                         path_prefix_db,
+                        app_root,
                         if enabled { 1 } else { 0 },
                         source,
                         now,
                         now,
-                        app_root,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -523,24 +388,24 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = 'static', target_host = '', target_port = 0, static_root = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4, app_root = NULL WHERE id = ?5",
+                    "UPDATE apps SET name = ?1, kind = 'static', target_type = 'static_dir', target_value = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4 WHERE id = ?5",
                     params![name, static_root, now, source, id],
                 )?;
                 ScanUpsertResult::Updated
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, static_root)
-                     VALUES (?1, 'static', ?2, ?3, '', 0, NULL, ?4, 1, ?5, ?6, ?7, ?8)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
+                     VALUES (?1, 'static', ?2, ?3, 'static_dir', ?4, NULL, ?5, 1, ?6, ?7, ?8)",
                     params![
                         name,
                         domain_db,
                         path_prefix_db,
+                        static_root,
                         if enabled { 1 } else { 0 },
                         source,
                         now,
                         now,
-                        static_root,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -973,9 +838,44 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root,inspect_enabled";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled";
+
+fn backend_target_from_db(
+    id: i64,
+    target_type: &str,
+    target_value: &str,
+    kind: &str,
+) -> BackendTarget {
+    match target_type {
+        "managed" => BackendTarget::Managed {
+            app_id: id,
+            root: target_value.to_string(),
+            kind: kind.to_string(),
+        },
+        "static_dir" => BackendTarget::StaticDir {
+            root: target_value.to_string(),
+        },
+        "unix_socket" => BackendTarget::UnixSocket {
+            path: target_value.to_string(),
+        },
+        _ => {
+            if let Some((host, port_str)) = target_value.rsplit_once(':') {
+                BackendTarget::Tcp {
+                    host: host.to_string(),
+                    port: port_str.parse::<u16>().unwrap_or(0),
+                }
+            } else {
+                BackendTarget::Tcp {
+                    host: target_value.to_string(),
+                    port: 0,
+                }
+            }
+        }
+    }
+}
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
+    let id_val: i64 = row.get(0)?;
     let kind_str: String = row.get(2)?;
     let kind = match kind_str.as_str() {
         "static" => AppKind::Static,
@@ -985,34 +885,16 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         _ => AppKind::Static,
     };
 
+    let target_type: String = row.get(5)?;
+    let target_value: String = row.get(6)?;
+    let target = backend_target_from_db(id_val, &target_type, &target_value, &kind_str);
+
     let created_ts: i64 = row.get(9)?;
     let updated_ts: i64 = row.get(10)?;
-    let static_root: Option<String> = row.get::<_, Option<String>>(15).unwrap_or(None);
-    let socket_path: Option<String> = row.get::<_, Option<String>>(16).unwrap_or(None);
-    let app_root: Option<String> = row.get::<_, Option<String>>(24).unwrap_or(None);
-
-    let id_val: i64 = row.get(0)?;
-    let target = if let Some(root) = app_root {
-        BackendTarget::Managed {
-            app_id: id_val,
-            root,
-            kind: kind_str.clone(),
-        }
-    } else if let Some(root) = static_root {
-        BackendTarget::StaticDir { root }
-    } else if let Some(path) = socket_path {
-        BackendTarget::UnixSocket { path }
-    } else {
-        BackendTarget::Tcp {
-            host: row.get(5)?,
-            port: row.get::<_, i64>(6)? as u16,
-        }
-    };
-
     let domain_prefix: String = row.get(3)?;
     let full_domain = domain_from_db(&domain_prefix, suffix);
     let tunnel_mode: TunnelMode = row
-        .get::<_, String>(19)
+        .get::<_, String>(17)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_default();
@@ -1035,17 +917,17 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         basic_auth_pass: row.get::<_, Option<String>>(13).unwrap_or(None),
         spa_rewrite: row.get::<_, i64>(14).unwrap_or(0) == 1,
         listen_port: row
-            .get::<_, Option<i64>>(17)
+            .get::<_, Option<i64>>(15)
             .unwrap_or(None)
             .map(|v| v as u16),
-        tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
+        tunnel_url: row.get::<_, Option<String>>(16).unwrap_or(None),
         tunnel_exposed: tunnel_mode.is_exposed(),
         tunnel_mode,
-        app_tunnel_id: row.get::<_, Option<String>>(20).unwrap_or(None),
-        app_tunnel_domain: row.get::<_, Option<String>>(21).unwrap_or(None),
-        app_tunnel_dns_id: row.get::<_, Option<String>>(22).unwrap_or(None),
-        app_tunnel_creds: row.get::<_, Option<String>>(23).unwrap_or(None),
-        inspect_enabled: row.get::<_, i64>(25).unwrap_or(0) == 1,
+        app_tunnel_id: row.get::<_, Option<String>>(18).unwrap_or(None),
+        app_tunnel_domain: row.get::<_, Option<String>>(19).unwrap_or(None),
+        app_tunnel_dns_id: row.get::<_, Option<String>>(20).unwrap_or(None),
+        app_tunnel_creds: row.get::<_, Option<String>>(21).unwrap_or(None),
+        inspect_enabled: row.get::<_, i64>(22).unwrap_or(0) == 1,
     })
 }
 
@@ -1118,8 +1000,8 @@ fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Resu
           kind TEXT NOT NULL,
           domain TEXT NOT NULL,
           path_prefix TEXT NOT NULL DEFAULT '',
-          target_host TEXT NOT NULL,
-          target_port INTEGER NOT NULL,
+          target_type TEXT NOT NULL DEFAULT 'tcp',
+          target_value TEXT NOT NULL DEFAULT '',
           timeout_ms INTEGER,
           enabled INTEGER NOT NULL,
           scan_managed INTEGER NOT NULL DEFAULT 0,
@@ -1129,12 +1011,13 @@ fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Resu
           UNIQUE(domain, path_prefix)
         );
         INSERT INTO apps (
-          id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms,
+          id, name, kind, domain, path_prefix, target_type, target_value, timeout_ms,
           enabled, scan_managed, scan_source, created_at, updated_at
         )
         SELECT
-          id, name, kind, domain, '', target_host, target_port, NULL,
-          enabled, scan_managed, scan_source, created_at, updated_at
+          id, name, kind, domain, '', 'tcp',
+          COALESCE(target_host, '127.0.0.1') || ':' || COALESCE(target_port, 0),
+          NULL, enabled, scan_managed, scan_source, created_at, updated_at
         FROM apps_old;
         DROP TABLE apps_old;
         CREATE INDEX IF NOT EXISTS idx_apps_enabled_domain ON apps(enabled, domain);
@@ -1199,8 +1082,8 @@ mod tests {
             name: "myapp",
             domain: &domain,
             path_prefix: None,
-            target_host: "127.0.0.1",
-            target_port: 9001,
+            target_type: "tcp",
+            target_value: "127.0.0.1:9001",
             timeout_ms: None,
             cors_enabled: false,
             basic_auth_user: None,
@@ -1254,8 +1137,8 @@ mod tests {
             name: "myapp",
             domain: &domain,
             path_prefix: None,
-            target_host: "127.0.0.1",
-            target_port: 9001,
+            target_type: "tcp",
+            target_value: "127.0.0.1:9001",
             timeout_ms: None,
             cors_enabled: false,
             basic_auth_user: None,
