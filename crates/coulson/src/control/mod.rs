@@ -291,6 +291,21 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             // Type-specific validation
             match params.target_type.as_str() {
+                "tcp" => {
+                    let (_, port_str) = params.target_value.rsplit_once(':').unwrap_or(("", ""));
+                    match port_str.parse::<u16>() {
+                        Ok(p) if p > 0 => {}
+                        _ => {
+                            return render_err(
+                                req.request_id,
+                                ControlError::InvalidParams(format!(
+                                    "tcp target_value must be host:port (port > 0), got: {}",
+                                    params.target_value
+                                )),
+                            );
+                        }
+                    }
+                }
                 "static_dir" => {
                     let root = std::path::Path::new(&params.target_value);
                     if !root.is_dir() {
@@ -315,7 +330,14 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                         );
                     }
                 }
-                _ => {}
+                other => {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(format!(
+                            "unknown target_type: {other}, must be tcp/static_dir/unix_socket"
+                        )),
+                    );
+                }
             }
 
             let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
