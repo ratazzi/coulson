@@ -97,7 +97,7 @@ struct CreateUnixSocketParams {
 
 #[derive(Debug, Deserialize)]
 struct AppIdParams {
-    app_id: String,
+    app_id: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,7 +130,7 @@ struct NamedTunnelConnectParams {
 
 #[derive(Debug, Deserialize)]
 struct AppTunnelSetupParams {
-    app_id: String,
+    app_id: i64,
     domain: String,
     #[serde(default)]
     auto_dns: bool,
@@ -138,7 +138,7 @@ struct AppTunnelSetupParams {
 
 #[derive(Debug, Deserialize)]
 struct UpdateSettingsParams {
-    app_id: String,
+    app_id: i64,
     cors_enabled: Option<bool>,
     basic_auth_user: Option<Option<String>>,
     basic_auth_pass: Option<Option<String>>,
@@ -443,7 +443,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "app.update" => {
             let params: UpdateSettingsParams = parse_params!(req);
             match state.store.update_settings(
-                &params.app_id,
+                params.app_id,
                 params.cors_enabled,
                 params.basic_auth_user.as_ref().map(|v| v.as_deref()),
                 params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
@@ -463,7 +463,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             // Handle tunnel_mode change
             if let Some(new_mode) = params.tunnel_mode {
-                let app = find_app!(state, req, &params.app_id);
+                let app = find_app!(state, req, params.app_id);
 
                 let old_mode = &app.tunnel_mode;
 
@@ -492,13 +492,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     // Teardown old mode (best-effort: log errors and continue)
                     match old_mode {
                         TunnelMode::Quick => {
-                            let _ = tunnel::stop_tunnel(&state.tunnels, &params.app_id);
-                            if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
+                            let _ = tunnel::stop_tunnel(&state.tunnels, params.app_id);
+                            if let Err(e) = state.store.update_tunnel_url(params.app_id, None) {
                                 tracing::warn!(error = %e, "failed to clear tunnel_url during teardown");
                             }
-                            if let Err(e) = state
-                                .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::None)
+                            if let Err(e) =
+                                state.store.set_tunnel_mode(params.app_id, TunnelMode::None)
                             {
                                 tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
                             }
@@ -507,10 +506,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             // Stop the tunnel connection but preserve credentials
                             // so the tunnel can be reconnected via `start` without re-creating CF resources.
                             let _ =
-                                tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
-                            if let Err(e) = state
-                                .store
-                                .set_tunnel_mode(&params.app_id, TunnelMode::None)
+                                tunnel::stop_app_named_tunnel(&state.app_tunnels, params.app_id);
+                            if let Err(e) =
+                                state.store.set_tunnel_mode(params.app_id, TunnelMode::None)
                             {
                                 tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
                             }
@@ -523,7 +521,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                         TunnelMode::Quick => {
                             match tunnel::start_quick_tunnel(
                                 state.tunnels.clone(),
-                                params.app_id.clone(),
+                                params.app_id,
                                 routing.clone(),
                             )
                             .await
@@ -531,13 +529,13 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 Ok(hostname) => {
                                     let url = format!("https://{hostname}");
                                     if let Err(e) =
-                                        state.store.update_tunnel_url(&params.app_id, Some(&url))
+                                        state.store.update_tunnel_url(params.app_id, Some(&url))
                                     {
                                         return internal_error(req.request_id, e.to_string());
                                     }
                                     if let Err(e) = state
                                         .store
-                                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick)
+                                        .set_tunnel_mode(params.app_id, TunnelMode::Quick)
                                     {
                                         return internal_error(req.request_id, e.to_string());
                                     }
@@ -580,7 +578,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 };
                                 if let Err(e) = tunnel::start_app_named_tunnel(
                                     state.app_tunnels.clone(),
-                                    params.app_id.clone(),
+                                    params.app_id,
                                     creds.clone(),
                                     tunnel_domain.clone(),
                                     routing.clone(),
@@ -591,7 +589,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 }
                                 if let Err(e) = state
                                     .store
-                                    .set_tunnel_mode(&params.app_id, TunnelMode::Named)
+                                    .set_tunnel_mode(params.app_id, TunnelMode::Named)
                                 {
                                     return internal_error(req.request_id, e.to_string());
                                 }
@@ -617,7 +615,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
                                 if let Err(e) = tunnel::start_app_named_tunnel(
                                     state.app_tunnels.clone(),
-                                    params.app_id.clone(),
+                                    params.app_id,
                                     credentials.clone(),
                                     tunnel_domain.clone(),
                                     routing.clone(),
@@ -632,7 +630,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                     Err(e) => return internal_error(req.request_id, e.to_string()),
                                 };
                                 if let Err(e) = state.store.set_app_tunnel_state(
-                                    &params.app_id,
+                                    params.app_id,
                                     Some(&tunnel_id),
                                     Some(&tunnel_domain),
                                     None,
@@ -728,7 +726,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
                             if let Err(e) = tunnel::start_app_named_tunnel(
                                 state.app_tunnels.clone(),
-                                params.app_id.clone(),
+                                params.app_id,
                                 credentials.clone(),
                                 tunnel_domain.clone(),
                                 routing.clone(),
@@ -753,7 +751,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 Err(e) => return internal_error(req.request_id, e.to_string()),
                             };
                             if let Err(e) = state.store.set_app_tunnel_state(
-                                &params.app_id,
+                                params.app_id,
                                 Some(&tunnel_id),
                                 Some(&tunnel_domain),
                                 dns_record_id.as_deref(),
@@ -776,7 +774,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                         }
                         // None / Global — teardown already done above, just set mode
                         _ => {
-                            if let Err(e) = state.store.set_tunnel_mode(&params.app_id, new_mode) {
+                            if let Err(e) = state.store.set_tunnel_mode(params.app_id, new_mode) {
                                 return internal_error(req.request_id, e.to_string());
                             }
                             return ok_response(
@@ -792,7 +790,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "app.delete" => {
             let params: AppIdParams = parse_params!(req);
-            match state.store.delete(&params.app_id) {
+            match state.store.delete(params.app_id) {
                 Ok(found) => {
                     if !found {
                         return render_err(req.request_id, ControlError::NotFound);
@@ -807,7 +805,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "app.start" => {
             let params: AppIdParams = parse_params!(req);
-            match state.store.set_enabled(&params.app_id, true) {
+            match state.store.set_enabled(params.app_id, true) {
                 Ok(found) => {
                     if !found {
                         return render_err(req.request_id, ControlError::NotFound);
@@ -822,7 +820,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "app.stop" => {
             let params: AppIdParams = parse_params!(req);
-            match state.store.set_enabled(&params.app_id, false) {
+            match state.store.set_enabled(params.app_id, false) {
                 Ok(found) => {
                     if !found {
                         return render_err(req.request_id, ControlError::NotFound);
@@ -860,7 +858,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "process.restart" => {
             let params: AppIdParams = parse_params!(req);
-            let app = find_app!(state, req, &params.app_id);
+            let app = find_app!(state, req, params.app_id);
             let (root, kind) = match &app.target {
                 crate::domain::BackendTarget::Managed { root, kind, .. } => {
                     (root.clone(), kind.clone())
@@ -873,9 +871,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
             let mut pm = state.process_manager.lock().await;
-            pm.kill_process(&params.app_id);
+            pm.kill_process(params.app_id);
             match pm
-                .ensure_running(&params.app_id, std::path::Path::new(&root), &kind)
+                .ensure_running(params.app_id, std::path::Path::new(&root), &kind)
                 .await
             {
                 Ok(socket_path) => Ok(json!({ "restarted": true, "socket_path": socket_path })),
@@ -890,21 +888,19 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             let params: AppIdParams = parse_params!(req);
 
             // Look up the app to get its target port
-            let app = find_app!(state, req, &params.app_id);
+            let app = find_app!(state, req, params.app_id);
 
             let routing = routing_for_app(&app, state.listen_http.port());
 
-            match tunnel::start_quick_tunnel(state.tunnels.clone(), params.app_id.clone(), routing)
-                .await
-            {
+            match tunnel::start_quick_tunnel(state.tunnels.clone(), params.app_id, routing).await {
                 Ok(hostname) => {
                     let url = format!("https://{}", hostname);
-                    if let Err(e) = state.store.update_tunnel_url(&params.app_id, Some(&url)) {
+                    if let Err(e) = state.store.update_tunnel_url(params.app_id, Some(&url)) {
                         return internal_error(req.request_id, e.to_string());
                     }
                     if let Err(e) = state
                         .store
-                        .set_tunnel_mode(&params.app_id, TunnelMode::Quick)
+                        .set_tunnel_mode(params.app_id, TunnelMode::Quick)
                     {
                         return internal_error(req.request_id, e.to_string());
                     }
@@ -916,15 +912,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "tunnel.stop" => {
             let params: AppIdParams = parse_params!(req);
 
-            match tunnel::stop_tunnel(&state.tunnels, &params.app_id) {
+            match tunnel::stop_tunnel(&state.tunnels, params.app_id) {
                 Ok(()) => {
-                    if let Err(e) = state.store.update_tunnel_url(&params.app_id, None) {
+                    if let Err(e) = state.store.update_tunnel_url(params.app_id, None) {
                         return internal_error(req.request_id, e.to_string());
                     }
-                    if let Err(e) = state
-                        .store
-                        .set_tunnel_mode(&params.app_id, TunnelMode::None)
-                    {
+                    if let Err(e) = state.store.set_tunnel_mode(params.app_id, TunnelMode::None) {
                         return internal_error(req.request_id, e.to_string());
                     }
                     Ok(json!({ "stopped": true }))
@@ -1297,7 +1290,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Look up app and get target port
-            let app = find_app!(state, req, &params.app_id);
+            let app = find_app!(state, req, params.app_id);
 
             let routing = routing_for_app(&app, state.listen_http.port());
 
@@ -1367,7 +1360,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             // Start tunnel connection
             if let Err(e) = tunnel::start_app_named_tunnel(
                 state.app_tunnels.clone(),
-                params.app_id.clone(),
+                params.app_id,
                 credentials.clone(),
                 params.domain.clone(),
                 routing,
@@ -1389,7 +1382,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
             if let Err(e) = state.store.set_app_tunnel_state(
-                &params.app_id,
+                params.app_id,
                 Some(&tunnel_id),
                 Some(&params.domain),
                 dns_record_id.as_deref(),
@@ -1417,7 +1410,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
 
             // Get app info
-            let app = find_app!(state, req, &params.app_id);
+            let app = find_app!(state, req, params.app_id);
 
             let tunnel_id = match &app.app_tunnel_id {
                 Some(id) => id.clone(),
@@ -1430,7 +1423,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             };
 
             // Stop running tunnel connection (ignore if not running)
-            let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, &params.app_id);
+            let _ = tunnel::stop_app_named_tunnel(&state.app_tunnels, params.app_id);
 
             let mut warnings: Vec<String> = Vec::new();
 
@@ -1464,7 +1457,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
 
             // Clear tunnel fields in DB (atomic: tunnel fields + mode in one update)
             if let Err(e) = state.store.set_app_tunnel_state(
-                &params.app_id,
+                params.app_id,
                 None,
                 None,
                 None,
@@ -1483,7 +1476,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "tunnel.app_status" => {
             let params: AppIdParams = parse_params!(req);
 
-            let app = find_app!(state, req, &params.app_id);
+            let app = find_app!(state, req, params.app_id);
 
             let connected = state.app_tunnels.lock().contains_key(&params.app_id);
             let configured = app.app_tunnel_id.is_some();

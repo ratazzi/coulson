@@ -5,22 +5,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
-use uuid::Uuid;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct AppId(pub String);
-
-impl Default for AppId {
-    fn default() -> Self {
-        Self(Uuid::now_v7().to_string())
-    }
-}
-
-impl AppId {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AppId(pub i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -137,7 +124,7 @@ pub enum BackendTarget {
         root: String,
     },
     Managed {
-        app_id: String,
+        app_id: i64,
         root: String,
         kind: String,
     },

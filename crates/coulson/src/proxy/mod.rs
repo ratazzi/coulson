@@ -80,7 +80,7 @@ struct ProxyCtx {
     is_upgrade: bool,
     // Request inspector fields
     inspect: bool,
-    inspect_app_id: Option<String>,
+    inspect_app_id: Option<i64>,
     inspect_store: Option<std::sync::Arc<crate::store::AppRepository>>,
     inspect_max_requests: usize,
     inspect_start: Option<std::time::Instant>,
@@ -170,13 +170,13 @@ impl ProxyHttp for BridgeProxy {
                         let root_path = std::path::PathBuf::from(root);
                         let socket_path = {
                             let mut pm = self.process_manager.lock().await;
-                            pm.ensure_running(app_id, &root_path, kind)
+                            pm.ensure_running(*app_id, &root_path, kind)
                                 .await
                                 .map_err(|e| {
                                     Error::explain(ErrorType::ConnectError, format!("{e}"))
                                 })?
                         };
-                        pm_mark_active(&self.process_manager, app_id).await;
+                        pm_mark_active(&self.process_manager, *app_id).await;
                         BackendTarget::UnixSocket { path: socket_path }
                     } else {
                         route.target.clone()
@@ -186,7 +186,7 @@ impl ProxyHttp for BridgeProxy {
                     }
                     if route.inspect_enabled {
                         ctx.inspect = true;
-                        ctx.inspect_app_id = route.app_id.clone();
+                        ctx.inspect_app_id = route.app_id;
                         ctx.inspect_store = Some(self.shared.store.clone());
                         ctx.inspect_max_requests = self.shared.inspect_max_requests;
                         ctx.inspect_tx = Some(self.shared.inspect_tx.clone());
@@ -255,12 +255,12 @@ impl ProxyHttp for BridgeProxy {
             let root_path = std::path::PathBuf::from(root);
             let socket_path = {
                 let mut pm = self.process_manager.lock().await;
-                pm.ensure_running(app_id, &root_path, kind)
+                pm.ensure_running(*app_id, &root_path, kind)
                     .await
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
             // Mark active for idle reaper
-            pm_mark_active(&self.process_manager, app_id).await;
+            pm_mark_active(&self.process_manager, *app_id).await;
             BackendTarget::UnixSocket { path: socket_path }
         } else {
             route.target.clone()
@@ -274,7 +274,7 @@ impl ProxyHttp for BridgeProxy {
         // --- Request Inspector ---
         if route.inspect_enabled {
             ctx.inspect = true;
-            ctx.inspect_app_id = route.app_id.clone();
+            ctx.inspect_app_id = route.app_id;
             ctx.inspect_store = Some(self.shared.store.clone());
             ctx.inspect_max_requests = self.shared.inspect_max_requests;
             ctx.inspect_tx = Some(self.shared.inspect_tx.clone());
@@ -553,7 +553,7 @@ impl ProxyHttp for DedicatedProxy {
         // --- Request Inspector ---
         if route.inspect_enabled {
             ctx.inspect = true;
-            ctx.inspect_app_id = route.app_id.clone();
+            ctx.inspect_app_id = route.app_id;
             ctx.inspect_store = Some(self.store.clone());
             ctx.inspect_max_requests = self.inspect_max_requests;
             ctx.inspect_tx = Some(self.inspect_tx.clone());
@@ -1221,7 +1221,7 @@ fn should_rewrite_for_spa(path: &str) -> bool {
 // Process manager helper
 // ---------------------------------------------------------------------------
 
-async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: &str) {
+async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: i64) {
     let mut pm = pm.lock().await;
     pm.mark_active(app_id);
 }
@@ -1380,7 +1380,7 @@ fn inspect_capture_resp_body(ctx: &mut ProxyCtx, body: &Option<Bytes>, end_of_st
         };
         if let Some(tx) = ctx.inspect_tx.take() {
             let event = crate::InspectEvent {
-                app_id: captured.app_id.clone(),
+                app_id: captured.app_id,
                 request_id: captured.id.clone(),
                 method: captured.method.clone(),
                 path: captured.path.clone(),

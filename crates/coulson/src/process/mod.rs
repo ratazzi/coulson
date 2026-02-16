@@ -45,7 +45,7 @@ pub fn default_registry() -> ProviderRegistry {
 }
 
 pub struct ProcessManager {
-    processes: HashMap<String, ManagedProcess>,
+    processes: HashMap<i64, ManagedProcess>,
     idle_timeout: Duration,
     registry: Arc<ProviderRegistry>,
 }
@@ -61,7 +61,7 @@ struct ManagedProcess {
 
 #[derive(serde::Serialize)]
 pub struct ProcessInfo {
-    pub app_id: String,
+    pub app_id: i64,
     pub pid: u32,
     pub kind: String,
     pub socket_path: String,
@@ -86,7 +86,7 @@ impl ProcessManager {
             .map(|(app_id, proc)| {
                 let alive = matches!(proc.child.try_wait(), Ok(None));
                 ProcessInfo {
-                    app_id: app_id.clone(),
+                    app_id: *app_id,
                     pid: proc.child.id().unwrap_or(0),
                     kind: proc.kind.clone(),
                     socket_path: proc.socket_path.to_string_lossy().to_string(),
@@ -103,12 +103,12 @@ impl ProcessManager {
     /// The `kind` parameter selects the provider (e.g. "asgi", "rack", "node").
     pub async fn ensure_running(
         &mut self,
-        app_id: &str,
+        app_id: i64,
         root: &Path,
         kind: &str,
     ) -> anyhow::Result<String> {
         // Check if already running and alive
-        if let Some(proc) = self.processes.get_mut(app_id) {
+        if let Some(proc) = self.processes.get_mut(&app_id) {
             match proc.child.try_wait() {
                 Ok(None) => {
                     proc.last_active = Instant::now();
@@ -116,7 +116,7 @@ impl ProcessManager {
                 }
                 _ => {
                     info!(app_id, "managed process exited, will restart");
-                    let removed = self.processes.remove(app_id).unwrap();
+                    let removed = self.processes.remove(&app_id).unwrap();
                     cleanup_socket(&removed.socket_path);
                 }
             }
@@ -187,7 +187,7 @@ impl ProcessManager {
         let path_str = spec.socket_path.to_string_lossy().to_string();
         let now = Instant::now();
         self.processes.insert(
-            app_id.to_string(),
+            app_id,
             ManagedProcess {
                 child,
                 socket_path: spec.socket_path,
@@ -201,8 +201,8 @@ impl ProcessManager {
     }
 
     /// Kill a specific managed process. Returns true if it was found and killed.
-    pub fn kill_process(&mut self, app_id: &str) -> bool {
-        if let Some(mut proc) = self.processes.remove(app_id) {
+    pub fn kill_process(&mut self, app_id: i64) -> bool {
+        if let Some(mut proc) = self.processes.remove(&app_id) {
             info!(app_id, "killing managed process for restart");
             let _ = proc.child.start_kill();
             cleanup_socket(&proc.socket_path);
@@ -212,8 +212,8 @@ impl ProcessManager {
         }
     }
 
-    pub fn mark_active(&mut self, app_id: &str) {
-        if let Some(proc) = self.processes.get_mut(app_id) {
+    pub fn mark_active(&mut self, app_id: i64) {
+        if let Some(proc) = self.processes.get_mut(&app_id) {
             proc.last_active = Instant::now();
         }
     }
@@ -226,7 +226,7 @@ impl ProcessManager {
 
         for (app_id, proc) in &self.processes {
             if now.duration_since(proc.last_active) > timeout {
-                to_remove.push(app_id.clone());
+                to_remove.push(*app_id);
             }
         }
 

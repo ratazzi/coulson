@@ -198,7 +198,7 @@ impl AppView {
             None
         };
         Self {
-            id: app.id.0.clone(),
+            id: app.id.0.to_string(),
             name: app.name.clone(),
             domain: app.domain.0.clone(),
             domain_href,
@@ -271,7 +271,7 @@ pub async fn handle(session: &mut Session, state: &SharedState) -> Result<()> {
             if let Some(id) = parse_app_requests(&path) {
                 return page_requests(session, state, id).await;
             }
-            if let Some(id) = strip_app_id(&path) {
+            if let Some(id) = strip_app_name(&path) {
                 return page_app_detail(session, state, id).await;
             }
             write_html(session, 404, &render_not_found(state)).await
@@ -322,7 +322,7 @@ enum SettingKind {
 }
 
 /// Extract bare app id from `/apps/<id>` (no trailing slash / action).
-fn strip_app_id(path: &str) -> Option<&str> {
+fn strip_app_name(path: &str) -> Option<&str> {
     let id = path.strip_prefix("/apps/")?;
     if id.is_empty() || id.contains('/') {
         return None;
@@ -495,7 +495,7 @@ async fn page_warnings(session: &mut Session, state: &SharedState) -> Result<()>
 }
 
 async fn page_app_detail(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let app = match state.store.get_by_id(id) {
+    let app = match state.store.get_by_name(id) {
         Ok(Some(app)) => app,
         _ => {
             return write_html(session, 404, &render_not_found(state)).await;
@@ -593,22 +593,27 @@ fn build_urls(
 // ---------------------------------------------------------------------------
 
 async fn action_toggle(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let app = match state.store.get_by_id(id) {
+    let app = match state.store.get_by_name(id) {
         Ok(Some(app)) => app,
         _ => return write_html(session, 404, "Not found").await,
     };
 
     let new_enabled = !app.enabled;
-    if state.store.set_enabled(id, new_enabled).is_err() {
+    if state.store.set_enabled(app.id.0, new_enabled).is_err() {
         return write_html(session, 500, "Toggle failed").await;
     }
     let _ = state.reload_routes();
 
-    let updated = state.store.get_by_id(id).ok().flatten().unwrap_or_else(|| {
-        let mut a = app.clone();
-        a.enabled = new_enabled;
-        a
-    });
+    let updated = state
+        .store
+        .get_by_name(id)
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| {
+            let mut a = app.clone();
+            a.enabled = new_enabled;
+            a
+        });
 
     let port = state.listen_http.port();
     let all = state.store.list_all().unwrap_or_default();
@@ -632,7 +637,11 @@ async fn action_toggle(session: &mut Session, state: &SharedState, id: &str) -> 
 }
 
 async fn action_delete(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let _ = state.store.delete(id);
+    let app = match state.store.get_by_name(id) {
+        Ok(Some(app)) => app,
+        _ => return write_html(session, 404, "Not found").await,
+    };
+    let _ = state.store.delete(app.id.0);
     let _ = state.reload_routes();
 
     let all = state.store.list_all().unwrap_or_default();
@@ -706,7 +715,9 @@ async fn action_delete_redirect(
     state: &SharedState,
     id: &str,
 ) -> Result<()> {
-    let _ = state.store.delete(id);
+    if let Ok(Some(app)) = state.store.get_by_name(id) {
+        let _ = state.store.delete(app.id.0);
+    }
     let _ = state.reload_routes();
     write_redirect(session, "/").await
 }
@@ -718,7 +729,7 @@ async fn action_toggle_bool(
     id: &str,
     kind: SettingKind,
 ) -> Result<()> {
-    let app = match state.store.get_by_id(id) {
+    let app = match state.store.get_by_name(id) {
         Ok(Some(a)) => a,
         _ => return write_redirect(session, "/").await,
     };
@@ -728,7 +739,9 @@ async fn action_toggle_bool(
         SettingKind::Spa => (None, Some(!app.spa_rewrite)),
     };
 
-    let _ = state.store.update_settings(id, cors, None, None, spa, None);
+    let _ = state
+        .store
+        .update_settings(app.id.0, cors, None, None, spa, None);
     let _ = state.reload_routes();
     write_redirect(session, &format!("/apps/{id}")).await
 }
@@ -886,7 +899,7 @@ fn status_color_for(code: u16) -> &'static str {
 }
 
 async fn page_requests(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let app = match state.store.get_by_id(id) {
+    let app = match state.store.get_by_name(id) {
         Ok(Some(app)) => app,
         _ => return write_html(session, 404, &render_not_found(state)).await,
     };
@@ -894,7 +907,7 @@ async fn page_requests(session: &mut Session, state: &SharedState, id: &str) -> 
     let app_view = AppView::from_spec(&app, port);
     let requests = state
         .store
-        .list_request_logs(id, state.inspect_max_requests)
+        .list_request_logs(app.id.0, state.inspect_max_requests)
         .unwrap_or_default();
     let request_count = requests.len();
     let request_views: Vec<RequestView> = requests.iter().map(RequestView::from_captured).collect();
@@ -914,7 +927,7 @@ async fn page_request_detail(
     app_id: &str,
     req_id: &str,
 ) -> Result<()> {
-    let app = match state.store.get_by_id(app_id) {
+    let app = match state.store.get_by_name(app_id) {
         Ok(Some(app)) => app,
         _ => return write_html(session, 404, &render_not_found(state)).await,
     };
@@ -938,17 +951,21 @@ async fn page_request_detail(
 }
 
 async fn action_toggle_inspect(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let app = match state.store.get_by_id(id) {
+    let app = match state.store.get_by_name(id) {
         Ok(Some(a)) => a,
         _ => return write_redirect(session, "/").await,
     };
-    let _ = state.store.set_inspect_enabled(id, !app.inspect_enabled);
+    let _ = state
+        .store
+        .set_inspect_enabled(app.id.0, !app.inspect_enabled);
     let _ = state.reload_routes();
     write_redirect(session, &format!("/apps/{id}/requests")).await
 }
 
 async fn action_clear_requests(session: &mut Session, state: &SharedState, id: &str) -> Result<()> {
-    let _ = state.store.delete_request_logs_for_app(id);
+    if let Ok(Some(app)) = state.store.get_by_name(id) {
+        let _ = state.store.delete_request_logs_for_app(app.id.0);
+    }
     write_redirect(session, &format!("/apps/{id}/requests")).await
 }
 
@@ -958,7 +975,7 @@ async fn action_replay(
     app_id: &str,
     req_id: &str,
 ) -> Result<()> {
-    let app = match state.store.get_by_id(app_id) {
+    let app = match state.store.get_by_name(app_id) {
         Ok(Some(app)) => app,
         _ => return write_html(session, 404, &render_not_found(state)).await,
     };
@@ -1097,7 +1114,12 @@ async fn show_replay_error(
 // SSE handler
 // ---------------------------------------------------------------------------
 
-async fn sse_requests(session: &mut Session, state: &SharedState, app_id: &str) -> Result<()> {
+async fn sse_requests(session: &mut Session, state: &SharedState, app_name: &str) -> Result<()> {
+    let numeric_id = match state.store.get_by_name(app_name) {
+        Ok(Some(app)) => app.id.0,
+        _ => return write_html(session, 404, "Not found").await,
+    };
+
     let mut resp = ResponseHeader::build(200, None)?;
     resp.insert_header("content-type", "text/event-stream")?;
     resp.insert_header("cache-control", "no-cache")?;
@@ -1105,11 +1127,10 @@ async fn sse_requests(session: &mut Session, state: &SharedState, app_id: &str) 
     session.write_response_header(Box::new(resp), false).await?;
 
     let mut rx = state.inspect_tx.subscribe();
-    let app_id = app_id.to_string();
 
     loop {
         match rx.recv().await {
-            Ok(event) if event.app_id == app_id => {
+            Ok(event) if event.app_id == numeric_id => {
                 let data = serde_json::to_string(&event).unwrap_or_default();
                 let sse = format!("data: {data}\n\n");
                 if session
@@ -1302,7 +1323,7 @@ mod tests {
         );
         assert_eq!(
             format_target(&BackendTarget::Managed {
-                app_id: "x".to_string(),
+                app_id: 1,
                 root: "/home/user/myapp".to_string(),
                 kind: "asgi".to_string(),
             }),
@@ -1333,11 +1354,11 @@ mod tests {
     }
 
     #[test]
-    fn strip_app_id_works() {
-        assert_eq!(strip_app_id("/apps/abc-123"), Some("abc-123"));
-        assert_eq!(strip_app_id("/apps/abc-123/toggle"), None);
-        assert_eq!(strip_app_id("/apps/"), None);
-        assert_eq!(strip_app_id("/other/abc"), None);
+    fn strip_app_name_works() {
+        assert_eq!(strip_app_name("/apps/abc-123"), Some("abc-123"));
+        assert_eq!(strip_app_name("/apps/abc-123/toggle"), None);
+        assert_eq!(strip_app_name("/apps/"), None);
+        assert_eq!(strip_app_name("/other/abc"), None);
     }
 
     #[test]

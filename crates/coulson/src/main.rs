@@ -40,7 +40,7 @@ use crate::store::AppRepository;
 
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct InspectEvent {
-    pub app_id: String,
+    pub app_id: i64,
     pub request_id: String,
     pub method: String,
     pub path: String,
@@ -65,7 +65,7 @@ pub struct RouteRule {
     /// Optional static file root to try before forwarding to the backend.
     /// For Managed apps this is `{app_root}/public` when the directory exists.
     pub static_root: Option<String>,
-    pub app_id: Option<String>,
+    pub app_id: Option<i64>,
     pub inspect_enabled: bool,
 }
 
@@ -110,7 +110,7 @@ impl SharedState {
                 _ => None,
             };
             let rule = RouteRule {
-                app_id: Some(app.id.0.clone()),
+                app_id: Some(app.id.0),
                 inspect_enabled: app.inspect_enabled,
                 target: app.target,
                 path_prefix: app.path_prefix,
@@ -685,7 +685,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
                                 );
                                 if let Err(err) = tunnel::start_app_named_tunnel(
                                     state.app_tunnels.clone(),
-                                    app.id.0.clone(),
+                                    app.id.0,
                                     credentials,
                                     domain.clone(),
                                     routing,
@@ -721,16 +721,11 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
                         app_id = %app.id.0,
                         "auto-reconnecting quick tunnel"
                     );
-                    match tunnel::start_quick_tunnel(
-                        state.tunnels.clone(),
-                        app.id.0.clone(),
-                        routing,
-                    )
-                    .await
+                    match tunnel::start_quick_tunnel(state.tunnels.clone(), app.id.0, routing).await
                     {
                         Ok(hostname) => {
                             let url = format!("https://{hostname}");
-                            let _ = state.store.update_tunnel_url(&app.id.0, Some(&url));
+                            let _ = state.store.update_tunnel_url(app.id.0, Some(&url));
                             info!(app_id = %app.id.0, tunnel_url = %url, "quick tunnel auto-reconnected");
                         }
                         Err(err) => {
@@ -1378,7 +1373,7 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
                     || app.get("domain").and_then(|d| d.as_str()) == Some(&domain_match)
                     || app.get("domain").and_then(|d| d.as_str()) == Some(bare_name);
                 if matches {
-                    if let Some(app_id) = app.get("id").and_then(|i| i.as_str()) {
+                    if let Some(app_id) = app.get("id").and_then(|i| i.as_i64()) {
                         if client
                             .call("app.delete", serde_json::json!({ "app_id": app_id }))
                             .is_ok()
@@ -1506,7 +1501,10 @@ fn resolve_app_id(
                     || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
             })
         })
-        .and_then(|a| a.get("id").and_then(|i| i.as_str()).map(|s| s.to_string()))
+        .and_then(|a| {
+            a.get("id")
+                .map(|i| i.to_string().trim_matches('"').to_string())
+        })
         .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
 
     Ok((bare_name, app_id))
@@ -1536,7 +1534,9 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
                 .map(|apps| {
                     apps.iter()
                         .filter_map(|a| {
-                            let id = a.get("id")?.as_str()?.to_string();
+                            let id = a
+                                .get("id")
+                                .map(|v| v.to_string().trim_matches('"').to_string())?;
                             let name = a.get("name")?.as_str()?.to_string();
                             let domain = a
                                 .get("domain")
@@ -1571,9 +1571,12 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
     let rows: Vec<PsRow> = processes
         .iter()
         .map(|p| {
-            let app_id = p.get("app_id").and_then(|v| v.as_str()).unwrap_or("");
+            let app_id = p
+                .get("app_id")
+                .map(|v| v.to_string().trim_matches('"').to_string())
+                .unwrap_or_default();
             let (name, _domain) = app_map
-                .get(app_id)
+                .get(&app_id)
                 .cloned()
                 .unwrap_or_else(|| (app_id.to_string(), String::new()));
             let pid = p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -1649,7 +1652,7 @@ fn run_logs(
                     a.name == bare_name || a.domain.0 == domain_match || a.domain.0 == bare_name
                 })
                 .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
-            (bare_name, app.id.0.clone())
+            (bare_name, app.id.0.to_string())
         }
     };
 
@@ -1756,7 +1759,12 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
 
             let app_name = |app_id: &str| -> String {
                 apps.iter()
-                    .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(app_id))
+                    .find(|a| {
+                        a.get("id")
+                            .map(|v| v.to_string().trim_matches('"').to_string())
+                            .as_deref()
+                            == Some(app_id)
+                    })
                     .and_then(|a| a.get("name").and_then(|v| v.as_str()))
                     .unwrap_or(app_id)
                     .to_string()
@@ -1786,7 +1794,10 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                 let rows: Vec<TunnelRow> = quick_tunnels
                     .iter()
                     .map(|t| {
-                        let aid = t.get("app_id").and_then(|v| v.as_str()).unwrap_or("");
+                        let aid = t
+                            .get("app_id")
+                            .map(|v| v.to_string().trim_matches('"').to_string())
+                            .unwrap_or_default();
                         let url = t
                             .get("hostname")
                             .and_then(|v| v.as_str())
@@ -1799,7 +1810,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                             "stopped".dimmed().to_string()
                         };
                         TunnelRow {
-                            app: app_name(aid).bold().to_string(),
+                            app: app_name(&aid).bold().to_string(),
                             url: url.cyan().to_string(),
                             status,
                         }
@@ -2129,7 +2140,12 @@ fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json:
         .and_then(|v| v.as_array())
         .and_then(|apps| {
             apps.iter()
-                .find(|a| a.get("id").and_then(|v| v.as_str()) == Some(app_id))
+                .find(|a| {
+                    a.get("id")
+                        .map(|v| v.to_string().trim_matches('"').to_string())
+                        .as_deref()
+                        == Some(app_id)
+                })
                 .cloned()
         })
         .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))

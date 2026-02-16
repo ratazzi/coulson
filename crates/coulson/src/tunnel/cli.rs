@@ -9,7 +9,7 @@ use super::{TunnelCredentials, TunnelHandle, TunnelManager};
 
 pub async fn start_quick_tunnel_cli(
     manager: TunnelManager,
-    app_id: String,
+    app_id: i64,
     routing: TunnelRouting,
 ) -> anyhow::Result<String> {
     let (local_host, local_port) = match &routing {
@@ -44,7 +44,7 @@ pub async fn start_quick_tunnel_cli(
     let (hostname, lines) = extract_hostname(stderr).await?;
     info!(hostname = %hostname, "quick tunnel started via cloudflared CLI");
 
-    let aid = app_id.clone();
+    let aid = app_id;
     let mgr = manager.clone();
     let task = tokio::spawn(async move {
         // Keep draining stderr to prevent SIGPIPE

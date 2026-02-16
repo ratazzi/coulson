@@ -41,9 +41,9 @@ pub struct AppRepository {
     pub(crate) domain_suffix: String,
 }
 
-fn check_insert(result: rusqlite::Result<usize>, app: AppSpec) -> anyhow::Result<AppSpec> {
+fn check_insert(result: rusqlite::Result<usize>) -> anyhow::Result<()> {
     match result {
-        Ok(_) => Ok(app),
+        Ok(_) => Ok(()),
         Err(rusqlite::Error::SqliteFailure(err, _))
             if err.code == rusqlite::ErrorCode::ConstraintViolation =>
         {
@@ -77,8 +77,8 @@ impl AppRepository {
             );
 
             CREATE TABLE IF NOT EXISTS apps (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL,
+              id INTEGER PRIMARY KEY,
+              name TEXT NOT NULL UNIQUE,
               kind TEXT NOT NULL,
               domain TEXT NOT NULL,
               path_prefix TEXT NOT NULL DEFAULT '',
@@ -152,7 +152,7 @@ impl AppRepository {
             r#"
             CREATE TABLE IF NOT EXISTS request_logs (
               id TEXT PRIMARY KEY,
-              app_id TEXT NOT NULL,
+              app_id INTEGER NOT NULL,
               timestamp INTEGER NOT NULL,
               method TEXT NOT NULL,
               path TEXT NOT NULL,
@@ -189,8 +189,34 @@ impl AppRepository {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(input.path_prefix);
         let domain_db = domain_to_db(&input.domain.0, &self.domain_suffix);
-        let app = AppSpec {
-            id: AppId::new(),
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                input.name,
+                "static",
+                domain_db,
+                path_prefix_db,
+                input.target_host,
+                i64::from(input.target_port),
+                input.timeout_ms.map(|v| v as i64),
+                1i64,
+                now.unix_timestamp(),
+                now.unix_timestamp(),
+                if input.cors_enabled { 1 } else { 0 },
+                input.basic_auth_user,
+                input.basic_auth_pass,
+                if input.spa_rewrite { 1 } else { 0 },
+                input.listen_port.map(|v| v as i64),
+            ],
+        );
+        check_insert(result)?;
+        let id = conn.last_insert_rowid();
+
+        Ok(AppSpec {
+            id: AppId(id),
             name: input.name.to_string(),
             kind: AppKind::Static,
             domain: input.domain.clone(),
@@ -216,33 +242,7 @@ impl AppRepository {
             enabled: true,
             created_at: now,
             updated_at: now,
-        };
-
-        let conn = self.conn.lock();
-        let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                app.id.0,
-                app.name,
-                "static",
-                domain_db,
-                path_prefix_db,
-                input.target_host,
-                i64::from(input.target_port),
-                app.timeout_ms.map(|v| v as i64),
-                if app.enabled { 1 } else { 0 },
-                app.created_at.unix_timestamp(),
-                app.updated_at.unix_timestamp(),
-                if input.cors_enabled { 1 } else { 0 },
-                input.basic_auth_user,
-                input.basic_auth_pass,
-                if input.spa_rewrite { 1 } else { 0 },
-                input.listen_port.map(|v| v as i64),
-            ],
-        );
-
-        check_insert(result, app)
+        })
     }
 
     pub fn insert_static_dir(
@@ -254,8 +254,30 @@ impl AppRepository {
     ) -> anyhow::Result<AppSpec> {
         let now = OffsetDateTime::now_utc();
         let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
-        let app = AppSpec {
-            id: AppId::new(),
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, static_root, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, 0, NULL, ?8, ?9, 0, NULL, NULL, 0, ?10, ?11)",
+            params![
+                name,
+                "static",
+                domain_db,
+                "",
+                "",
+                0i64,
+                1i64,
+                now.unix_timestamp(),
+                now.unix_timestamp(),
+                static_root,
+                listen_port.map(|v| v as i64),
+            ],
+        );
+        check_insert(result)?;
+        let id = conn.last_insert_rowid();
+
+        Ok(AppSpec {
+            id: AppId(id),
             name: name.to_string(),
             kind: AppKind::Static,
             domain: domain.clone(),
@@ -280,29 +302,7 @@ impl AppRepository {
             enabled: true,
             created_at: now,
             updated_at: now,
-        };
-
-        let conn = self.conn.lock();
-        let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, static_root, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, 0, NULL, ?9, ?10, 0, NULL, NULL, 0, ?11, ?12)",
-            params![
-                app.id.0,
-                app.name,
-                "static",
-                domain_db,
-                "",
-                "",
-                0i64,
-                1i64,
-                app.created_at.unix_timestamp(),
-                app.updated_at.unix_timestamp(),
-                static_root,
-                listen_port.map(|v| v as i64),
-            ],
-        );
-
-        check_insert(result, app)
+        })
     }
 
     pub fn insert_unix_socket(
@@ -317,8 +317,31 @@ impl AppRepository {
         let now = OffsetDateTime::now_utc();
         let path_prefix_db = path_prefix_to_db(path_prefix);
         let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
-        let app = AppSpec {
-            id: AppId::new(),
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, 0, NULL, NULL, 0, ?11, ?12)",
+            params![
+                name,
+                "static",
+                domain_db,
+                path_prefix_db,
+                "",
+                0i64,
+                timeout_ms.map(|v| v as i64),
+                1i64,
+                now.unix_timestamp(),
+                now.unix_timestamp(),
+                socket_path,
+                listen_port.map(|v| v as i64),
+            ],
+        );
+        check_insert(result)?;
+        let id = conn.last_insert_rowid();
+
+        Ok(AppSpec {
+            id: AppId(id),
             name: name.to_string(),
             kind: AppKind::Static,
             domain: domain.clone(),
@@ -343,30 +366,7 @@ impl AppRepository {
             enabled: true,
             created_at: now,
             updated_at: now,
-        };
-
-        let conn = self.conn.lock();
-        let result = conn.execute(
-            "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, ?11, 0, NULL, NULL, 0, ?12, ?13)",
-            params![
-                app.id.0,
-                app.name,
-                "static",
-                domain_db,
-                path_prefix_db,
-                "",
-                0i64,
-                app.timeout_ms.map(|v| v as i64),
-                1i64,
-                app.created_at.unix_timestamp(),
-                app.updated_at.unix_timestamp(),
-                socket_path,
-                listen_port.map(|v| v as i64),
-            ],
-        );
-
-        check_insert(result, app)
+        })
     }
 
     pub fn upsert_scanned_static(
@@ -381,7 +381,7 @@ impl AppRepository {
         let path_prefix_db = path_prefix_to_db(input.path_prefix);
         let domain_db = domain_to_db(&input.domain.0, &self.domain_suffix);
 
-        let existing: Option<(String, i64)> = conn
+        let existing: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
                 params![domain_db, path_prefix_db],
@@ -414,12 +414,10 @@ impl AppRepository {
                 ScanUpsertResult::Updated
             }
             None => {
-                let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, socket_path, listen_port)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
-                        created,
                         input.name,
                         "static",
                         domain_db,
@@ -463,7 +461,7 @@ impl AppRepository {
         let path_prefix_db = "";
         let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
 
-        let existing: Option<(String, i64)> = conn
+        let existing: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
                 params![domain_db, path_prefix_db],
@@ -481,12 +479,10 @@ impl AppRepository {
                 ScanUpsertResult::Updated
             }
             None => {
-                let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, app_root)
-                     VALUES (?1, ?2, ?3, ?4, ?5, '', 0, NULL, ?6, 1, ?7, ?8, ?9, ?10)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, app_root)
+                     VALUES (?1, ?2, ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
                     params![
-                        created,
                         name,
                         kind,
                         domain_db,
@@ -520,7 +516,7 @@ impl AppRepository {
         let path_prefix_db = "";
         let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
 
-        let existing: Option<(String, i64)> = conn
+        let existing: Option<(i64, i64)> = conn
             .query_row(
                 "SELECT id, scan_managed FROM apps WHERE domain = ?1 AND path_prefix = ?2",
                 params![domain_db, path_prefix_db],
@@ -538,12 +534,10 @@ impl AppRepository {
                 ScanUpsertResult::Updated
             }
             None => {
-                let created = AppId::new().0;
                 conn.execute(
-                    "INSERT INTO apps (id, name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, static_root)
-                     VALUES (?1, ?2, 'static', ?3, ?4, '', 0, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_host, target_port, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, static_root)
+                     VALUES (?1, 'static', ?2, ?3, '', 0, NULL, ?4, 1, ?5, ?6, ?7, ?8)",
                     params![
-                        created,
                         name,
                         domain_db,
                         path_prefix_db,
@@ -573,13 +567,12 @@ impl AppRepository {
             "SELECT id, domain, path_prefix FROM apps WHERE scan_managed = 1 AND scan_source = ?1",
         )?;
         let mut rows = stmt.query(params![source])?;
-        let mut delete_ids: Vec<String> = Vec::new();
+        let mut delete_ids: Vec<i64> = Vec::new();
 
         while let Some(row) = rows.next()? {
-            let id: String = row.get(0)?;
+            let id: i64 = row.get(0)?;
             let domain_prefix: String = row.get(1)?;
             let path_prefix: String = row.get(2)?;
-            // route_key uses prefix (same as what scanner builds)
             let key = route_key(&domain_prefix, &path_prefix);
             if !active_routes.contains(&key) {
                 delete_ids.push(id);
@@ -593,13 +586,13 @@ impl AppRepository {
         Ok(deleted)
     }
 
-    pub fn delete(&self, app_id: &str) -> anyhow::Result<bool> {
+    pub fn delete(&self, app_id: i64) -> anyhow::Result<bool> {
         let conn = self.conn.lock();
         let changed = conn.execute("DELETE FROM apps WHERE id = ?1", params![app_id])?;
         Ok(changed > 0)
     }
 
-    pub fn set_enabled(&self, app_id: &str, enabled: bool) -> anyhow::Result<bool> {
+    pub fn set_enabled(&self, app_id: i64, enabled: bool) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
         let changed = conn.execute(
@@ -631,7 +624,7 @@ impl AppRepository {
 
     pub fn update_settings(
         &self,
-        app_id: &str,
+        app_id: i64,
         cors_enabled: Option<bool>,
         basic_auth_user: Option<Option<&str>>,
         basic_auth_pass: Option<Option<&str>>,
@@ -672,7 +665,7 @@ impl AppRepository {
         }
 
         let sql = format!("UPDATE apps SET {} WHERE id = ?{idx}", sets.join(", "));
-        values.push(Box::new(app_id.to_string()));
+        values.push(Box::new(app_id));
 
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         let changed = conn.execute(&sql, params.as_slice())?;
@@ -708,11 +701,7 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    pub fn update_tunnel_url(
-        &self,
-        app_id: &str,
-        tunnel_url: Option<&str>,
-    ) -> anyhow::Result<bool> {
+    pub fn update_tunnel_url(&self, app_id: i64, tunnel_url: Option<&str>) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
         let changed = conn.execute(
@@ -724,7 +713,7 @@ impl AppRepository {
 
     pub fn set_app_tunnel_state(
         &self,
-        app_id: &str,
+        app_id: i64,
         tunnel_id: Option<&str>,
         tunnel_domain: Option<&str>,
         dns_id: Option<&str>,
@@ -741,7 +730,7 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    pub fn set_tunnel_mode(&self, app_id: &str, mode: TunnelMode) -> anyhow::Result<bool> {
+    pub fn set_tunnel_mode(&self, app_id: i64, mode: TunnelMode) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let exposed = if mode.is_exposed() { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
@@ -804,12 +793,24 @@ impl AppRepository {
         Ok(changed > 0)
     }
 
-    pub fn get_by_id(&self, app_id: &str) -> anyhow::Result<Option<AppSpec>> {
+    pub fn get_by_id(&self, app_id: i64) -> anyhow::Result<Option<AppSpec>> {
         let conn = self.conn.lock();
         let app = conn
             .query_row(
                 &format!("SELECT {} FROM apps WHERE id = ?1", COLS),
                 params![app_id],
+                |row| row_to_app(row, &self.domain_suffix),
+            )
+            .optional()?;
+        Ok(app)
+    }
+
+    pub fn get_by_name(&self, name: &str) -> anyhow::Result<Option<AppSpec>> {
+        let conn = self.conn.lock();
+        let app = conn
+            .query_row(
+                &format!("SELECT {} FROM apps WHERE name = ?1", COLS),
+                params![name],
                 |row| row_to_app(row, &self.domain_suffix),
             )
             .optional()?;
@@ -893,7 +894,7 @@ impl AppRepository {
     // Inspect (request recording) methods
     // -----------------------------------------------------------------------
 
-    pub fn set_inspect_enabled(&self, app_id: &str, enabled: bool) -> anyhow::Result<()> {
+    pub fn set_inspect_enabled(&self, app_id: i64, enabled: bool) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute(
             "UPDATE apps SET inspect_enabled = ? WHERE id = ?",
@@ -935,7 +936,7 @@ impl AppRepository {
 
     pub fn list_request_logs(
         &self,
-        app_id: &str,
+        app_id: i64,
         limit: usize,
     ) -> anyhow::Result<Vec<CapturedRequest>> {
         let conn = self.conn.lock();
@@ -962,13 +963,13 @@ impl AppRepository {
         }
     }
 
-    pub fn delete_request_logs_for_app(&self, app_id: &str) -> anyhow::Result<()> {
+    pub fn delete_request_logs_for_app(&self, app_id: i64) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM request_logs WHERE app_id = ?", params![app_id])?;
         Ok(())
     }
 
-    pub fn count_request_logs(&self, app_id: &str) -> anyhow::Result<usize> {
+    pub fn count_request_logs(&self, app_id: i64) -> anyhow::Result<usize> {
         let conn = self.conn.lock();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM request_logs WHERE app_id = ?",
@@ -997,10 +998,10 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let socket_path: Option<String> = row.get::<_, Option<String>>(16).unwrap_or(None);
     let app_root: Option<String> = row.get::<_, Option<String>>(25).unwrap_or(None);
 
-    let id_str: String = row.get(0)?;
+    let id_val: i64 = row.get(0)?;
     let target = if let Some(root) = app_root {
         BackendTarget::Managed {
-            app_id: id_str.clone(),
+            app_id: id_val,
             root,
             kind: kind_str.clone(),
         }
@@ -1019,7 +1020,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let full_domain = domain_from_db(&domain_prefix, suffix);
 
     Ok(AppSpec {
-        id: AppId(id_str),
+        id: AppId(id_val),
         name: row.get(1)?,
         kind,
         domain: DomainName(full_domain),
@@ -1118,8 +1119,8 @@ fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Resu
         BEGIN;
         ALTER TABLE apps RENAME TO apps_old;
         CREATE TABLE apps (
-          id TEXT PRIMARY KEY,
-          name TEXT NOT NULL,
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL UNIQUE,
           kind TEXT NOT NULL,
           domain TEXT NOT NULL,
           path_prefix TEXT NOT NULL DEFAULT '',
@@ -1157,7 +1158,7 @@ fn migrate_apps_domain_unique_to_route_unique(conn: &Connection) -> anyhow::Resu
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CapturedRequest {
     pub id: String,
-    pub app_id: String,
+    pub app_id: i64,
     pub timestamp: i64,
     pub method: String,
     pub path: String,

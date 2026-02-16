@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
-<a href="/apps/{{ app.id }}/requests" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Requests</a>
+<a href="/apps/{{ app.name }}/requests" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Requests</a>
 
 <div class="flex items-start justify-between mb-8">
   <div>
@@ -14,7 +14,7 @@
       {% if req.response_time_ms %}&mdash; {{ req.response_time_ms }}ms{% endif %}
     </p>
   </div>
-  <form method="post" action="/apps/{{ app.id }}/requests/{{ req.id }}/replay">
+  <form method="post" action="/apps/{{ app.name }}/requests/{{ req.id }}/replay">
     <button type="submit" class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors">
       <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182"/></svg>
       Replay

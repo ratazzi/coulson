@@ -78,7 +78,7 @@ pub struct TunnelHandle {
     pub credentials: TunnelCredentials,
 }
 
-pub type TunnelManager = Arc<Mutex<HashMap<String, TunnelHandle>>>;
+pub type TunnelManager = Arc<Mutex<HashMap<i64, TunnelHandle>>>;
 
 pub fn new_tunnel_manager() -> TunnelManager {
     Arc::new(Mutex::new(HashMap::new()))
@@ -135,7 +135,7 @@ pub async fn start_named_tunnel(
 #[cfg(feature = "builtin-quick-tunnel")]
 pub async fn start_quick_tunnel(
     manager: TunnelManager,
-    app_id: String,
+    app_id: i64,
     routing: transport::TunnelRouting,
 ) -> anyhow::Result<String> {
     // Check if already running
@@ -153,7 +153,7 @@ pub async fn start_quick_tunnel(
     // Spawn 4 connections to different edge nodes (like cloudflared)
     let creds = credentials.clone();
     let mgr = manager.clone();
-    let aid = app_id.clone();
+    let aid = app_id;
     let task = tokio::spawn(async move {
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
@@ -184,7 +184,7 @@ pub async fn start_quick_tunnel(
 #[cfg(not(feature = "builtin-quick-tunnel"))]
 pub async fn start_quick_tunnel(
     manager: TunnelManager,
-    app_id: String,
+    app_id: i64,
     routing: transport::TunnelRouting,
 ) -> anyhow::Result<String> {
     {
@@ -197,10 +197,10 @@ pub async fn start_quick_tunnel(
 }
 
 /// Stop a running tunnel.
-pub fn stop_tunnel(manager: &TunnelManager, app_id: &str) -> anyhow::Result<()> {
+pub fn stop_tunnel(manager: &TunnelManager, app_id: i64) -> anyhow::Result<()> {
     let handle = manager
         .lock()
-        .remove(app_id)
+        .remove(&app_id)
         .ok_or_else(|| anyhow::anyhow!("no tunnel running for app {}", app_id))?;
     handle.task.abort();
     info!(app_id = %app_id, "tunnel stopped");
@@ -231,7 +231,7 @@ pub struct AppNamedTunnelHandle {
     pub tunnel_id: String,
 }
 
-pub type AppNamedTunnelManager = Arc<Mutex<HashMap<String, AppNamedTunnelHandle>>>;
+pub type AppNamedTunnelManager = Arc<Mutex<HashMap<i64, AppNamedTunnelHandle>>>;
 
 pub fn new_app_tunnel_manager() -> AppNamedTunnelManager {
     Arc::new(Mutex::new(HashMap::new()))
@@ -239,7 +239,7 @@ pub fn new_app_tunnel_manager() -> AppNamedTunnelManager {
 
 pub async fn start_app_named_tunnel(
     manager: AppNamedTunnelManager,
-    app_id: String,
+    app_id: i64,
     credentials: TunnelCredentials,
     tunnel_domain: String,
     routing: transport::TunnelRouting,
@@ -255,7 +255,7 @@ pub async fn start_app_named_tunnel(
     let creds = credentials.clone();
     let td = tunnel_domain.clone();
     let mgr = manager.clone();
-    let aid = app_id.clone();
+    let aid = app_id;
     let task = tokio::spawn(async move {
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
@@ -287,10 +287,10 @@ pub async fn start_app_named_tunnel(
     Ok(())
 }
 
-pub fn stop_app_named_tunnel(manager: &AppNamedTunnelManager, app_id: &str) -> anyhow::Result<()> {
+pub fn stop_app_named_tunnel(manager: &AppNamedTunnelManager, app_id: i64) -> anyhow::Result<()> {
     let handle = manager
         .lock()
-        .remove(app_id)
+        .remove(&app_id)
         .ok_or_else(|| anyhow::anyhow!("no app tunnel running for app {}", app_id))?;
     handle.task.abort();
     info!(app_id = %app_id, "app named tunnel stopped");
