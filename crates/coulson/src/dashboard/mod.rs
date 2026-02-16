@@ -168,8 +168,6 @@ struct AppView {
     target_display: String,
     target_port: Option<u16>,
     kind_label: &'static str,
-    kind_color: &'static str,
-    kind_badge_color: &'static str,
     enabled: bool,
     tunnel_url: Option<String>,
     tunnel_exposed: bool,
@@ -207,9 +205,7 @@ impl AppView {
             path_prefix: app.path_prefix.clone(),
             target_display: format_target(&app.target),
             target_port,
-            kind_label: kind_label(app.kind),
-            kind_color: kind_color(app.kind),
-            kind_badge_color: kind_badge_color(app.kind),
+            kind_label: effective_kind_label(app.kind, &app.target),
             enabled: app.enabled,
             tunnel_url: app.tunnel_url.clone(),
             tunnel_exposed: app.tunnel_mode.is_exposed(),
@@ -1217,30 +1213,21 @@ fn format_target(target: &BackendTarget) -> String {
     }
 }
 
-fn kind_label(kind: AppKind) -> &'static str {
+/// Is this a proxy target (Tcp/UnixSocket) under the "Static" kind umbrella?
+fn is_proxy_target(target: &BackendTarget) -> bool {
+    matches!(
+        target,
+        BackendTarget::Tcp { .. } | BackendTarget::UnixSocket { .. }
+    )
+}
+
+fn effective_kind_label(kind: AppKind, target: &BackendTarget) -> &'static str {
     match kind {
+        AppKind::Static if is_proxy_target(target) => "Proxy",
         AppKind::Static => "Static",
         AppKind::Rack => "Rack",
         AppKind::Asgi => "ASGI",
         AppKind::Container => "Container",
-    }
-}
-
-fn kind_color(kind: AppKind) -> &'static str {
-    match kind {
-        AppKind::Asgi => "bg-blue-50 text-blue-700 ring-blue-700/10 dark:bg-blue-900/30 dark:text-blue-400 dark:ring-blue-400/20",
-        AppKind::Container => "bg-purple-50 text-purple-700 ring-purple-700/10 dark:bg-purple-900/30 dark:text-purple-400 dark:ring-purple-400/20",
-        AppKind::Rack => "bg-orange-50 text-orange-700 ring-orange-700/10 dark:bg-orange-900/30 dark:text-orange-400 dark:ring-orange-400/20",
-        AppKind::Static => "bg-zinc-50 text-zinc-600 ring-zinc-500/10 dark:bg-zinc-800 dark:text-zinc-300 dark:ring-zinc-400/20",
-    }
-}
-
-fn kind_badge_color(kind: AppKind) -> &'static str {
-    match kind {
-        AppKind::Asgi => "bg-blue-50 text-blue-700 ring-blue-700/10 dark:bg-blue-900/30 dark:text-blue-400",
-        AppKind::Container => "bg-purple-50 text-purple-700 ring-purple-700/10 dark:bg-purple-900/30 dark:text-purple-400",
-        AppKind::Rack => "bg-orange-50 text-orange-700 ring-orange-700/10 dark:bg-orange-900/30 dark:text-orange-400",
-        AppKind::Static => "bg-zinc-50 text-zinc-600 ring-zinc-500/10 dark:bg-zinc-800 dark:text-zinc-300",
     }
 }
 

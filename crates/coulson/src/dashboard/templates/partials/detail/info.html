@@ -4,7 +4,7 @@
   </div>
   <div class="flex items-center justify-between px-5 py-3">
     <span class="text-sm text-zinc-500 dark:text-zinc-400">Kind</span>
-    <span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{ app.kind_badge_color }}">{{ app.kind_label }}</span>
+    <span class="inline-flex items-center rounded-md px-2 py-0.5 text-xs font-medium ring-1 ring-inset {% if app.kind_label == 'Proxy' %}bg-emerald-50 text-emerald-700 ring-emerald-700/10 dark:bg-emerald-900/30 dark:text-emerald-400{% elif app.kind_label == 'ASGI' %}bg-blue-50 text-blue-700 ring-blue-700/10 dark:bg-blue-900/30 dark:text-blue-400{% elif app.kind_label == 'Container' %}bg-purple-50 text-purple-700 ring-purple-700/10 dark:bg-purple-900/30 dark:text-purple-400{% elif app.kind_label == 'Rack' %}bg-orange-50 text-orange-700 ring-orange-700/10 dark:bg-orange-900/30 dark:text-orange-400{% else %}bg-zinc-50 text-zinc-600 ring-zinc-500/10 dark:bg-zinc-800 dark:text-zinc-300{% endif %}">{{ app.kind_label }}</span>
   </div>
   <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="flex items-center justify-between px-5 py-3">
