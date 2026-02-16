@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinHandle;
 use tracing::{error, info};
@@ -84,6 +84,19 @@ pub fn new_tunnel_manager() -> TunnelManager {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct TunnelConnectionInfo {
+    pub location: String,
+    pub conn_index: u8,
+    pub connected_at: i64,
+}
+
+pub type TunnelConnections = Arc<RwLock<Vec<TunnelConnectionInfo>>>;
+
+pub fn new_tunnel_connections() -> TunnelConnections {
+    Arc::new(RwLock::new(Vec::new()))
+}
+
 pub struct NamedTunnelHandle {
     pub task: JoinHandle<()>,
     pub credentials: TunnelCredentials,
@@ -98,6 +111,7 @@ pub async fn start_named_tunnel(
     local_proxy_port: u16,
     store: Arc<crate::store::AppRepository>,
     share_signer: Option<Arc<crate::share::ShareSigner>>,
+    conns: TunnelConnections,
 ) -> anyhow::Result<NamedTunnelHandle> {
     let creds = credentials.clone();
     let td = tunnel_domain.clone();
@@ -105,6 +119,7 @@ pub async fn start_named_tunnel(
         let mut handles = Vec::new();
         for conn_index in 0..4u8 {
             let c = creds.clone();
+            let conns = conns.clone();
             let routing = transport::TunnelRouting::HostBased {
                 tunnel_domain: td.clone(),
                 local_suffix: local_suffix.clone(),
@@ -113,7 +128,9 @@ pub async fn start_named_tunnel(
                 share_signer: share_signer.clone(),
             };
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, routing, conn_index).await {
+                if let Err(err) =
+                    transport::run_tunnel_connection(&c, routing, conn_index, conns).await
+                {
                     error!(error = ?err, conn_index, "named tunnel connection failed");
                 }
             });
@@ -159,8 +176,9 @@ pub async fn start_quick_tunnel(
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
+            let conns = new_tunnel_connections();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index).await {
+                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index, conns).await {
                     error!(error = ?err, conn_index, "tunnel connection failed");
                 }
             });
@@ -261,8 +279,9 @@ pub async fn start_app_named_tunnel(
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
+            let conns = new_tunnel_connections();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index).await {
+                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index, conns).await {
                     error!(error = ?err, conn_index, "app named tunnel connection failed");
                 }
             });

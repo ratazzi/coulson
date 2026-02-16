@@ -81,6 +81,7 @@ pub struct SharedState {
     pub sqlite_path: std::path::PathBuf,
     pub tunnels: tunnel::TunnelManager,
     pub named_tunnel: Arc<Mutex<Option<tunnel::NamedTunnelHandle>>>,
+    pub tunnel_conns: tunnel::TunnelConnections,
     pub app_tunnels: tunnel::AppNamedTunnelManager,
     pub listen_http: std::net::SocketAddr,
     pub listen_https: Option<std::net::SocketAddr>,
@@ -352,6 +353,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         sqlite_path: cfg.sqlite_path.clone(),
         tunnels: tunnel::new_tunnel_manager(),
         named_tunnel: Arc::new(Mutex::new(None)),
+        tunnel_conns: tunnel::new_tunnel_connections(),
         app_tunnels: tunnel::new_app_tunnel_manager(),
         listen_http: cfg.listen_http,
         listen_https: cfg.listen_https,
@@ -645,6 +647,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
                         local_proxy_port,
                         state.store.clone(),
                         Some(state.share_signer.clone()),
+                        state.tunnel_conns.clone(),
                     )
                     .await
                     {

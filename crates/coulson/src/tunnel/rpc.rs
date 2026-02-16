@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 use tracing::info;
 
-use super::TunnelCredentials;
+use super::{TunnelConnectionInfo, TunnelConnections, TunnelCredentials};
 
 pub mod tunnelrpc_capnp {
     #![allow(unused_parens, dead_code, clippy::all)]
@@ -114,6 +114,7 @@ pub async fn handle_control_stream(
     mut send_response: h2::server::SendResponse<Bytes>,
     credentials: &TunnelCredentials,
     conn_index: u8,
+    conns: TunnelConnections,
 ) -> anyhow::Result<()> {
     let recv_stream = request.into_body();
 
@@ -140,7 +141,7 @@ pub async fn handle_control_stream(
     let rpc_handle = tokio::task::spawn_local(rpc_system);
 
     // Call registerConnection
-    let reg_result = register_connection(&bootstrap, credentials, conn_index).await;
+    let reg_result = register_connection(&bootstrap, credentials, conn_index, &conns).await;
 
     match reg_result {
         Ok(()) => {
@@ -159,6 +160,7 @@ async fn register_connection(
     bootstrap: &tunnelrpc_capnp::registration_server::Client,
     credentials: &TunnelCredentials,
     conn_index: u8,
+    conns: &TunnelConnections,
 ) -> anyhow::Result<()> {
     let mut request = bootstrap.register_connection_request();
     {
@@ -227,6 +229,15 @@ async fn register_connection(
                 connection_uuid = %conn_uuid,
                 "tunnel connection registered"
             );
+
+            conns.write().push(TunnelConnectionInfo {
+                location: location.to_string(),
+                conn_index,
+                connected_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64,
+            });
         }
         tunnelrpc_capnp::connection_response::result::Which::Error(err) => {
             let err = err.context("read connection error")?;

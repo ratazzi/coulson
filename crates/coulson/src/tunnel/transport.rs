@@ -13,7 +13,7 @@ use super::edge;
 use super::proxy;
 use super::rpc;
 use super::share_auth;
-use super::TunnelCredentials;
+use super::{TunnelConnections, TunnelCredentials};
 use crate::share::ShareSigner;
 use crate::store::AppRepository;
 
@@ -187,12 +187,13 @@ pub async fn run_tunnel_connection(
     credentials: &TunnelCredentials,
     routing: TunnelRouting,
     conn_index: u8,
+    conns: TunnelConnections,
 ) -> anyhow::Result<()> {
     let tls_config = build_tls_config();
     let mut consecutive_errors: u32 = 0;
 
     loop {
-        match try_connect(credentials, &routing, conn_index, &tls_config).await {
+        match try_connect(credentials, &routing, conn_index, &tls_config, &conns).await {
             Ok(()) => {
                 consecutive_errors = 0;
                 info!("tunnel connection closed normally, reconnecting...");
@@ -228,6 +229,7 @@ async fn try_connect(
     routing: &TunnelRouting,
     conn_index: u8,
     tls_config: &Arc<ClientConfig>,
+    conns: &TunnelConnections,
 ) -> anyhow::Result<()> {
     let edge_addrs = edge::discover_edge_addrs().await?;
     let edge_addr = edge_addrs
@@ -265,6 +267,7 @@ async fn try_connect(
 
                 // Run RPC in a dedicated thread with LocalSet since capnp-rpc is !Send
                 let creds = credentials.clone();
+                let conns = conns.clone();
                 let handle = std::thread::spawn(move || {
                     let rt = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
@@ -272,7 +275,14 @@ async fn try_connect(
                         .expect("build tokio runtime for control stream");
                     let local = tokio::task::LocalSet::new();
                     rt.block_on(local.run_until(async {
-                        rpc::handle_control_stream(request, send_response, &creds, conn_index).await
+                        rpc::handle_control_stream(
+                            request,
+                            send_response,
+                            &creds,
+                            conn_index,
+                            conns,
+                        )
+                        .await
                     }))
                 });
 
@@ -424,6 +434,9 @@ async fn try_connect(
             }
         }
     }
+
+    // Remove this connection's info on disconnect
+    conns.write().retain(|c| c.conn_index != conn_index);
 
     Ok(())
 }

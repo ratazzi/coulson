@@ -29,7 +29,8 @@ Stimulus.register("toast", class extends Controller {
   .animate-spin-slow { animation: spin 1.5s linear infinite; }
 </style>
 </head>
-<body class="bg-zinc-50 text-zinc-900 antialiased min-h-screen dark:bg-zinc-950 dark:text-zinc-50">
+<body class="bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-50">
+<div class="flex flex-col min-h-screen">
 <div id="toast-container" class="fixed top-4 right-4 z-50 flex flex-col gap-2 max-w-sm"></div>
 <header class="sticky top-0 z-40 border-b border-zinc-200 bg-white/80 backdrop-blur supports-[backdrop-filter]:bg-white/60 dark:border-zinc-800 dark:bg-zinc-950/80">
   <div class="mx-auto max-w-6xl flex items-center justify-between px-6 h-14">
@@ -54,12 +55,57 @@ Stimulus.register("toast", class extends Controller {
     </div>
   </div>
 </header>
-<main class="mx-auto max-w-6xl px-6 py-8">
+<main class="flex-1 mx-auto max-w-6xl w-full px-6 py-8">
 {% block content %}{% endblock content %}
 </main>
-<footer class="mx-auto max-w-6xl px-6 py-6 mt-8 border-t border-zinc-200 dark:border-zinc-800">
-  <p class="text-xs text-zinc-400 dark:text-zinc-600">Coulson — local development gateway</p>
+<footer class="border-t border-zinc-200 dark:border-zinc-800 mt-auto">
+  <div class="mx-auto max-w-6xl px-6 py-5 flex items-center justify-between">
+    <div class="flex items-center gap-2">
+      <svg class="h-4 w-4 text-zinc-400 dark:text-zinc-500" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="ft-c" x1="20%" y1="0%" x2="80%" y2="100%"><stop offset="0%" stop-color="currentColor" stop-opacity=".6"/><stop offset="100%" stop-color="currentColor" stop-opacity=".3"/></linearGradient></defs><rect x="100" y="100" width="824" height="824" rx="186" ry="186" fill="none" stroke="currentColor" stroke-width="60" opacity=".25"/><g transform="translate(512,512) scale(3.7)"><path d="M50-30A60 60 0 1 0 50 30L25 15A30 30 0 1 1 25-15Z" fill="url(#ft-c)"/></g></svg>
+      <span class="text-xs text-zinc-500 dark:text-zinc-400">Coulson <span class="text-zinc-400 dark:text-zinc-500">{{ version }}</span></span>
+    </div>
+    <div class="flex items-center gap-3">
+      {% if tunnel %}
+      <div class="relative" id="tunnel-badge">
+        <button onclick="document.getElementById('tunnel-popover').classList.toggle('hidden')" class="inline-flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-md transition-colors {% if tunnel.connected %}text-emerald-700 bg-emerald-50 hover:bg-emerald-100 dark:text-emerald-400 dark:bg-emerald-900/30 dark:hover:bg-emerald-900/50{% else %}text-zinc-500 bg-zinc-100 hover:bg-zinc-200 dark:text-zinc-400 dark:bg-zinc-800 dark:hover:bg-zinc-700{% endif %}">
+          <span class="relative flex h-2 w-2">
+            {% if tunnel.connected %}<span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>{% endif %}
+            <span class="relative inline-flex rounded-full h-2 w-2 {% if tunnel.connected %}bg-emerald-500{% else %}bg-zinc-400 dark:bg-zinc-500{% endif %}"></span>
+          </span>
+          {% if tunnel.connected %}{{ tunnel.locations }} <span class="text-emerald-600/60 dark:text-emerald-500/60">{{ tunnel.conn_count }}/4</span>{% else %}Disconnected{% endif %}
+        </button>
+        <div id="tunnel-popover" class="hidden absolute right-0 bottom-full mb-2 w-64 rounded-lg border border-zinc-200 bg-white shadow-lg dark:border-zinc-700 dark:bg-zinc-900 z-50">
+          <div class="px-3 py-2 border-b border-zinc-100 dark:border-zinc-800">
+            <div class="text-xs font-medium text-zinc-900 dark:text-zinc-100">Tunnel</div>
+            <div class="text-xs text-zinc-500 dark:text-zinc-400 truncate font-mono">{{ tunnel.tunnel_domain }}</div>
+          </div>
+          {% if tunnel.connections %}
+          <div class="px-3 py-2 space-y-1.5">
+            {% for conn in tunnel.connections %}
+            <div class="flex items-center justify-between text-xs">
+              <div class="flex items-center gap-1.5">
+                <span class="inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+                <span class="font-medium text-zinc-700 dark:text-zinc-300">{{ conn.location }}</span>
+                <span class="text-zinc-400 dark:text-zinc-500">#{{ conn.conn_index }}</span>
+              </div>
+              <span class="text-zinc-400 dark:text-zinc-500">{{ conn.uptime_display }}</span>
+            </div>
+            {% endfor %}
+          </div>
+          {% else %}
+          <div class="px-3 py-3 text-xs text-zinc-400 dark:text-zinc-500">No active connections</div>
+          {% endif %}
+        </div>
+      </div>
+      {% endif %}
+      <a href="https://github.com/ratazzi/coulson" target="_blank" rel="noopener" class="inline-flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200 transition-colors">
+        <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
 </footer>
+</div>
 <script>
 document.addEventListener('DOMContentLoaded', function() {
   document.querySelectorAll('time[data-ts]').forEach(function(el) {
@@ -67,6 +113,11 @@ document.addEventListener('DOMContentLoaded', function() {
       el.textContent = new Date(parseInt(el.getAttribute('data-ts'), 10)).toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'});
     }
   });
+});
+document.addEventListener('click', function(e) {
+  var pop = document.getElementById('tunnel-popover');
+  var badge = document.getElementById('tunnel-badge');
+  if (pop && badge && !badge.contains(e.target)) { pop.classList.add('hidden'); }
 });
 </script>
 </body>

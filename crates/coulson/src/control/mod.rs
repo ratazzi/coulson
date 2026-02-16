@@ -998,6 +998,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 local_proxy_port,
                 state.store.clone(),
                 Some(state.share_signer.clone()),
+                state.tunnel_conns.clone(),
             )
             .await
             {
@@ -1152,6 +1153,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 local_proxy_port,
                 state.store.clone(),
                 Some(state.share_signer.clone()),
+                state.tunnel_conns.clone(),
             )
             .await
             {
@@ -1165,6 +1167,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "named_tunnel.disconnect" => match state.named_tunnel.lock().take() {
             Some(handle) => {
                 handle.task.abort();
+                state.tunnel_conns.write().clear();
                 info!("named tunnel disconnected");
                 Ok(json!({ "disconnected": true }))
             }

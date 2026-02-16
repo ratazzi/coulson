@@ -409,10 +409,81 @@ fn parse_app_requests_stream(path: &str) -> Option<&str> {
 // Template rendering helpers
 // ---------------------------------------------------------------------------
 
+#[derive(Serialize)]
+struct TunnelStatusView {
+    connected: bool,
+    tunnel_domain: String,
+    connections: Vec<TunnelConnView>,
+    conn_count: usize,
+    locations: String,
+}
+
+#[derive(Serialize)]
+struct TunnelConnView {
+    location: String,
+    conn_index: u8,
+    uptime_display: String,
+}
+
+fn tunnel_status_view(state: &SharedState) -> Option<TunnelStatusView> {
+    let guard = state.named_tunnel.lock();
+    let handle = guard.as_ref()?;
+    let tunnel_domain = handle.tunnel_domain.clone();
+    drop(guard);
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    let conns = state.tunnel_conns.read();
+    let mut connections: Vec<TunnelConnView> = conns
+        .iter()
+        .map(|c| {
+            let elapsed_ms = (now_ms - c.connected_at).max(0) as u64;
+            let elapsed_secs = elapsed_ms / 1000;
+            let uptime_display = if elapsed_secs < 60 {
+                format!("{elapsed_secs}s")
+            } else if elapsed_secs < 3600 {
+                format!("{}m {}s", elapsed_secs / 60, elapsed_secs % 60)
+            } else {
+                format!("{}h {}m", elapsed_secs / 3600, (elapsed_secs % 3600) / 60)
+            };
+            TunnelConnView {
+                location: c.location.clone(),
+                conn_index: c.conn_index,
+                uptime_display,
+            }
+        })
+        .collect();
+    connections.sort_by_key(|c| c.conn_index);
+
+    let mut seen = Vec::new();
+    for c in &connections {
+        if !seen.contains(&c.location) {
+            seen.push(c.location.clone());
+        }
+    }
+    let locations = seen.join(", ");
+    let conn_count = connections.len();
+
+    Some(TunnelStatusView {
+        connected: conn_count > 0,
+        tunnel_domain,
+        connections,
+        conn_count,
+        locations,
+    })
+}
+
 fn base_context(state: &SharedState) -> Context {
     let mut ctx = Context::new();
     ctx.insert("suffix", &state.domain_suffix);
     ctx.insert("warning_count", &get_warning_count(state));
+    ctx.insert("version", env!("CARGO_PKG_VERSION"));
+    if let Some(ts) = tunnel_status_view(state) {
+        ctx.insert("tunnel", &ts);
+    }
     ctx
 }
 
