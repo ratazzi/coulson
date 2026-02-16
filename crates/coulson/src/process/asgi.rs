@@ -127,7 +127,7 @@ fn detect_module(root: &Path) -> anyhow::Result<String> {
 /// Resolution order:
 ///   1. `coulson.json` `server` field (`"granian"` | `"uvicorn"`) → use that server
 ///   2. `coulson.json` `command` field → use as binary path, infer server type from name
-///   3. Auto-detect: try granian first (venv → PATH), then uvicorn (venv → PATH)
+///   3. Auto-detect: try uvicorn first (venv → PATH), then granian (venv → PATH)
 fn find_asgi_server(root: &Path) -> anyhow::Result<AsgiServerInfo> {
     let manifest_path = root.join("coulson.json");
     if manifest_path.exists() {
@@ -196,22 +196,22 @@ fn find_asgi_server(root: &Path) -> anyhow::Result<AsgiServerInfo> {
     auto_detect_server(root)
 }
 
-/// Try granian first, then uvicorn. Returns the first server found.
+/// Try uvicorn first (single-process, better for dev), then granian.
 fn auto_detect_server(root: &Path) -> anyhow::Result<AsgiServerInfo> {
-    if let Ok(binary) = find_server_binary(root, "granian") {
-        return Ok(AsgiServerInfo {
-            server_type: AsgiServer::Granian,
-            binary,
-        });
-    }
     if let Ok(binary) = find_server_binary(root, "uvicorn") {
         return Ok(AsgiServerInfo {
             server_type: AsgiServer::Uvicorn,
             binary,
         });
     }
+    if let Ok(binary) = find_server_binary(root, "granian") {
+        return Ok(AsgiServerInfo {
+            server_type: AsgiServer::Granian,
+            binary,
+        });
+    }
     bail!(
-        "no ASGI server found for {}: checked granian and uvicorn in .venv/bin/, venv/bin/, and PATH",
+        "no ASGI server found for {}: checked uvicorn and granian in .venv/bin/, venv/bin/, and PATH",
         root.display()
     )
 }
@@ -335,12 +335,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_prefers_granian() {
+    fn auto_detect_prefers_uvicorn() {
         let root = temp_app_dir("auto-both");
         place_venv_binary(&root, "granian");
         place_venv_binary(&root, "uvicorn");
         let info = auto_detect_server(&root).unwrap();
-        assert_eq!(info.server_type, AsgiServer::Granian);
+        assert_eq!(info.server_type, AsgiServer::Uvicorn);
         fs::remove_dir_all(&root).ok();
     }
 
