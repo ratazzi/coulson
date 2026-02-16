@@ -40,6 +40,8 @@ pub fn ensure_runtime_paths(cfg: &CoulsonConfig) -> anyhow::Result<()> {
     }
     fs::create_dir_all(&cfg.apps_root)
         .with_context(|| format!("failed to create apps root: {}", cfg.apps_root.display()))?;
+    fs::create_dir_all(&cfg.certs_dir)
+        .with_context(|| format!("failed to create certs dir: {}", cfg.certs_dir.display()))?;
 
     Ok(())
 }

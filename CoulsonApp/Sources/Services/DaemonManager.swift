@@ -146,8 +146,16 @@ final class DaemonManager: ObservableObject {
 
     // MARK: - Private
 
+    private static var runtimeDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"]
+            ?? ProcessInfo.processInfo.environment["TMPDIR"]
+            ?? "/tmp"
+        return (base as NSString).appendingPathComponent("coulson")
+    }
+
     private func buildPlist(daemonPath: String) -> String {
-        """
+        let rtDir = Self.runtimeDir
+        return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
@@ -171,11 +179,13 @@ final class DaemonManager: ObservableObject {
             <key>ThrottleInterval</key>
             <integer>5</integer>
             <key>StandardOutPath</key>
-            <string>/tmp/coulson/daemon.stdout.log</string>
+            <string>\(rtDir)/daemon.stdout.log</string>
             <key>StandardErrorPath</key>
-            <string>/tmp/coulson/daemon.stderr.log</string>
+            <string>\(rtDir)/daemon.stderr.log</string>
             <key>EnvironmentVariables</key>
             <dict>
+                <key>COULSON_RUNTIME_DIR</key>
+                <string>\(rtDir)</string>
             </dict>
         </dict>
         </plist>

@@ -160,12 +160,15 @@ extension AppDelegate {
 
     @objc func openLogs(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
-        let dir = "/tmp/coulson/managed"
-        let logPath = "\(dir)/\(box.app.name).log"
-        if FileManager.default.fileExists(atPath: logPath) {
-            NSWorkspace.shared.selectFile(logPath, inFileViewerRootedAtPath: dir)
-        } else if FileManager.default.fileExists(atPath: dir) {
-            NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+        Task { @MainActor in
+            guard let vm = self.vm else { return }
+            let dir = (vm.runtimeDir as NSString).appendingPathComponent("managed")
+            let logPath = (dir as NSString).appendingPathComponent("\(box.app.name).log")
+            if FileManager.default.fileExists(atPath: logPath) {
+                NSWorkspace.shared.selectFile(logPath, inFileViewerRootedAtPath: dir)
+            } else if FileManager.default.fileExists(atPath: dir) {
+                NSWorkspace.shared.open(URL(fileURLWithPath: dir))
+            }
         }
     }
 

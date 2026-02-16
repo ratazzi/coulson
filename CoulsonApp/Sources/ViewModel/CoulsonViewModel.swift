@@ -16,12 +16,30 @@ final class CoulsonViewModel: ObservableObject {
     let domainSuffix: String
     @Published var proxyPort: Int?
     @Published var httpsPort: Int?
+    @Published var runtimeDir: String
+    @Published var certsDir: String
     let daemonManager: DaemonManager
     private var autoRefreshTask: Task<Void, Never>?
 
+    /// XDG-aware runtime directory fallback (before ping response is available).
+    static var defaultRuntimeDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"]
+            ?? ProcessInfo.processInfo.environment["TMPDIR"]
+            ?? "/tmp"
+        return (base as NSString).appendingPathComponent("coulson")
+    }
+
+    /// XDG-aware config directory fallback.
+    static var defaultCertsDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            ?? (NSHomeDirectory() + "/.config")
+        return (base as NSString).appendingPathComponent("coulson/certs")
+    }
+
     init() {
+        let defaultRuntime = Self.defaultRuntimeDir
         let socket = ProcessInfo.processInfo.environment["COULSON_CONTROL_SOCKET"]
-            ?? "/tmp/coulson/coulson.sock"
+            ?? (defaultRuntime as NSString).appendingPathComponent("coulson.sock")
         self.client = UDSControlClient(socketPath: socket)
         self.domainSuffix = ProcessInfo.processInfo.environment["COULSON_DOMAIN_SUFFIX"]
             ?? "coulson.local"
@@ -32,6 +50,8 @@ final class CoulsonViewModel: ObservableObject {
         } else {
             self.proxyPort = nil
         }
+        self.runtimeDir = defaultRuntime
+        self.certsDir = Self.defaultCertsDir
         self.daemonManager = DaemonManager(client: client)
     }
 
@@ -135,6 +155,12 @@ final class CoulsonViewModel: ObservableObject {
             }
             if let port = result["https_port"] as? Int {
                 httpsPort = port
+            }
+            if let dir = result["runtime_dir"] as? String {
+                runtimeDir = dir
+            }
+            if let dir = result["certs_dir"] as? String {
+                certsDir = dir
             }
         } catch {
             isHealthy = false

@@ -7,7 +7,9 @@ final class CertTrustManager {
     private let caCertPath: String
 
     init() {
-        self.caCertPath = NSHomeDirectory() + "/.coulson/certs/ca.crt"
+        let base = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+            ?? (NSHomeDirectory() + "/.config")
+        self.caCertPath = (base as NSString).appendingPathComponent("coulson/certs/ca.crt")
     }
 
     /// Whether the CA certificate file exists on disk.
@@ -86,7 +88,7 @@ final class CertTrustManager {
         var errorDescription: String? {
             switch self {
             case .noCACert:
-                return "CA certificate not found at ~/.coulson/certs/ca.crt"
+                return "CA certificate not found. Run the daemon first to generate certificates."
             case .installFailed(let output):
                 return "Failed to install CA certificate: \(output)"
             }

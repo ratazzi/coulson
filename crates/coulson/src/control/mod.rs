@@ -238,6 +238,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             "version": env!("CARGO_PKG_VERSION"),
             "http_port": state.listen_http.port(),
             "https_port": state.listen_https.map(|a| a.port()),
+            "runtime_dir": state.runtime_dir.to_string_lossy(),
+            "certs_dir": state.certs_dir.to_string_lossy(),
         })),
         "app.list" => {
             let apps = match state.store.list_all() {

@@ -91,6 +91,8 @@ pub struct SharedState {
     pub share_signer: Arc<ShareSigner>,
     pub inspect_max_requests: usize,
     pub inspect_tx: broadcast::Sender<InspectEvent>,
+    pub certs_dir: std::path::PathBuf,
+    pub runtime_dir: std::path::PathBuf,
 }
 
 impl SharedState {
@@ -341,7 +343,8 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
     let (inspect_tx, _) = broadcast::channel(256);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
     let registry = Arc::new(process::default_registry());
-    let process_manager = process::new_process_manager(idle_timeout, Arc::clone(&registry));
+    let process_manager =
+        process::new_process_manager(idle_timeout, Arc::clone(&registry), cfg.runtime_dir.clone());
     Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
@@ -363,6 +366,8 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         share_signer,
         inspect_max_requests: cfg.inspect_max_requests,
         inspect_tx,
+        certs_dir: cfg.certs_dir.clone(),
+        runtime_dir: cfg.runtime_dir.clone(),
     })
 }
 
@@ -745,9 +750,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
 
     // TLS certificate setup
     let tls_config = if cfg.listen_https.is_some() {
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let certs_dir = std::path::PathBuf::from(format!("{home}/.coulson/certs"));
-        match certs::CertManager::ensure(&certs_dir, &cfg.domain_suffix) {
+        match certs::CertManager::ensure(&cfg.certs_dir, &cfg.domain_suffix) {
             Ok(cm) => {
                 let https_addr = cfg.listen_https.unwrap();
                 Some(proxy::TlsConfig {
@@ -1630,7 +1633,7 @@ fn run_logs(
     let client = RpcClient::new(&cfg.control_socket);
 
     // Try RPC first, fallback to local DB
-    let (bare_name, app_id) = match resolve_app_id(&client, &cfg, name.clone()) {
+    let (bare_name, _app_id) = match resolve_app_id(&client, &cfg, name.clone()) {
         Ok(v) => v,
         Err(_) => {
             let bare_name = resolve_app_name(&cfg, name.as_deref())?;
@@ -1647,10 +1650,17 @@ fn run_logs(
         }
     };
 
-    let log_path = format!("{}/{}.log", process::SOCKETS_DIR_RAW, app_id);
-    if !std::path::Path::new(&log_path).exists() {
-        bail!("no logs found for {bare_name} (expected {log_path})");
+    let log_path = cfg
+        .runtime_dir
+        .join("managed")
+        .join(format!("{bare_name}.log"));
+    if !log_path.exists() {
+        bail!(
+            "no logs found for {bare_name} (expected {})",
+            log_path.display()
+        );
     }
+    let log_path = log_path.to_string_lossy();
 
     if follow {
         eprintln!("{} $ tail -F {log_path}", format!("[{bare_name}]").blue());
@@ -2143,8 +2153,7 @@ fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json:
 }
 
 fn run_trust(_cfg: CoulsonConfig) -> anyhow::Result<()> {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let ca_path = std::path::PathBuf::from(format!("{home}/.coulson/certs/ca.crt"));
+    let ca_path = _cfg.certs_dir.join("ca.crt");
 
     if !ca_path.exists() {
         bail!(

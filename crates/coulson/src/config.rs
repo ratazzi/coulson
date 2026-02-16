@@ -4,6 +4,34 @@ use std::path::PathBuf;
 
 use anyhow::Context;
 
+fn xdg_state_home() -> PathBuf {
+    env::var("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".local/state")
+        })
+}
+
+fn xdg_config_home() -> PathBuf {
+    env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".config")
+        })
+}
+
+fn xdg_runtime_dir() -> PathBuf {
+    if let Ok(dir) = env::var("XDG_RUNTIME_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Ok(dir) = env::var("TMPDIR") {
+        return PathBuf::from(dir);
+    }
+    PathBuf::from("/tmp")
+}
+
 #[derive(Debug, Clone)]
 pub struct CoulsonConfig {
     pub listen_http: SocketAddr,
@@ -19,6 +47,8 @@ pub struct CoulsonConfig {
     pub lan_access: bool,
     pub link_dir: bool,
     pub inspect_max_requests: usize,
+    pub certs_dir: PathBuf,
+    pub runtime_dir: PathBuf,
 }
 
 impl Default for CoulsonConfig {
@@ -30,13 +60,15 @@ impl Default for CoulsonConfig {
         } else {
             PathBuf::from(format!("{home}/.coulson"))
         };
+        let runtime_dir = xdg_runtime_dir().join("coulson");
+        let state_dir = xdg_state_home().join("coulson");
         let listen_http: SocketAddr = "127.0.0.1:8080".parse().expect("default listen addr");
         Self {
             listen_https: Some(SocketAddr::from(([127, 0, 0, 1], listen_http.port() + 363))),
             listen_http,
-            control_socket: PathBuf::from("/tmp/coulson/coulson.sock"),
-            sqlite_path: PathBuf::from(format!("{home}/.coulson/state.db")),
-            scan_warnings_path: PathBuf::from(format!("{home}/.coulson/scan_warnings.json")),
+            control_socket: runtime_dir.join("coulson.sock"),
+            sqlite_path: state_dir.join("state.db"),
+            scan_warnings_path: state_dir.join("scan_warnings.json"),
             domain_suffix: "coulson.local".to_string(),
             apps_root,
             scan_interval_secs: 0,
@@ -45,6 +77,8 @@ impl Default for CoulsonConfig {
             lan_access: false,
             link_dir: false,
             inspect_max_requests: 200,
+            certs_dir: xdg_config_home().join("coulson/certs"),
+            runtime_dir,
         }
     }
 }
@@ -106,6 +140,17 @@ impl CoulsonConfig {
         if let Ok(raw) = env::var("COULSON_LAN_ACCESS") {
             cfg.lan_access =
                 parse_bool(&raw).with_context(|| format!("invalid COULSON_LAN_ACCESS: {raw}"))?;
+        }
+
+        if let Ok(path) = env::var("COULSON_CERTS_DIR") {
+            cfg.certs_dir = PathBuf::from(path);
+        }
+        if let Ok(path) = env::var("COULSON_RUNTIME_DIR") {
+            cfg.runtime_dir = PathBuf::from(&path);
+            // Also update control_socket default if not explicitly set
+            if env::var("COULSON_CONTROL_SOCKET").is_err() {
+                cfg.control_socket = cfg.runtime_dir.join("coulson.sock");
+            }
         }
 
         // HTTPS listener

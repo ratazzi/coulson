@@ -18,17 +18,17 @@ use tracing::info;
 
 use provider::{ManagedApp, ProcessSpec};
 
-pub const SOCKETS_DIR_RAW: &str = "/tmp/coulson/managed";
-
 pub type ProcessManagerHandle = Arc<tokio::sync::Mutex<ProcessManager>>;
 
 pub fn new_process_manager(
     idle_timeout: Duration,
     registry: Arc<ProviderRegistry>,
+    runtime_dir: PathBuf,
 ) -> ProcessManagerHandle {
     Arc::new(tokio::sync::Mutex::new(ProcessManager::new(
         idle_timeout,
         registry,
+        runtime_dir,
     )))
 }
 
@@ -48,6 +48,7 @@ pub struct ProcessManager {
     processes: HashMap<i64, ManagedProcess>,
     idle_timeout: Duration,
     registry: Arc<ProviderRegistry>,
+    runtime_dir: PathBuf,
 }
 
 struct ManagedProcess {
@@ -71,11 +72,16 @@ pub struct ProcessInfo {
 }
 
 impl ProcessManager {
-    pub fn new(idle_timeout: Duration, registry: Arc<ProviderRegistry>) -> Self {
+    pub fn new(
+        idle_timeout: Duration,
+        registry: Arc<ProviderRegistry>,
+        runtime_dir: PathBuf,
+    ) -> Self {
         Self {
             processes: HashMap::new(),
             idle_timeout,
             registry,
+            runtime_dir,
         }
     }
 
@@ -129,11 +135,11 @@ impl ProcessManager {
             .get(kind)
             .ok_or_else(|| anyhow::anyhow!("no process provider for kind: {kind}"))?;
 
-        std::fs::create_dir_all(SOCKETS_DIR_RAW)
-            .with_context(|| format!("failed to create {SOCKETS_DIR_RAW}"))?;
+        let managed_dir = self.runtime_dir.join("managed");
+        std::fs::create_dir_all(&managed_dir)
+            .with_context(|| format!("failed to create {}", managed_dir.display()))?;
         // On macOS /tmp → /private/tmp; canonicalize so pingora's peer address matches.
-        let sockets_dir = std::fs::canonicalize(SOCKETS_DIR_RAW)
-            .unwrap_or_else(|_| PathBuf::from(SOCKETS_DIR_RAW));
+        let sockets_dir = std::fs::canonicalize(&managed_dir).unwrap_or(managed_dir);
 
         let managed_app = ManagedApp {
             name: name.to_string(),
