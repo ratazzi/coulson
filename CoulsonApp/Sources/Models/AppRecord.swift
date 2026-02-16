@@ -1,7 +1,7 @@
 import Foundation
 
 struct AppRecord: Decodable, Identifiable, Hashable {
-    let id: String
+    let id: Int
     let name: String
     let kind: String
     let domain: String

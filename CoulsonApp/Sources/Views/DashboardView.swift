@@ -1,7 +1,7 @@
 import SwiftUI
 
 enum DashboardDestination: Hashable {
-    case appDetail(String)
+    case appDetail(Int)
     case addApp
     case settings
 }

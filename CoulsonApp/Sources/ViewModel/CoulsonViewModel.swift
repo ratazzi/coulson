@@ -243,7 +243,7 @@ final class CoulsonViewModel: ObservableObject {
         }
     }
 
-    func app(byId id: String) -> AppRecord? {
+    func app(byId id: Int) -> AppRecord? {
         apps.first { $0.id == id }
     }
 }
