@@ -1231,4 +1231,243 @@ mod tests {
         let result = parse_coulson_toml(raw);
         assert!(result.is_err());
     }
+
+    // --- parse_target_token ---
+
+    #[test]
+    fn parse_target_host_port_no_scheme() {
+        let (host, port) = parse_target_token("192.168.1.1:3000").expect("parse");
+        assert_eq!(host, "192.168.1.1");
+        assert_eq!(port, 3000);
+    }
+
+    #[test]
+    fn parse_target_https_scheme_stripped() {
+        let (host, port) = parse_target_token("https://myhost:4443").expect("parse");
+        assert_eq!(host, "myhost");
+        assert_eq!(port, 4443);
+    }
+
+    #[test]
+    fn parse_target_trailing_slash_stripped() {
+        let (host, port) = parse_target_token("http://myhost:9000/").expect("parse");
+        assert_eq!(host, "myhost");
+        assert_eq!(port, 9000);
+    }
+
+    #[test]
+    fn parse_target_empty_returns_none() {
+        assert!(parse_target_token("").is_none());
+    }
+
+    #[test]
+    fn parse_target_port_zero_returns_none() {
+        assert!(parse_target_token("0").is_none());
+        assert!(parse_target_token("127.0.0.1:0").is_none());
+    }
+
+    #[test]
+    fn parse_target_no_port_returns_none() {
+        assert!(parse_target_token("just-a-host").is_none());
+    }
+
+    // --- parse_pow_route_line ---
+
+    #[test]
+    fn pow_route_plain_port() {
+        let r = parse_pow_route_line("5006").expect("parse");
+        assert!(r.path_prefix.is_none());
+        assert_eq!(r.target_host, "127.0.0.1");
+        assert_eq!(r.target_port, 5006);
+        assert!(r.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn pow_route_host_port_no_scheme() {
+        let r = parse_pow_route_line("10.0.0.1:8080").expect("parse");
+        assert!(r.path_prefix.is_none());
+        assert_eq!(r.target_host, "10.0.0.1");
+        assert_eq!(r.target_port, 8080);
+    }
+
+    #[test]
+    fn pow_route_with_path_prefix_and_timeout() {
+        let r = parse_pow_route_line("/api 127.0.0.1:3000 30000").expect("parse");
+        assert_eq!(r.path_prefix.as_deref(), Some("/api"));
+        assert_eq!(r.target_host, "127.0.0.1");
+        assert_eq!(r.target_port, 3000);
+        assert_eq!(r.timeout_ms, Some(30000));
+    }
+
+    #[test]
+    fn pow_route_with_path_prefix_no_timeout() {
+        let r = parse_pow_route_line("/static 127.0.0.1:4000").expect("parse");
+        assert_eq!(r.path_prefix.as_deref(), Some("/static"));
+        assert_eq!(r.target_port, 4000);
+        assert!(r.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn pow_route_path_only_no_target_returns_none() {
+        assert!(parse_pow_route_line("/api").is_none());
+    }
+
+    #[test]
+    fn pow_route_empty_returns_none() {
+        assert!(parse_pow_route_line("").is_none());
+    }
+
+    #[test]
+    fn pow_route_timeout_zero_ignored() {
+        let r = parse_pow_route_line("5006 0").expect("parse");
+        assert!(r.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn pow_route_non_numeric_timeout_ignored() {
+        let r = parse_pow_route_line("5006 abc").expect("parse");
+        assert!(r.timeout_ms.is_none());
+    }
+
+    // --- parse_pow_file_routes ---
+
+    #[test]
+    fn pow_file_empty_returns_no_routes() {
+        let parsed = parse_pow_file_routes("");
+        assert!(parsed.routes.is_empty());
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn pow_file_whitespace_only_returns_no_routes() {
+        let parsed = parse_pow_file_routes("   \n  \n  ");
+        assert!(parsed.routes.is_empty());
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn pow_file_comments_only_returns_no_routes() {
+        // When all lines are comments, routes is empty but the fallback
+        // raw.trim() parse attempt generates a warning.
+        let parsed = parse_pow_file_routes("# comment\n# another");
+        assert!(parsed.routes.is_empty());
+        assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    #[test]
+    fn pow_file_single_port_no_newline() {
+        let parsed = parse_pow_file_routes("5006");
+        assert_eq!(parsed.routes.len(), 1);
+        assert_eq!(parsed.routes[0].target_port, 5006);
+        assert!(parsed.warnings.is_empty());
+    }
+
+    #[test]
+    fn pow_file_mixed_valid_and_invalid() {
+        let raw = "/api 127.0.0.1:3000\nbadline\n/v2 127.0.0.1:4000 5000";
+        let parsed = parse_pow_file_routes(raw);
+        assert_eq!(parsed.routes.len(), 2);
+        assert_eq!(parsed.routes[0].path_prefix.as_deref(), Some("/api"));
+        assert_eq!(parsed.routes[1].path_prefix.as_deref(), Some("/v2"));
+        assert_eq!(parsed.routes[1].timeout_ms, Some(5000));
+        assert_eq!(parsed.warnings.len(), 1);
+    }
+
+    #[test]
+    fn pow_file_all_invalid_lines() {
+        let raw = "bad\nworse\n";
+        let parsed = parse_pow_file_routes(raw);
+        assert!(parsed.routes.is_empty());
+        assert!(parsed.warnings.len() >= 2);
+    }
+
+    // --- normalize_path_prefix ---
+
+    #[test]
+    fn normalize_path_none() {
+        assert!(normalize_path_prefix(None).is_none());
+    }
+
+    #[test]
+    fn normalize_path_root_returns_none() {
+        assert!(normalize_path_prefix(Some("/")).is_none());
+    }
+
+    #[test]
+    fn normalize_path_empty_returns_none() {
+        assert!(normalize_path_prefix(Some("")).is_none());
+    }
+
+    #[test]
+    fn normalize_path_strips_trailing_slash() {
+        assert_eq!(
+            normalize_path_prefix(Some("/api/")),
+            Some("/api".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_path_no_leading_slash_returns_none() {
+        assert!(normalize_path_prefix(Some("api")).is_none());
+    }
+
+    #[test]
+    fn normalize_path_valid() {
+        assert_eq!(
+            normalize_path_prefix(Some("/api/v1")),
+            Some("/api/v1".to_string())
+        );
+    }
+
+    // --- parse_coulson_toml edge cases ---
+
+    #[test]
+    fn parse_coulson_toml_no_port_no_routes_errors() {
+        let raw = "host = \"localhost\"\n";
+        assert!(parse_coulson_toml(raw).is_err());
+    }
+
+    #[test]
+    fn parse_coulson_toml_with_timeout() {
+        let raw = "port = 5006\ntimeout = 3000\n";
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].timeout_ms, Some(3000));
+    }
+
+    #[test]
+    fn parse_coulson_toml_route_timeout_overrides_global() {
+        let raw = r#"
+            timeout = 5000
+
+            [[routes]]
+            target = "127.0.0.1:3000"
+            timeout = 10000
+        "#;
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes[0].timeout_ms, Some(10000));
+    }
+
+    #[test]
+    fn parse_coulson_toml_route_inherits_global_timeout() {
+        let raw = r#"
+            timeout = 5000
+
+            [[routes]]
+            target = "127.0.0.1:3000"
+        "#;
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes[0].timeout_ms, Some(5000));
+    }
+
+    #[test]
+    fn parse_coulson_toml_route_path_normalized() {
+        let raw = r#"
+            [[routes]]
+            path = "/api/"
+            target = "127.0.0.1:3000"
+        "#;
+        let routes = parse_coulson_toml(raw).expect("parse");
+        assert_eq!(routes[0].path_prefix.as_deref(), Some("/api"));
+    }
 }

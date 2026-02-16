@@ -1690,4 +1690,156 @@ mod tests {
         assert_eq!(format_size(1048576), "1.0 MB");
         assert_eq!(format_size(1073741824), "1.0 GB");
     }
+
+    // Helper to build a RouteRule with only the fields we care about
+    fn route(target_port: u16, path_prefix: Option<&str>) -> RouteRule {
+        RouteRule {
+            target: BackendTarget::Tcp {
+                host: "127.0.0.1".to_string(),
+                port: target_port,
+            },
+            path_prefix: path_prefix.map(|s| s.to_string()),
+            timeout_ms: None,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            listen_port: None,
+            static_root: None,
+            app_id: None,
+            inspect_enabled: false,
+        }
+    }
+
+    fn assert_port(rule: &RouteRule, expected: u16) {
+        match &rule.target {
+            BackendTarget::Tcp { port, .. } => assert_eq!(*port, expected),
+            _ => panic!("expected tcp target"),
+        }
+    }
+
+    #[test]
+    fn no_routes_returns_none() {
+        let routes: HashMap<String, Vec<RouteRule>> = HashMap::new();
+        assert!(resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/").is_none());
+    }
+
+    #[test]
+    fn path_prefix_exact_match() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "myapp.coulson.local".to_string(),
+            vec![route(5000, Some("/api")), route(4000, None)],
+        );
+        let out =
+            resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/api").expect("route");
+        assert_port(&out, 5000);
+    }
+
+    #[test]
+    fn path_prefix_child_path_match() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "myapp.coulson.local".to_string(),
+            vec![route(5000, Some("/api")), route(4000, None)],
+        );
+        let out = resolve_target(
+            &routes,
+            "myapp.coulson.local",
+            "coulson.local",
+            "/api/users/1",
+        )
+        .expect("route");
+        assert_port(&out, 5000);
+    }
+
+    #[test]
+    fn path_prefix_no_match_falls_through() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "myapp.coulson.local".to_string(),
+            vec![route(5000, Some("/api")), route(4000, None)],
+        );
+        let out = resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/about")
+            .expect("route");
+        assert_port(&out, 4000);
+    }
+
+    #[test]
+    fn path_prefix_partial_name_no_false_match() {
+        // /api should NOT match /api-docs (no "/" separator)
+        let mut routes = HashMap::new();
+        routes.insert(
+            "myapp.coulson.local".to_string(),
+            vec![route(5000, Some("/api")), route(4000, None)],
+        );
+        let out = resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/api-docs")
+            .expect("route");
+        assert_port(&out, 4000);
+    }
+
+    #[test]
+    fn deep_subdomain_falls_back_progressively() {
+        // a.b.myapp.coulson.local → b.myapp.coulson.local → myapp.coulson.local
+        let mut routes = HashMap::new();
+        routes.insert("myapp.coulson.local".to_string(), vec![route(5006, None)]);
+        let out = resolve_target(&routes, "a.b.myapp.coulson.local", "coulson.local", "/")
+            .expect("fallback");
+        assert_port(&out, 5006);
+    }
+
+    #[test]
+    fn subdomain_fallback_stops_at_mid_level() {
+        // a.b.myapp.coulson.local: b.myapp.coulson.local exists → use it, not myapp.coulson.local
+        let mut routes = HashMap::new();
+        routes.insert("b.myapp.coulson.local".to_string(), vec![route(6000, None)]);
+        routes.insert("myapp.coulson.local".to_string(), vec![route(5000, None)]);
+        let out = resolve_target(&routes, "a.b.myapp.coulson.local", "coulson.local", "/")
+            .expect("fallback");
+        assert_port(&out, 6000);
+    }
+
+    #[test]
+    fn wildcard_deeper_nesting() {
+        // *.coulson.local matches foo.coulson.local
+        let mut routes = HashMap::new();
+        routes.insert("*.coulson.local".to_string(), vec![route(7000, None)]);
+        let out = resolve_target(&routes, "anything.coulson.local", "coulson.local", "/")
+            .expect("wildcard");
+        assert_port(&out, 7000);
+    }
+
+    #[test]
+    fn wildcard_with_path_prefix() {
+        let mut routes = HashMap::new();
+        routes.insert(
+            "*.myapp.coulson.local".to_string(),
+            vec![route(5000, Some("/api")), route(4000, None)],
+        );
+        let out = resolve_target(
+            &routes,
+            "v2.myapp.coulson.local",
+            "coulson.local",
+            "/api/items",
+        )
+        .expect("wildcard+path");
+        assert_port(&out, 5000);
+    }
+
+    #[test]
+    fn extract_host_none_returns_none() {
+        assert!(extract_host(None).is_none());
+    }
+
+    #[test]
+    fn extract_host_strips_port() {
+        let host = extract_host(Some("myapp.test:8080")).expect("host");
+        assert_eq!(host, "myapp.test");
+    }
+
+    #[test]
+    fn extract_host_lowercases() {
+        let host = extract_host(Some("MyApp.Test")).expect("host");
+        assert_eq!(host, "myapp.test");
+    }
 }
