@@ -135,6 +135,36 @@ struct UpdateSettingsParams {
     app_tunnel_auto_dns: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RequestListParams {
+    app_name: String,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    offset: usize,
+}
+
+fn default_limit() -> usize {
+    50
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestGetParams {
+    app_name: String,
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestWatchParams {
+    app_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RequestReplayParams {
+    app_name: String,
+    request_id: String,
+}
+
 pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> anyhow::Result<()> {
     if socket_path.exists() {
         std::fs::remove_file(&socket_path)?;
@@ -246,6 +276,94 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             };
             Ok(json!({ "apps": apps }))
+        }
+        "request.list" => {
+            let params: RequestListParams = parse_params!(req);
+            // Verify app exists (consistent with request.get/request.watch)
+            match state.store.get_by_name(&params.app_name) {
+                Ok(Some(_)) => {}
+                Ok(None) => return render_err(req.request_id, ControlError::NotFound),
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+            let (requests, total) = match state.store.get_request_logs_by_app_name(
+                &params.app_name,
+                params.limit,
+                params.offset,
+            ) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            Ok(json!({ "requests": requests, "total": total }))
+        }
+        "request.get" => {
+            let params: RequestGetParams = parse_params!(req);
+            // Validate app_name matches the request
+            let app = match state.store.get_by_name(&params.app_name) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            let app_id = match app {
+                Some(a) => a.id.0,
+                None => return render_err(req.request_id, ControlError::NotFound),
+            };
+            let captured = match state.store.get_request_log(&params.request_id) {
+                Ok(v) => v,
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            match captured {
+                Some(r) if r.app_id == app_id => Ok(json!({ "request": r })),
+                Some(_) => Err(ControlError::NotFound),
+                None => Err(ControlError::NotFound),
+            }
+        }
+        "request.watch" => {
+            let params: RequestWatchParams = parse_params!(req);
+            // Verify app exists
+            match state.store.get_by_name(&params.app_name) {
+                Ok(Some(_)) => {
+                    let port = state.listen_http.port();
+                    Ok(json!({
+                        "stream_url": format!("http://127.0.0.1:{}/apps/{}/requests/stream", port, params.app_name)
+                    }))
+                }
+                Ok(None) => Err(ControlError::NotFound),
+                Err(e) => Err(ControlError::Internal(e.to_string())),
+            }
+        }
+        "request.replay" => {
+            let params: RequestReplayParams = parse_params!(req);
+            // Pre-validate app and request existence (consistent with request.get)
+            let app = match state.store.get_by_name(&params.app_name) {
+                Ok(Some(a)) => a,
+                Ok(None) => return render_err(req.request_id, ControlError::NotFound),
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            };
+            match state.store.get_request_log(&params.request_id) {
+                Ok(Some(r)) if r.app_id == app.id.0 => {}
+                Ok(_) => return render_err(req.request_id, ControlError::NotFound),
+                Err(e) => return internal_error(req.request_id, e.to_string()),
+            }
+            match crate::dashboard::execute_replay(
+                &state.store,
+                &params.app_name,
+                &params.request_id,
+            )
+            .await
+            {
+                Ok(outcome) => {
+                    if let Some(ref err) = outcome.error {
+                        Ok(json!({ "error": err }))
+                    } else {
+                        Ok(json!({
+                            "status_code": outcome.status_code,
+                            "response_time_ms": outcome.response_time_ms,
+                            "response_headers": outcome.response_headers,
+                            "body": outcome.body,
+                        }))
+                    }
+                }
+                Err(e) => Err(ControlError::Internal(e.to_string())),
+            }
         }
         "app.create"
         | "app.create_tcp"

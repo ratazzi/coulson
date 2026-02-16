@@ -827,6 +827,36 @@ impl AppRepository {
         }
     }
 
+    pub fn get_request_logs_by_app_name(
+        &self,
+        app_name: &str,
+        limit: usize,
+        offset: usize,
+    ) -> anyhow::Result<(Vec<CapturedRequest>, i64)> {
+        let app = self.get_by_name(app_name)?;
+        match app {
+            Some(app) => {
+                let conn = self.conn.lock();
+                let mut stmt = conn.prepare(
+                    "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                )?;
+                let mut rows = stmt.query(params![app.id.0, limit as i64, offset as i64])?;
+                let mut results = Vec::new();
+                while let Some(row) = rows.next()? {
+                    results.push(row_to_captured_request(row)?);
+                }
+
+                // Get total count
+                let mut count_stmt =
+                    conn.prepare("SELECT COUNT(*) FROM request_logs WHERE app_id = ?")?;
+                let total: i64 = count_stmt.query_row(params![app.id.0], |row| row.get(0))?;
+
+                Ok((results, total))
+            }
+            None => Ok((vec![], 0)),
+        }
+    }
+
     pub fn delete_request_logs_for_app(&self, app_id: i64) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute("DELETE FROM request_logs WHERE app_id = ?", params![app_id])?;

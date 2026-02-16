@@ -919,6 +919,118 @@ struct ReplayView {
     body_display: Option<String>,
 }
 
+/// Structured replay result shared between dashboard and control RPC.
+pub struct ReplayOutcome {
+    pub status_code: Option<u16>,
+    pub response_time_ms: u64,
+    pub response_headers: std::collections::HashMap<String, String>,
+    pub body: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Execute a replay of a captured request against the app's backend.
+///
+/// Returns `Ok(ReplayOutcome)` with either a successful response or an error message.
+/// Returns `Err` only for internal lookup failures.
+pub async fn execute_replay(
+    store: &crate::store::AppRepository,
+    app_name: &str,
+    request_id: &str,
+) -> anyhow::Result<ReplayOutcome> {
+    let app = store
+        .get_by_name(app_name)?
+        .ok_or_else(|| anyhow::anyhow!("app not found"))?;
+    let captured = store
+        .get_request_log(request_id)?
+        .ok_or_else(|| anyhow::anyhow!("request not found"))?;
+    if captured.app_id != app.id.0 {
+        anyhow::bail!("request does not belong to app");
+    }
+
+    let base_url = match &app.target {
+        BackendTarget::Tcp { host, port } => format!("http://{host}:{port}"),
+        BackendTarget::UnixSocket { .. } => {
+            return Ok(ReplayOutcome {
+                status_code: None,
+                response_time_ms: 0,
+                response_headers: Default::default(),
+                body: None,
+                error: Some("Replay not supported for Unix socket targets".into()),
+            });
+        }
+        _ => {
+            return Ok(ReplayOutcome {
+                status_code: None,
+                response_time_ms: 0,
+                response_headers: Default::default(),
+                body: None,
+                error: Some("Replay not supported for this target type".into()),
+            });
+        }
+    };
+
+    let path = &captured.path;
+    let query = captured
+        .query_string
+        .as_ref()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+    let url = format!("{base_url}{path}{query}");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let method: reqwest::Method = captured.method.parse().unwrap_or(reqwest::Method::GET);
+    let mut req_builder = client.request(method, &url);
+
+    let orig_headers: std::collections::HashMap<String, String> =
+        serde_json::from_str(&captured.request_headers).unwrap_or_default();
+    for (k, v) in &orig_headers {
+        let lower = k.to_lowercase();
+        if lower == "host" || lower == "content-length" || lower == "transfer-encoding" {
+            continue;
+        }
+        req_builder = req_builder.header(k.as_str(), v.as_str());
+    }
+    if let Some(ref body) = captured.request_body {
+        req_builder = req_builder.body(body.clone());
+    }
+
+    let start = std::time::Instant::now();
+    match req_builder.send().await {
+        Ok(resp) => {
+            let elapsed = start.elapsed().as_millis() as u64;
+            let status = resp.status().as_u16();
+            let response_headers: std::collections::HashMap<String, String> = resp
+                .headers()
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                .collect();
+            let body_bytes = resp.bytes().await.unwrap_or_default();
+            let body = if body_bytes.is_empty() {
+                None
+            } else {
+                Some(body_to_display(&body_bytes))
+            };
+            Ok(ReplayOutcome {
+                status_code: Some(status),
+                response_time_ms: elapsed,
+                response_headers,
+                body,
+                error: None,
+            })
+        }
+        Err(e) => Ok(ReplayOutcome {
+            status_code: None,
+            response_time_ms: start.elapsed().as_millis() as u64,
+            response_headers: Default::default(),
+            body: None,
+            error: Some(format!("Replay failed: {e}")),
+        }),
+    }
+}
+
 fn format_headers_json(json_str: &str) -> String {
     let headers: std::collections::HashMap<String, String> =
         serde_json::from_str(json_str).unwrap_or_default();
@@ -1063,90 +1175,30 @@ async fn action_replay(
         _ => return write_html(session, 404, &render_not_found(state)).await,
     };
 
-    // Build replay URL from app's backend target
-    let base_url = match &app.target {
-        BackendTarget::Tcp { host, port } => format!("http://{host}:{port}"),
-        BackendTarget::UnixSocket { .. } => {
-            // reqwest doesn't support UDS easily; show error
-            return show_replay_error(
-                session,
-                state,
-                &app,
-                &captured,
-                "Replay not supported for Unix socket targets",
-            )
-            .await;
-        }
-        _ => {
-            return show_replay_error(
-                session,
-                state,
-                &app,
-                &captured,
-                "Replay not supported for this target type",
-            )
-            .await;
+    let outcome = match execute_replay(&state.store, app_id, req_id).await {
+        Ok(o) => o,
+        Err(_) => {
+            return show_replay_error(session, state, &app, &captured, "Replay failed").await;
         }
     };
-
-    let path = &captured.path;
-    let query = captured
-        .query_string
-        .as_ref()
-        .map(|q| format!("?{q}"))
-        .unwrap_or_default();
-    let url = format!("{base_url}{path}{query}");
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
-
-    let method: reqwest::Method = captured.method.parse().unwrap_or(reqwest::Method::GET);
-
-    let mut req_builder = client.request(method, &url);
-
-    // Add original headers (skip host and content-length)
-    let orig_headers: std::collections::HashMap<String, String> =
-        serde_json::from_str(&captured.request_headers).unwrap_or_default();
-    for (k, v) in &orig_headers {
-        let lower = k.to_lowercase();
-        if lower == "host" || lower == "content-length" || lower == "transfer-encoding" {
-            continue;
-        }
-        req_builder = req_builder.header(k.as_str(), v.as_str());
-    }
-
-    if let Some(ref body) = captured.request_body {
-        req_builder = req_builder.body(body.clone());
-    }
-
-    let replay_result = req_builder.send().await;
 
     let port = state.listen_http.port();
     let app_view = AppView::from_spec(&app, port);
     let req_view = RequestView::from_captured(&captured);
 
-    let replay_view = match replay_result {
-        Ok(resp) => {
-            let status = resp.status().as_u16();
-            let body_bytes = resp.bytes().await.unwrap_or_default();
-            let body_display = if body_bytes.is_empty() {
-                None
-            } else {
-                Some(body_to_display(&body_bytes))
-            };
-            ReplayView {
-                status_code: status,
-                status_color: status_color_for(status),
-                body_display,
-            }
-        }
-        Err(e) => ReplayView {
+    let replay_view = if let Some(ref err) = outcome.error {
+        ReplayView {
             status_code: 0,
             status_color: "bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-300",
-            body_display: Some(format!("Replay failed: {e}")),
-        },
+            body_display: Some(err.clone()),
+        }
+    } else {
+        let status = outcome.status_code.unwrap_or(0);
+        ReplayView {
+            status_code: status,
+            status_color: status_color_for(status),
+            body_display: outcome.body,
+        }
     };
 
     let page = render_page("pages/request_detail.html", state, |ctx| {
