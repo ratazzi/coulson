@@ -127,6 +127,7 @@ pub enum BackendTarget {
         app_id: i64,
         root: String,
         kind: String,
+        name: String,
     },
 }
 

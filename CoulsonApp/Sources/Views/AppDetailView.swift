@@ -165,7 +165,7 @@ struct AppDetailView: View {
                 }
                 if app.target.type == "managed" {
                     Divider().padding(.leading, 12)
-                    pathRow("Log", "/tmp/coulson/managed/\(app.id).log")
+                    pathRow("Log", "/tmp/coulson/managed/\(app.name).log")
                 }
             }
             .background(.quaternary.opacity(0.3))

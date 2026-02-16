@@ -793,10 +793,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         "process.restart" => {
             let params: AppIdParams = parse_params!(req);
             let app = find_app!(state, req, params.app_id);
-            let (root, kind) = match &app.target {
-                crate::domain::BackendTarget::Managed { root, kind, .. } => {
-                    (root.clone(), kind.clone())
-                }
+            let (root, kind, name) = match &app.target {
+                crate::domain::BackendTarget::Managed {
+                    root, kind, name, ..
+                } => (root.clone(), kind.clone(), name.clone()),
                 _ => {
                     return render_err(
                         req.request_id,
@@ -807,7 +807,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             let mut pm = state.process_manager.lock().await;
             pm.kill_process(params.app_id);
             match pm
-                .ensure_running(params.app_id, std::path::Path::new(&root), &kind)
+                .ensure_running(params.app_id, &name, std::path::Path::new(&root), &kind)
                 .await
             {
                 Ok(socket_path) => Ok(json!({ "restarted": true, "socket_path": socket_path })),

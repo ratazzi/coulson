@@ -202,7 +202,7 @@ enum MenuBuilder {
         }
 
         // Logs (only when log file exists)
-        let logPath = "/tmp/coulson/managed/\(app.id).log"
+        let logPath = "/tmp/coulson/managed/\(app.name).log"
         if FileManager.default.fileExists(atPath: logPath) {
             sub.addItem(.separator())
 

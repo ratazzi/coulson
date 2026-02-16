@@ -165,12 +165,13 @@ impl ProxyHttp for BridgeProxy {
                         ref app_id,
                         ref root,
                         ref kind,
+                        ref name,
                     } = route.target
                     {
                         let root_path = std::path::PathBuf::from(root);
                         let socket_path = {
                             let mut pm = self.process_manager.lock().await;
-                            pm.ensure_running(*app_id, &root_path, kind)
+                            pm.ensure_running(*app_id, name, &root_path, kind)
                                 .await
                                 .map_err(|e| {
                                     Error::explain(ErrorType::ConnectError, format!("{e}"))
@@ -250,12 +251,13 @@ impl ProxyHttp for BridgeProxy {
             ref app_id,
             ref root,
             ref kind,
+            ref name,
         } = route.target
         {
             let root_path = std::path::PathBuf::from(root);
             let socket_path = {
                 let mut pm = self.process_manager.lock().await;
-                pm.ensure_running(*app_id, &root_path, kind)
+                pm.ensure_running(*app_id, name, &root_path, kind)
                     .await
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };

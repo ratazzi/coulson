@@ -104,6 +104,7 @@ impl ProcessManager {
     pub async fn ensure_running(
         &mut self,
         app_id: i64,
+        name: &str,
         root: &Path,
         kind: &str,
     ) -> anyhow::Result<String> {
@@ -135,7 +136,7 @@ impl ProcessManager {
             .unwrap_or_else(|_| PathBuf::from(SOCKETS_DIR_RAW));
 
         let managed_app = ManagedApp {
-            app_id: app_id.to_string(),
+            name: name.to_string(),
             root: root.to_path_buf(),
             kind: kind.to_string(),
             manifest: None,
@@ -157,7 +158,7 @@ impl ProcessManager {
 
         cleanup_socket(&spec.socket_path);
 
-        let log_path = sockets_dir.join(format!("{app_id}.log"));
+        let log_path = sockets_dir.join(format!("{name}.log"));
         let log_file = std::fs::File::create(&log_path)
             .with_context(|| format!("failed to create log file {}", log_path.display()))?;
         let stderr_file = log_file

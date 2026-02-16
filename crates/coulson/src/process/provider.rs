@@ -26,7 +26,7 @@ pub struct ProcessSpec {
 
 /// Context passed to a provider when resolving how to start an app.
 pub struct ManagedApp {
-    pub app_id: String,
+    pub name: String,
     pub root: PathBuf,
     pub kind: String,
     pub manifest: Option<Value>,
@@ -39,7 +39,7 @@ pub struct ManagedApp {
 impl ManagedApp {
     /// Convenience: build the standard socket path for this app.
     pub fn socket_path(&self) -> PathBuf {
-        self.socket_dir.join(format!("{}.sock", self.app_id))
+        self.socket_dir.join(format!("{}.sock", self.name))
     }
 }
 

@@ -1397,6 +1397,7 @@ mod tests {
                 app_id: 1,
                 root: "/home/user/myapp".to_string(),
                 kind: "asgi".to_string(),
+                name: "myapp".to_string(),
             }),
             "managed:myapp"
         );

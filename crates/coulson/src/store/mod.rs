@@ -204,7 +204,13 @@ impl AppRepository {
         check_insert(result)?;
         let id = conn.last_insert_rowid();
 
-        let target = backend_target_from_db(id, input.target_type, input.target_value, "static");
+        let target = backend_target_from_db(
+            id,
+            input.target_type,
+            input.target_value,
+            "static",
+            input.name,
+        );
         Ok(AppSpec {
             id: AppId(id),
             name: input.name.to_string(),
@@ -845,12 +851,14 @@ fn backend_target_from_db(
     target_type: &str,
     target_value: &str,
     kind: &str,
+    name: &str,
 ) -> BackendTarget {
     match target_type {
         "managed" => BackendTarget::Managed {
             app_id: id,
             root: target_value.to_string(),
             kind: kind.to_string(),
+            name: name.to_string(),
         },
         "static_dir" => BackendTarget::StaticDir {
             root: target_value.to_string(),
@@ -885,9 +893,10 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         _ => AppKind::Static,
     };
 
+    let name: String = row.get(1)?;
     let target_type: String = row.get(5)?;
     let target_value: String = row.get(6)?;
-    let target = backend_target_from_db(id_val, &target_type, &target_value, &kind_str);
+    let target = backend_target_from_db(id_val, &target_type, &target_value, &kind_str, &name);
 
     let created_ts: i64 = row.get(9)?;
     let updated_ts: i64 = row.get(10)?;
@@ -901,7 +910,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
 
     Ok(AppSpec {
         id: AppId(id_val),
-        name: row.get(1)?,
+        name,
         kind,
         domain: DomainName(full_domain),
         path_prefix: path_prefix_from_db(row.get::<_, String>(4)?),
