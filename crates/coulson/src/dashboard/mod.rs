@@ -253,6 +253,14 @@ pub async fn handle(session: &mut Session, state: &SharedState) -> Result<()> {
 
     match method.as_str() {
         "GET" => {
+            if path == "/favicon.svg" {
+                return write_static(
+                    session,
+                    "image/svg+xml",
+                    include_str!("templates/favicon.svg"),
+                )
+                .await;
+            }
             if path == "/" {
                 return page_index(session, state).await;
             }
@@ -1233,6 +1241,19 @@ async fn write_redirect(session: &mut Session, location: &str) -> Result<()> {
     session.write_response_header(Box::new(resp), false).await?;
     session
         .write_response_body(Some(Bytes::new()), true)
+        .await?;
+    Ok(())
+}
+
+async fn write_static(session: &mut Session, content_type: &str, body: &str) -> Result<()> {
+    let bytes = body.as_bytes();
+    let mut resp = ResponseHeader::build(200, None)?;
+    resp.insert_header("content-type", content_type)?;
+    resp.insert_header("content-length", bytes.len().to_string())?;
+    resp.insert_header("cache-control", "public, max-age=86400")?;
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+        .write_response_body(Some(Bytes::copy_from_slice(bytes)), true)
         .await?;
     Ok(())
 }
