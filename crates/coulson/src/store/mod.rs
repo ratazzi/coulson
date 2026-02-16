@@ -90,6 +90,23 @@ impl AppRepository {
               scan_source TEXT,
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
+              cors_enabled INTEGER NOT NULL DEFAULT 0,
+              basic_auth_user TEXT,
+              basic_auth_pass TEXT,
+              spa_rewrite INTEGER NOT NULL DEFAULT 0,
+              static_root TEXT,
+              socket_path TEXT,
+              listen_port INTEGER,
+              tunnel_url TEXT,
+              tunnel_exposed INTEGER NOT NULL DEFAULT 0,
+              tunnel_mode TEXT NOT NULL DEFAULT 'none',
+              app_tunnel_id TEXT,
+              app_tunnel_domain TEXT,
+              app_tunnel_dns_id TEXT,
+              app_tunnel_creds TEXT,
+              app_root TEXT,
+              share_auth INTEGER NOT NULL DEFAULT 0,
+              inspect_enabled INTEGER NOT NULL DEFAULT 0,
               UNIQUE(domain, path_prefix)
             );
 
@@ -101,55 +118,7 @@ impl AppRepository {
               value TEXT NOT NULL,
               updated_at INTEGER NOT NULL
             );
-            "#,
-        )?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN scan_managed INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN scan_source TEXT")?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN path_prefix TEXT NOT NULL DEFAULT ''",
-        )?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN timeout_ms INTEGER")?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN cors_enabled INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN basic_auth_user TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN basic_auth_pass TEXT")?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN spa_rewrite INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN static_root TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN socket_path TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN listen_port INTEGER")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN tunnel_url TEXT")?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN tunnel_mode TEXT NOT NULL DEFAULT 'none'",
-        )?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_id TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT")?;
-        add_column_if_missing(&conn, "ALTER TABLE apps ADD COLUMN app_root TEXT")?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
-        )?;
-        add_column_if_missing(
-            &conn,
-            "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
-        )?;
-        conn.execute_batch(
-            r#"
+
             CREATE TABLE IF NOT EXISTS request_logs (
               id TEXT PRIMARY KEY,
               app_id INTEGER NOT NULL,
@@ -168,6 +137,32 @@ impl AppRepository {
               ON request_logs(app_id, timestamp DESC);
             "#,
         )?;
+
+        // Migrations for databases created before all columns existed.
+        // New databases already have every column via CREATE TABLE above,
+        // so these are no-ops (add_column_if_missing silently skips).
+        for sql in [
+            "ALTER TABLE apps ADD COLUMN cors_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN basic_auth_user TEXT",
+            "ALTER TABLE apps ADD COLUMN basic_auth_pass TEXT",
+            "ALTER TABLE apps ADD COLUMN spa_rewrite INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN static_root TEXT",
+            "ALTER TABLE apps ADD COLUMN socket_path TEXT",
+            "ALTER TABLE apps ADD COLUMN listen_port INTEGER",
+            "ALTER TABLE apps ADD COLUMN tunnel_url TEXT",
+            "ALTER TABLE apps ADD COLUMN tunnel_exposed INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN tunnel_mode TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE apps ADD COLUMN app_tunnel_id TEXT",
+            "ALTER TABLE apps ADD COLUMN app_tunnel_domain TEXT",
+            "ALTER TABLE apps ADD COLUMN app_tunnel_dns_id TEXT",
+            "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT",
+            "ALTER TABLE apps ADD COLUMN app_root TEXT",
+            "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
+        ] {
+            add_column_if_missing(&conn, sql)?;
+        }
+
         migrate_apps_domain_unique_to_route_unique(&conn)?;
         Ok(())
     }
@@ -721,22 +716,20 @@ impl AppRepository {
         mode: TunnelMode,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        let exposed = if mode.is_exposed() { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
         let changed = conn.execute(
-            "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, tunnel_mode = ?5, tunnel_exposed = ?6, updated_at = ?7 WHERE id = ?8",
-            params![tunnel_id, tunnel_domain, dns_id, creds_json, mode.as_str(), exposed, now, app_id],
+            "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, tunnel_mode = ?5, updated_at = ?6 WHERE id = ?7",
+            params![tunnel_id, tunnel_domain, dns_id, creds_json, mode.as_str(), now, app_id],
         )?;
         Ok(changed > 0)
     }
 
     pub fn set_tunnel_mode(&self, app_id: i64, mode: TunnelMode) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
-        let exposed = if mode.is_exposed() { 1i64 } else { 0i64 };
         let conn = self.conn.lock();
         let changed = conn.execute(
-            "UPDATE apps SET tunnel_mode = ?1, tunnel_exposed = ?2, updated_at = ?3 WHERE id = ?4",
-            params![mode.as_str(), exposed, now, app_id],
+            "UPDATE apps SET tunnel_mode = ?1, updated_at = ?2 WHERE id = ?3",
+            params![mode.as_str(), now, app_id],
         )?;
         Ok(changed > 0)
     }
@@ -980,7 +973,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_exposed,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root,inspect_enabled";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_host,target_port,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,static_root,socket_path,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,app_root,inspect_enabled";
 
 fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec> {
     let kind_str: String = row.get(2)?;
@@ -996,7 +989,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let updated_ts: i64 = row.get(10)?;
     let static_root: Option<String> = row.get::<_, Option<String>>(15).unwrap_or(None);
     let socket_path: Option<String> = row.get::<_, Option<String>>(16).unwrap_or(None);
-    let app_root: Option<String> = row.get::<_, Option<String>>(25).unwrap_or(None);
+    let app_root: Option<String> = row.get::<_, Option<String>>(24).unwrap_or(None);
 
     let id_val: i64 = row.get(0)?;
     let target = if let Some(root) = app_root {
@@ -1018,6 +1011,11 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
 
     let domain_prefix: String = row.get(3)?;
     let full_domain = domain_from_db(&domain_prefix, suffix);
+    let tunnel_mode: TunnelMode = row
+        .get::<_, String>(19)
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_default();
 
     Ok(AppSpec {
         id: AppId(id_val),
@@ -1041,17 +1039,13 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
             .unwrap_or(None)
             .map(|v| v as u16),
         tunnel_url: row.get::<_, Option<String>>(18).unwrap_or(None),
-        tunnel_exposed: row.get::<_, i64>(19).unwrap_or(0) == 1,
-        tunnel_mode: row
-            .get::<_, String>(20)
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or_default(),
-        app_tunnel_id: row.get::<_, Option<String>>(21).unwrap_or(None),
-        app_tunnel_domain: row.get::<_, Option<String>>(22).unwrap_or(None),
-        app_tunnel_dns_id: row.get::<_, Option<String>>(23).unwrap_or(None),
-        app_tunnel_creds: row.get::<_, Option<String>>(24).unwrap_or(None),
-        inspect_enabled: row.get::<_, i64>(26).unwrap_or(0) == 1,
+        tunnel_exposed: tunnel_mode.is_exposed(),
+        tunnel_mode,
+        app_tunnel_id: row.get::<_, Option<String>>(20).unwrap_or(None),
+        app_tunnel_domain: row.get::<_, Option<String>>(21).unwrap_or(None),
+        app_tunnel_dns_id: row.get::<_, Option<String>>(22).unwrap_or(None),
+        app_tunnel_creds: row.get::<_, Option<String>>(23).unwrap_or(None),
+        inspect_enabled: row.get::<_, i64>(25).unwrap_or(0) == 1,
     })
 }
 
