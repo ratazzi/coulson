@@ -1266,47 +1266,35 @@ fn run_add_manual(cfg: &CoulsonConfig, name: &str, target: &str) -> anyhow::Resu
 
     let client = RpcClient::new(&cfg.control_socket);
 
-    if target.starts_with('/') {
-        // Unix socket
-        client.call(
-            "app.create_unix_socket",
-            serde_json::json!({
-                "name": name,
-                "domain": domain,
-                "socket_path": target,
-            }),
-        )?;
-        println!("{} {domain} -> unix:{target}", "+".green().bold());
+    let (target_type, target_value, display) = if target.starts_with('/') {
+        ("unix_socket", target.to_string(), format!("unix:{target}"))
     } else if let Ok(port) = target.parse::<u16>() {
-        // Port only
-        client.call(
-            "app.create_tcp",
-            serde_json::json!({
-                "name": name,
-                "domain": domain,
-                "target_host": "127.0.0.1",
-                "target_port": port,
-            }),
-        )?;
-        println!("{} {domain} -> 127.0.0.1:{port}", "+".green().bold());
-    } else if let Some((host, port_str)) = target.rsplit_once(':') {
-        // host:port
-        let port: u16 = port_str
-            .parse()
+        (
+            "tcp",
+            format!("127.0.0.1:{port}"),
+            format!("127.0.0.1:{port}"),
+        )
+    } else if target.contains(':') {
+        // Validate host:port
+        let (_, port_str) = target.rsplit_once(':').unwrap();
+        port_str
+            .parse::<u16>()
             .with_context(|| format!("invalid port in target: {target}"))?;
-        client.call(
-            "app.create_tcp",
-            serde_json::json!({
-                "name": name,
-                "domain": domain,
-                "target_host": host,
-                "target_port": port,
-            }),
-        )?;
-        println!("{} {domain} -> {host}:{port}", "+".green().bold());
+        ("tcp", target.to_string(), target.to_string())
     } else {
         bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
-    }
+    };
+
+    client.call(
+        "app.create",
+        serde_json::json!({
+            "name": name,
+            "domain": domain,
+            "target_type": target_type,
+            "target_value": target_value,
+        }),
+    )?;
+    println!("{} {domain} -> {display}", "+".green().bold());
 
     println!(
         "  {}",

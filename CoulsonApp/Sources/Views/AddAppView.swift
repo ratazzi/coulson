@@ -216,15 +216,15 @@ struct AddAppView: View {
 
         switch appType {
         case .tcp:
-            params["type"] = "tcp"
-            params["target_host"] = host.trimmingCharacters(in: .whitespaces)
-            params["target_port"] = UInt16(port) ?? 0
+            let h = host.trimmingCharacters(in: .whitespaces)
+            params["target_type"] = "tcp"
+            params["target_value"] = "\(h):\(port)"
         case .staticDir:
-            params["type"] = "static_dir"
-            params["static_root"] = staticRoot.trimmingCharacters(in: .whitespaces)
+            params["target_type"] = "static_dir"
+            params["target_value"] = staticRoot.trimmingCharacters(in: .whitespaces)
         case .unixSocket:
-            params["type"] = "unix_socket"
-            params["socket_path"] = socketPath.trimmingCharacters(in: .whitespaces)
+            params["target_type"] = "unix_socket"
+            params["target_value"] = socketPath.trimmingCharacters(in: .whitespaces)
         }
 
         let ok = await vm.createApp(params: params)

@@ -52,13 +52,15 @@ enum ControlError {
 }
 
 #[derive(Debug, Deserialize)]
-struct CreateTcpParams {
+struct CreateAppParams {
     name: String,
     domain: String,
     #[serde(default)]
     path_prefix: Option<String>,
-    target_host: String,
-    target_port: u16,
+    #[serde(default = "default_target_type")]
+    target_type: String,
+    #[serde(default)]
+    target_value: String,
     #[serde(default)]
     timeout_ms: Option<u64>,
     #[serde(default)]
@@ -73,26 +75,8 @@ struct CreateTcpParams {
     listen_port: Option<u16>,
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateStaticDirParams {
-    name: String,
-    domain: String,
-    static_root: String,
-    #[serde(default)]
-    listen_port: Option<u16>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CreateUnixSocketParams {
-    name: String,
-    domain: String,
-    #[serde(default)]
-    path_prefix: Option<String>,
-    socket_path: String,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    listen_port: Option<u16>,
+fn default_target_type() -> String {
+    "tcp".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,13 +246,23 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             };
             Ok(json!({ "apps": apps }))
         }
-        "app.create_tcp" | "app.create_static" => {
-            let params: CreateTcpParams = parse_params!(req);
+        "app.create"
+        | "app.create_tcp"
+        | "app.create_static"
+        | "app.create_static_dir"
+        | "app.create_unix_socket" => {
+            let params: CreateAppParams = parse_params!(req);
 
             if params.name.trim().is_empty() {
                 return render_err(
                     req.request_id,
                     ControlError::InvalidParams("name cannot be empty".to_string()),
+                );
+            }
+            if params.target_value.is_empty() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams("target_value cannot be empty".to_string()),
                 );
             }
 
@@ -279,12 +273,6 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
 
-            if params.target_port == 0 {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("target_port out of range".to_string()),
-                );
-            }
             if matches!(params.timeout_ms, Some(0)) {
                 return render_err(
                     req.request_id,
@@ -301,6 +289,35 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             }
 
+            // Type-specific validation
+            match params.target_type.as_str() {
+                "static_dir" => {
+                    let root = std::path::Path::new(&params.target_value);
+                    if !root.is_dir() {
+                        return render_err(
+                            req.request_id,
+                            ControlError::InvalidParams(format!(
+                                "static_dir target is not a directory: {}",
+                                params.target_value
+                            )),
+                        );
+                    }
+                }
+                "unix_socket" => {
+                    let sock = std::path::Path::new(&params.target_value);
+                    if !sock.exists() {
+                        return render_err(
+                            req.request_id,
+                            ControlError::InvalidParams(format!(
+                                "unix_socket target does not exist: {}",
+                                params.target_value
+                            )),
+                        );
+                    }
+                }
+                _ => {}
+            }
+
             let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
                 Ok(v) => v,
                 Err(msg) => {
@@ -308,135 +325,17 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
 
-            let target_value = format!("{}:{}", params.target_host, params.target_port);
             match state.store.insert_static(&StaticAppInput {
                 name: &params.name,
                 domain: &domain,
                 path_prefix: path_prefix.as_deref(),
-                target_type: "tcp",
-                target_value: &target_value,
+                target_type: &params.target_type,
+                target_value: &params.target_value,
                 timeout_ms: params.timeout_ms,
                 cors_enabled: params.cors_enabled,
                 basic_auth_user: params.basic_auth_user.as_deref(),
                 basic_auth_pass: params.basic_auth_pass.as_deref(),
                 spa_rewrite: params.spa_rewrite,
-                listen_port: params.listen_port,
-            }) {
-                Ok(app) => {
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "app": app }))
-                }
-                Err(e) => {
-                    if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
-                        return render_err(req.request_id, ControlError::DomainConflict);
-                    }
-                    return internal_error(req.request_id, e.to_string());
-                }
-            }
-        }
-        "app.create_static_dir" => {
-            let params: CreateStaticDirParams = parse_params!(req);
-
-            if params.name.trim().is_empty() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("name cannot be empty".to_string()),
-                );
-            }
-
-            let domain = match DomainName::parse(&params.domain, &state.domain_suffix) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
-
-            let root = std::path::Path::new(&params.static_root);
-            if !root.is_dir() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams(format!(
-                        "static_root is not a directory: {}",
-                        params.static_root
-                    )),
-                );
-            }
-
-            match state.store.insert_static(&StaticAppInput {
-                name: &params.name,
-                domain: &domain,
-                path_prefix: None,
-                target_type: "static_dir",
-                target_value: &params.static_root,
-                timeout_ms: None,
-                cors_enabled: false,
-                basic_auth_user: None,
-                basic_auth_pass: None,
-                spa_rewrite: false,
-                listen_port: params.listen_port,
-            }) {
-                Ok(app) => {
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "app": app }))
-                }
-                Err(e) => {
-                    if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
-                        return render_err(req.request_id, ControlError::DomainConflict);
-                    }
-                    return internal_error(req.request_id, e.to_string());
-                }
-            }
-        }
-        "app.create_unix_socket" => {
-            let params: CreateUnixSocketParams = parse_params!(req);
-
-            if params.name.trim().is_empty() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("name cannot be empty".to_string()),
-                );
-            }
-
-            let domain = match DomainName::parse(&params.domain, &state.domain_suffix) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
-
-            let sock = std::path::Path::new(&params.socket_path);
-            if !sock.exists() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams(format!(
-                        "socket_path does not exist: {}",
-                        params.socket_path
-                    )),
-                );
-            }
-
-            let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
-                Ok(v) => v,
-                Err(msg) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(msg));
-                }
-            };
-
-            match state.store.insert_static(&StaticAppInput {
-                name: &params.name,
-                domain: &domain,
-                path_prefix: path_prefix.as_deref(),
-                target_type: "unix_socket",
-                target_value: &params.socket_path,
-                timeout_ms: params.timeout_ms,
-                cors_enabled: false,
-                basic_auth_user: None,
-                basic_auth_pass: None,
-                spa_rewrite: false,
                 listen_port: params.listen_port,
             }) {
                 Ok(app) => {

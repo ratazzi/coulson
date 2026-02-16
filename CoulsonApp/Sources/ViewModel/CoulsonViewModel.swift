@@ -233,20 +233,8 @@ final class CoulsonViewModel: ObservableObject {
     }
 
     func createApp(params: [String: Any]) async -> Bool {
-        let type = params["type"] as? String ?? "tcp"
-        let method: String
-        switch type {
-        case "static_dir":
-            method = "app.create_static_dir"
-        case "unix_socket":
-            method = "app.create_unix_socket"
-        default:
-            method = "app.create_tcp"
-        }
-        var rpcParams = params
-        rpcParams.removeValue(forKey: "type")
         do {
-            _ = try client.request(method: method, params: rpcParams)
+            _ = try client.request(method: "app.create", params: params)
             await refreshAll()
             return true
         } catch {
