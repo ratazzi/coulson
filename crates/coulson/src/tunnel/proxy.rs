@@ -13,6 +13,12 @@ const RESPONSE_USER_HEADERS: &str = "cf-cloudflared-response-headers";
 const RESPONSE_META_HEADER: &str = "cf-cloudflared-response-meta";
 const RESPONSE_META_ORIGIN: &str = r#"{"src":"origin"}"#;
 
+/// Internal marker header injected by the tunnel proxy so the Pingora proxy
+/// can distinguish tunnel requests from local/LAN requests. Basic auth is
+/// only enforced when this header is present. Stripped before forwarding to
+/// the backend.
+pub const VIA_TUNNEL_HEADER: &str = "x-coulson-via-tunnel";
+
 /// Proxy an HTTP request to the local Pingora proxy with a fixed Host header.
 /// Used for per-app tunnels where the backend is not a TCP port (e.g. static_dir, managed).
 pub async fn proxy_to_local_with_host(
@@ -60,6 +66,7 @@ pub async fn proxy_to_local_with_host(
         local_req = local_req.header(name, value);
     }
     local_req = local_req.header("host", local_host);
+    local_req = local_req.header(VIA_TUNNEL_HEADER, "1");
 
     // Let the backend know the original tunnel host and protocol
     let original_host = parts
@@ -234,6 +241,7 @@ pub async fn proxy_by_host(
         local_req = local_req.header(name, value);
     }
     local_req = local_req.header("host", &local_host);
+    local_req = local_req.header(VIA_TUNNEL_HEADER, "1");
 
     // Let the backend know the original tunnel host and protocol
     append_forwarding_headers(&mut local_req, original_host, &parts.headers);

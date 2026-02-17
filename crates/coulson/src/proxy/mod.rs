@@ -37,10 +37,19 @@ enum Flow {
 }
 
 async fn mw_auth(session: &mut Session, route: &RouteRule) -> Result<Flow> {
-    if let (Some(user), Some(pass)) = (&route.basic_auth_user, &route.basic_auth_pass) {
-        if !check_basic_auth(session, user, pass) {
-            write_auth_required(session).await?;
-            return Ok(Flow::Done);
+    // Only enforce basic auth for requests arriving via CF tunnel.
+    // Local and LAN requests are trusted and skip auth.
+    let via_tunnel = session
+        .req_header()
+        .headers
+        .get(crate::tunnel::proxy::VIA_TUNNEL_HEADER)
+        .is_some();
+    if via_tunnel {
+        if let (Some(user), Some(pass)) = (&route.basic_auth_user, &route.basic_auth_pass) {
+            if !check_basic_auth(session, user, pass) {
+                write_auth_required(session).await?;
+                return Ok(Flow::Done);
+            }
         }
     }
     Ok(Flow::Next)
@@ -374,6 +383,9 @@ impl ProxyHttp for BridgeProxy {
     where
         Self::CTX: Send + Sync,
     {
+        // Strip internal tunnel marker before forwarding to backend
+        upstream_request.remove_header(crate::tunnel::proxy::VIA_TUNNEL_HEADER);
+
         if let Some(upgrade) = _session.req_header().headers.get("upgrade").cloned() {
             upstream_request.insert_header("Upgrade", upgrade)?;
             upstream_request.insert_header("Connection", "Upgrade")?;
@@ -692,6 +704,9 @@ impl ProxyHttp for DedicatedProxy {
     where
         Self::CTX: Send + Sync,
     {
+        // Strip internal tunnel marker before forwarding to backend
+        upstream_request.remove_header(crate::tunnel::proxy::VIA_TUNNEL_HEADER);
+
         if let Some(upgrade) = _session.req_header().headers.get("upgrade").cloned() {
             upstream_request.insert_header("Upgrade", upgrade)?;
             upstream_request.insert_header("Connection", "Upgrade")?;
