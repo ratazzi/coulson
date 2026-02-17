@@ -9,7 +9,7 @@ use base64::prelude::*;
 use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
-use pingora::proxy::http_proxy_service;
+use pingora::proxy::{http_proxy_service, FailToProxy};
 use tracing::info;
 
 use parking_lot::RwLock;
@@ -434,6 +434,29 @@ impl ProxyHttp for BridgeProxy {
         inspect_capture_resp_body(ctx, body, end_of_stream);
         Ok(None)
     }
+
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &Error,
+        _ctx: &mut Self::CTX,
+    ) -> FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let code = error_to_status_code(e);
+        if code > 0 {
+            write_error_page(session, code, "upstream_error")
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send error page: {e}");
+                });
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
+    }
 }
 
 pub struct TlsConfig {
@@ -717,6 +740,29 @@ impl ProxyHttp for DedicatedProxy {
     ) -> Result<Option<Duration>> {
         inspect_capture_resp_body(ctx, body, end_of_stream);
         Ok(None)
+    }
+
+    async fn fail_to_proxy(
+        &self,
+        session: &mut Session,
+        e: &Error,
+        _ctx: &mut Self::CTX,
+    ) -> FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        let code = error_to_status_code(e);
+        if code > 0 {
+            write_error_page(session, code, "upstream_error")
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send error page: {e}");
+                });
+        }
+        FailToProxy {
+            error_code: code,
+            can_reuse_downstream: false,
+        }
     }
 }
 
@@ -1194,10 +1240,66 @@ async fn write_loading_page(session: &mut Session, app_name: &str) -> Result<()>
     Ok(())
 }
 
+fn error_to_status_code(e: &Error) -> u16 {
+    match e.etype() {
+        HTTPStatus(code) => *code,
+        _ => match e.esource() {
+            ErrorSource::Upstream => 502,
+            ErrorSource::Downstream => match e.etype() {
+                WriteError | ReadError | ConnectionClosed => 0,
+                _ => 400,
+            },
+            ErrorSource::Internal | ErrorSource::Unset => 500,
+        },
+    }
+}
+
 async fn write_error_page(session: &mut Session, status: u16, message: &str) -> Result<()> {
-    let body = format!(
-        "<html><head><title>{status}</title></head><body><h1>{status}</h1><p>{message}</p></body></html>"
-    );
+    let (title, desc, hint) = match (status, message) {
+        (502, _) => (
+            "Bad Gateway",
+            "The upstream server is not reachable.",
+            "Check that your app is running and listening on the configured port.",
+        ),
+        (400, "missing_host") => (
+            "Bad Request",
+            "The request is missing a Host header.",
+            "Ensure your HTTP client sends a valid <code>Host</code> header.",
+        ),
+        (404, "route_not_found") => (
+            "Not Found",
+            "No app is registered for this domain.",
+            "Register an app via the dashboard or by adding a file to your apps directory.",
+        ),
+        (404, _) => (
+            "Not Found",
+            "The requested resource was not found.",
+            "Check that the file path is correct.",
+        ),
+        (500, "static_root_missing") => (
+            "Internal Error",
+            "The static file root directory is not accessible.",
+            "Verify the app's <code>static_root</code> path exists and is readable.",
+        ),
+        (500, _) => (
+            "Internal Error",
+            "An unexpected error occurred while processing the request.",
+            "Check the coulson logs for more details.",
+        ),
+        _ => (
+            "Error",
+            "Something went wrong.",
+            "Check the coulson logs for more details.",
+        ),
+    };
+
+    const TEMPLATE: &str = include_str!("error.html");
+    let body = TEMPLATE
+        .replace("{{status}}", &status.to_string())
+        .replace("{{title}}", title)
+        .replace("{{message}}", desc)
+        .replace("{{hint}}", hint);
+
     let mut resp = ResponseHeader::build(status, None)?;
     resp.insert_header("content-type", "text/html; charset=utf-8")?;
     resp.insert_header("content-length", body.len().to_string())?;
