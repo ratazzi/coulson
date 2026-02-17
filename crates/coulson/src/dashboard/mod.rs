@@ -74,6 +74,10 @@ pub fn router(state: DashboardState) -> Router {
             "/apps/{id}/basic-auth",
             post(handlers::action_set_basic_auth),
         )
+        .route("/apps/{id}/stream", get(handlers::sse_app_detail))
+        .route("/apps/{id}/frames/tunnel", get(handlers::frame_tunnel))
+        .route("/apps/{id}/frames/features", get(handlers::frame_features))
+        .route("/apps/{id}/frames/urls", get(handlers::frame_urls))
         .route("/apps/{id}/toggle-cors", post(handlers::action_toggle_cors))
         .route("/apps/{id}/toggle-spa", post(handlers::action_toggle_spa))
         .route(

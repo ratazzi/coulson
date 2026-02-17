@@ -52,7 +52,7 @@ pub struct InspectEvent {
 
 type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct RouteRule {
     pub target: BackendTarget,
     pub path_prefix: Option<String>,
@@ -75,6 +75,7 @@ pub struct SharedState {
     pub routes: Arc<RwLock<HashMap<String, Vec<RouteRule>>>>,
     pub dedicated_ports: Arc<RwLock<DedicatedPortMap>>,
     pub route_tx: broadcast::Sender<()>,
+    pub change_tx: broadcast::Sender<String>,
     pub domain_suffix: String,
     pub apps_root: std::path::PathBuf,
     pub scan_warnings_path: std::path::PathBuf,
@@ -96,7 +97,7 @@ pub struct SharedState {
 }
 
 impl SharedState {
-    pub fn reload_routes(&self) -> anyhow::Result<()> {
+    pub fn reload_routes(&self) -> anyhow::Result<bool> {
         let enabled_apps = self.store.list_enabled()?;
         let mut table: HashMap<String, Vec<RouteRule>> = HashMap::new();
         let mut port_rules: HashMap<u16, Vec<RouteRule>> = HashMap::new();
@@ -143,6 +144,10 @@ impl SharedState {
         for rules in port_rules.values_mut() {
             sort_rules(rules);
         }
+        let changed = {
+            let current = self.routes.read();
+            *current != table
+        };
         *self.routes.write() = table;
 
         // Update dedicated port rule sets
@@ -163,8 +168,10 @@ impl SharedState {
             }
         }
 
-        let _ = self.route_tx.send(());
-        Ok(())
+        if changed {
+            let _ = self.route_tx.send(());
+        }
+        Ok(changed)
     }
 }
 
@@ -333,13 +340,16 @@ enum TunnelCommands {
 fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
     runtime::ensure_runtime_paths(cfg)?;
 
-    let store = Arc::new(AppRepository::new(&cfg.sqlite_path, &cfg.domain_suffix)?);
+    let (route_tx, _rx) = broadcast::channel(32);
+    let (change_tx, _) = broadcast::channel::<String>(32);
+
+    let mut store = AppRepository::new(&cfg.sqlite_path, &cfg.domain_suffix)?;
+    store.set_change_tx(change_tx.clone());
+    let store = Arc::new(store);
     store.init_schema()?;
     store.migrate_domain_to_prefix()?;
 
     let share_signer = Arc::new(ShareSigner::load_or_generate(&store)?);
-
-    let (route_tx, _rx) = broadcast::channel(32);
     let (inspect_tx, _) = broadcast::channel(256);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
     let registry = Arc::new(process::default_registry());
@@ -350,6 +360,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         routes: Arc::new(RwLock::new(HashMap::new())),
         dedicated_ports: Arc::new(RwLock::new(HashMap::new())),
         route_tx,
+        change_tx,
         domain_suffix: cfg.domain_suffix.clone(),
         apps_root: cfg.apps_root.clone(),
         scan_warnings_path: cfg.scan_warnings_path.clone(),
@@ -786,39 +797,8 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
         }
     });
 
-    let scan_state = state.clone();
-    let scan_interval_secs = cfg.scan_interval_secs;
-    let scan_task = tokio::spawn(async move {
-        if scan_interval_secs == 0 {
-            info!("apps scanner disabled (interval=0)");
-            return;
-        }
-        loop {
-            sleep(Duration::from_secs(scan_interval_secs)).await;
-            match scanner::sync_from_apps_root(&scan_state) {
-                Ok(stats) => {
-                    if let Err(err) =
-                        runtime::write_scan_warnings(&scan_state.scan_warnings_path, &stats)
-                    {
-                        error!(error = %err, "failed to write scan warnings");
-                    }
-                    if let Err(err) = scan_state.reload_routes() {
-                        error!(error = %err, "failed to reload routes after scan");
-                    } else {
-                        debug!(
-                            discovered = stats.discovered,
-                            inserted = stats.inserted,
-                            updated = stats.updated,
-                            skipped_manual = stats.skipped_manual,
-                            pruned = stats.pruned,
-                            "apps scan completed"
-                        );
-                    }
-                }
-                Err(err) => error!(error = %err, "apps scan failed"),
-            }
-        }
-    });
+    // Periodic scanner removed — startup scan + FS watcher is sufficient.
+    let scan_task = tokio::spawn(async {});
 
     let watch_state = state.clone();
     let watch_root = cfg.apps_root.clone();
@@ -847,18 +827,25 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
                     {
                         error!(error = %err, "failed to write scan warnings");
                     }
-                    if let Err(err) = watch_state.reload_routes() {
-                        error!(error = %err, "failed to reload routes after fs event");
-                    } else {
-                        debug!(
-                            discovered = stats.discovered,
-                            inserted = stats.inserted,
-                            updated = stats.updated,
-                            skipped_manual = stats.skipped_manual,
-                            pruned = stats.pruned,
-                            "apps scan completed from fs event"
-                        );
+                    match watch_state.reload_routes() {
+                        Ok(true) => {
+                            let _ = watch_state
+                                .change_tx
+                                .send("detail-tunnel,detail-features,detail-urls".to_string());
+                        }
+                        Ok(false) => {}
+                        Err(err) => {
+                            error!(error = %err, "failed to reload routes after fs event");
+                        }
                     }
+                    debug!(
+                        discovered = stats.discovered,
+                        inserted = stats.inserted,
+                        updated = stats.updated,
+                        skipped_manual = stats.skipped_manual,
+                        pruned = stats.pruned,
+                        "apps scan completed from fs event"
+                    );
                 }
                 Err(err) => error!(error = %err, "apps scan failed from fs event"),
             }

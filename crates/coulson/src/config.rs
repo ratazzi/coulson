@@ -41,7 +41,6 @@ pub struct CoulsonConfig {
     pub scan_warnings_path: PathBuf,
     pub domain_suffix: String,
     pub apps_root: PathBuf,
-    pub scan_interval_secs: u64,
     pub watch_fs: bool,
     pub idle_timeout_secs: u64,
     pub lan_access: bool,
@@ -71,7 +70,6 @@ impl Default for CoulsonConfig {
             scan_warnings_path: state_dir.join("scan_warnings.json"),
             domain_suffix: "coulson.local".to_string(),
             apps_root,
-            scan_interval_secs: 0,
             watch_fs: true,
             idle_timeout_secs: 900,
             lan_access: false,
@@ -110,11 +108,6 @@ impl CoulsonConfig {
         }
         if let Ok(path) = env::var("COULSON_APPS_ROOT") {
             cfg.apps_root = PathBuf::from(path);
-        }
-        if let Ok(raw) = env::var("COULSON_SCAN_INTERVAL_SECS") {
-            cfg.scan_interval_secs = raw
-                .parse()
-                .with_context(|| format!("invalid COULSON_SCAN_INTERVAL_SECS: {raw}"))?;
         }
         if let Ok(raw) = env::var("COULSON_WATCH_FS") {
             cfg.watch_fs =

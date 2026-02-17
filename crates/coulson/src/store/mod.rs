@@ -7,6 +7,8 @@ use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExten
 use thiserror::Error;
 use time::OffsetDateTime;
 
+use tokio::sync::broadcast;
+
 use crate::domain::{AppId, AppKind, AppSpec, BackendTarget, DomainName, TunnelMode};
 
 #[derive(Debug, Error)]
@@ -39,6 +41,7 @@ pub struct StaticAppInput<'a> {
 pub struct AppRepository {
     pub(crate) conn: Mutex<Connection>,
     pub(crate) domain_suffix: String,
+    pub(crate) change_tx: Option<broadcast::Sender<String>>,
 }
 
 fn check_insert(result: rusqlite::Result<usize>) -> anyhow::Result<()> {
@@ -54,6 +57,16 @@ fn check_insert(result: rusqlite::Result<usize>) -> anyhow::Result<()> {
 }
 
 impl AppRepository {
+    pub fn set_change_tx(&mut self, tx: broadcast::Sender<String>) {
+        self.change_tx = Some(tx);
+    }
+
+    fn emit(&self, frames: &str) {
+        if let Some(tx) = &self.change_tx {
+            let _ = tx.send(frames.to_string());
+        }
+    }
+
     pub fn new(path: &Path, domain_suffix: &str) -> anyhow::Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
@@ -64,6 +77,7 @@ impl AppRepository {
         Ok(Self {
             conn: Mutex::new(conn),
             domain_suffix: domain_suffix.to_string(),
+            change_tx: None,
         })
     }
 
@@ -599,6 +613,9 @@ impl AppRepository {
             "UPDATE apps SET enabled = ?1, updated_at = ?2 WHERE id = ?3",
             params![if enabled { 1 } else { 0 }, now, app_id],
         )?;
+        if changed > 0 {
+            self.emit("detail-tunnel,detail-features,detail-urls");
+        }
         Ok(changed > 0)
     }
 
@@ -676,6 +693,9 @@ impl AppRepository {
 
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         let changed = conn.execute(&sql, params.as_slice())?;
+        if changed > 0 {
+            self.emit("detail-features");
+        }
         Ok(changed > 0)
     }
 
@@ -715,6 +735,9 @@ impl AppRepository {
             "UPDATE apps SET tunnel_url = ?1, updated_at = ?2 WHERE id = ?3",
             params![tunnel_url, now, app_id],
         )?;
+        if changed > 0 {
+            self.emit("detail-tunnel,detail-urls");
+        }
         Ok(changed > 0)
     }
 
@@ -733,6 +756,9 @@ impl AppRepository {
             "UPDATE apps SET app_tunnel_id = ?1, app_tunnel_domain = ?2, app_tunnel_dns_id = ?3, app_tunnel_creds = ?4, tunnel_mode = ?5, updated_at = ?6 WHERE id = ?7",
             params![tunnel_id, tunnel_domain, dns_id, creds_json, mode.as_str(), now, app_id],
         )?;
+        if changed > 0 {
+            self.emit("detail-tunnel,detail-urls");
+        }
         Ok(changed > 0)
     }
 
@@ -743,6 +769,9 @@ impl AppRepository {
             "UPDATE apps SET tunnel_mode = ?1, updated_at = ?2 WHERE id = ?3",
             params![mode.as_str(), now, app_id],
         )?;
+        if changed > 0 {
+            self.emit("detail-tunnel,detail-urls");
+        }
         Ok(changed > 0)
     }
 
@@ -905,6 +934,7 @@ impl AppRepository {
             "UPDATE apps SET inspect_enabled = ? WHERE id = ?",
             params![enabled as i64, app_id],
         )?;
+        self.emit("detail-features");
         Ok(())
     }
 
@@ -1255,6 +1285,7 @@ mod tests {
         let repo = AppRepository {
             conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
             domain_suffix: "coulson.local".to_string(),
+            change_tx: None,
         };
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());
@@ -1283,6 +1314,7 @@ mod tests {
         let repo = AppRepository {
             conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
             domain_suffix: "coulson.local".to_string(),
+            change_tx: None,
         };
         repo.init_schema().expect("schema");
 
@@ -1310,6 +1342,7 @@ mod tests {
         let repo = AppRepository {
             conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
             domain_suffix: "coulson.local".to_string(),
+            change_tx: None,
         };
         repo.init_schema().expect("schema");
         let domain = DomainName("myapp.coulson.local".to_string());

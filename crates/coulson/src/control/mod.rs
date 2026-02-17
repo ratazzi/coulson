@@ -762,6 +762,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                     {
                                         return internal_error(req.request_id, e.to_string());
                                     }
+                                    let _ = state.reload_routes();
                                     return ok_response(
                                         req.request_id,
                                         json!({ "updated": true, "tunnel_mode": "quick", "tunnel_url": url }),
@@ -816,6 +817,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 {
                                     return internal_error(req.request_id, e.to_string());
                                 }
+                                let _ = state.reload_routes();
                                 return ok_response(
                                     req.request_id,
                                     json!({
@@ -863,6 +865,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                     return internal_error(req.request_id, e.to_string());
                                 }
 
+                                let _ = state.reload_routes();
                                 return ok_response(
                                     req.request_id,
                                     json!({
@@ -984,6 +987,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                                 return internal_error(req.request_id, e.to_string());
                             }
 
+                            let _ = state.reload_routes();
                             return ok_response(
                                 req.request_id,
                                 json!({
@@ -1000,6 +1004,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                             if let Err(e) = state.store.set_tunnel_mode(params.app_id, new_mode) {
                                 return internal_error(req.request_id, e.to_string());
                             }
+                            let _ = state.reload_routes();
                             return ok_response(
                                 req.request_id,
                                 json!({ "updated": true, "tunnel_mode": new_mode.as_str() }),

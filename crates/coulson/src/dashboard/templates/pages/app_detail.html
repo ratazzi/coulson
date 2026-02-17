@@ -20,13 +20,39 @@
 </div>
 
 <div class="grid gap-6" data-controller="modal">
-{% include "partials/detail/urls.html" %}
+<turbo-frame id="detail-urls" src="/apps/{{ app.name }}/frames/urls">
+  <div class="animate-pulse h-20 rounded-xl bg-zinc-100 dark:bg-zinc-800"></div>
+</turbo-frame>
 {% include "partials/detail/info.html" %}
-{% include "partials/detail/features.html" %}
-{% include "partials/detail/tunnel.html" %}
+<turbo-frame id="detail-features" src="/apps/{{ app.name }}/frames/features">
+  <div class="animate-pulse h-32 rounded-xl bg-zinc-100 dark:bg-zinc-800"></div>
+</turbo-frame>
+<turbo-frame id="detail-tunnel" src="/apps/{{ app.name }}/frames/tunnel">
+  <div class="animate-pulse h-24 rounded-xl bg-zinc-100 dark:bg-zinc-800"></div>
+</turbo-frame>
 {% include "partials/detail/danger.html" %}
   <dialog data-modal-target="dialog" data-action="click->modal#backdropClose">
     {% include "partials/settings_modal.html" %}
   </dialog>
 </div>
+<script>
+(function() {
+  var appName = '{{ app.name }}';
+  var evtSource = new EventSource('/apps/' + appName + '/stream');
+  evtSource.onmessage = function(event) {
+    var ids = event.data.split(',');
+    ids.forEach(function(id) {
+      var frame = document.getElementById(id.trim());
+      if (frame) {
+        var src = frame.getAttribute('src');
+        if (src) {
+          frame.removeAttribute('src');
+          frame.src = src;
+        }
+      }
+    });
+  };
+  document.addEventListener('turbo:before-visit', function() { evtSource.close(); }, { once: true });
+})();
+</script>
 {% endblock content %}

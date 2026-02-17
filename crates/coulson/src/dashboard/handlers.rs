@@ -76,15 +76,11 @@ pub async fn page_app_detail(
         _ => return html_response(StatusCode::NOT_FOUND, render_not_found(&state.shared)),
     };
     let port = state.shared.listen_http.port();
-    let https_port = state.shared.listen_https.map(|a| a.port());
     let app_view = AppView::from_spec(&app, port);
-    let gtd = global_tunnel_domain(&state.shared);
-    let urls = build_urls(&app, port, https_port, gtd.as_deref());
     let title = format!("{} — Detail", app.domain.0);
     let page = render_page("pages/app_detail.html", &state.shared, |ctx| {
         ctx.insert("title", &title);
         ctx.insert("app", &app_view);
-        ctx.insert("urls", &urls);
         ctx.insert("settings_error", "");
         ctx.insert(
             "form_timeout_ms",
@@ -167,6 +163,67 @@ pub async fn sse_requests(State(state): State<DashboardState>, Path(id): Path<St
         _ => None,
     });
 
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+pub async fn frame_tunnel(State(state): State<DashboardState>, Path(id): Path<String>) -> Response {
+    let app = match state.shared.store.get_by_name(&id) {
+        Ok(Some(app)) => app,
+        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    };
+    let port = state.shared.listen_http.port();
+    let app_view = AppView::from_spec(&app, port);
+    let mut ctx = base_context(&state.shared);
+    ctx.insert("app", &app_view);
+    Html(render_partial("partials/detail/tunnel.html", &ctx)).into_response()
+}
+
+pub async fn frame_features(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Response {
+    let app = match state.shared.store.get_by_name(&id) {
+        Ok(Some(app)) => app,
+        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    };
+    let port = state.shared.listen_http.port();
+    let app_view = AppView::from_spec(&app, port);
+    let mut ctx = base_context(&state.shared);
+    ctx.insert("app", &app_view);
+    Html(render_partial("partials/detail/features.html", &ctx)).into_response()
+}
+
+pub async fn frame_urls(State(state): State<DashboardState>, Path(id): Path<String>) -> Response {
+    let app = match state.shared.store.get_by_name(&id) {
+        Ok(Some(app)) => app,
+        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    };
+    let port = state.shared.listen_http.port();
+    let https_port = state.shared.listen_https.map(|a| a.port());
+    let app_view = AppView::from_spec(&app, port);
+    let gtd = global_tunnel_domain(&state.shared);
+    let urls = build_urls(&app, port, https_port, gtd.as_deref());
+    let mut ctx = base_context(&state.shared);
+    ctx.insert("app", &app_view);
+    ctx.insert("urls", &urls);
+    Html(render_partial("partials/detail/urls.html", &ctx)).into_response()
+}
+
+pub async fn sse_app_detail(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.shared.store.get_by_name(&id).ok().flatten().is_none() {
+        return html_response(StatusCode::NOT_FOUND, "Not found".to_string());
+    }
+    let rx = state.shared.change_tx.subscribe();
+    let stream = BroadcastStream::new(rx).filter_map(|result| {
+        result
+            .ok()
+            .map(|frames| Ok::<_, Infallible>(Event::default().data(frames)))
+    });
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
@@ -338,7 +395,7 @@ pub async fn action_delete_redirect(
 pub async fn action_toggle_cors(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
-) -> Redirect {
+) -> Response {
     if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
         let _ = state.shared.store.update_settings(
             app.id.0,
@@ -351,13 +408,13 @@ pub async fn action_toggle_cors(
         );
         let _ = state.shared.reload_routes();
     }
-    Redirect::to(&format!("/apps/{id}"))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn action_toggle_spa(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
-) -> Redirect {
+) -> Response {
     if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
         let _ = state.shared.store.update_settings(
             app.id.0,
@@ -370,7 +427,7 @@ pub async fn action_toggle_spa(
         );
         let _ = state.shared.reload_routes();
     }
-    Redirect::to(&format!("/apps/{id}"))
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn page_processes(State(state): State<DashboardState>) -> Html<String> {
@@ -767,36 +824,6 @@ fn render_new_app_modal_error(
     turbo_stream_response(&streams)
 }
 
-fn render_detail_stream(state: &DashboardState, id: &str) -> Response {
-    let app = match state.shared.store.get_by_name(id) {
-        Ok(Some(app)) => app,
-        _ => return Redirect::to(&format!("/apps/{id}")).into_response(),
-    };
-    let port = state.shared.listen_http.port();
-    let https_port = state.shared.listen_https.map(|a| a.port());
-    let app_view = AppView::from_spec(&app, port);
-    let gtd = global_tunnel_domain(&state.shared);
-    let urls = build_urls(&app, port, https_port, gtd.as_deref());
-
-    let mut ctx = base_context(&state.shared);
-    ctx.insert("app", &app_view);
-    ctx.insert("urls", &urls);
-
-    let mut streams = turbo_replace(
-        "detail-tunnel",
-        &render_partial("partials/detail/tunnel.html", &ctx),
-    );
-    streams.push_str(&turbo_replace(
-        "detail-urls",
-        &render_partial("partials/detail/urls.html", &ctx),
-    ));
-    streams.push_str(&turbo_replace(
-        "detail-features",
-        &render_partial("partials/detail/features.html", &ctx),
-    ));
-    turbo_stream_response(&streams)
-}
-
 fn render_settings_modal_error(
     state: &DashboardState,
     app: &crate::domain::AppSpec,
@@ -850,7 +877,7 @@ pub async fn action_set_basic_auth(
             .update_settings(app.id.0, None, user, pass, None, None, None);
         let _ = state.shared.reload_routes();
     }
-    render_detail_stream(&state, &id)
+    StatusCode::NO_CONTENT.into_response()
 }
 
 #[derive(Deserialize)]
@@ -875,12 +902,12 @@ pub async fn action_set_tunnel_mode(
         "quick" => TunnelMode::Quick,
         "global" => TunnelMode::Global,
         "named" => TunnelMode::Named,
-        _ => return render_detail_stream(&state, &id),
+        _ => return StatusCode::NO_CONTENT.into_response(),
     };
 
     let old_mode = &app.tunnel_mode;
     if *old_mode == new_mode {
-        return render_detail_stream(&state, &id);
+        return StatusCode::NO_CONTENT.into_response();
     }
 
     let app_id = app.id.0;
@@ -911,7 +938,7 @@ pub async fn action_set_tunnel_mode(
             .and_then(|c| serde_json::from_str::<tunnel::TunnelCredentials>(c).ok())
             .is_some();
         if !has_domain || (!has_token && !has_saved_creds) {
-            return render_detail_stream(&state, &id);
+            return StatusCode::NO_CONTENT.into_response();
         }
     }
 
@@ -946,6 +973,7 @@ pub async fn action_set_tunnel_mode(
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "failed to start quick tunnel");
+                    let _ = state.shared.change_tx.send("detail-tunnel".to_string());
                 }
             }
         }
@@ -998,6 +1026,7 @@ pub async fn action_set_tunnel_mode(
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "failed to start named tunnel");
+                        let _ = state.shared.change_tx.send("detail-tunnel".to_string());
                     }
                 }
             } else if let Some(creds) = app
@@ -1027,6 +1056,7 @@ pub async fn action_set_tunnel_mode(
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "failed to reconnect named tunnel");
+                        let _ = state.shared.change_tx.send("detail-tunnel".to_string());
                     }
                 }
             }
@@ -1035,7 +1065,7 @@ pub async fn action_set_tunnel_mode(
     }
 
     let _ = state.shared.reload_routes();
-    render_detail_stream(&state, &id)
+    StatusCode::NO_CONTENT.into_response()
 }
 
 pub async fn not_found(
