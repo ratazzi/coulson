@@ -432,12 +432,18 @@ pub async fn action_restart_process(
     State(state): State<DashboardState>,
     Path(app_id): Path<i64>,
 ) -> Redirect {
-    state
-        .shared
-        .process_manager
-        .lock()
-        .await
-        .kill_process(app_id);
+    if let Ok(Some(app)) = state.shared.store.get_by_id(app_id) {
+        if let crate::domain::BackendTarget::Managed {
+            root, kind, name, ..
+        } = &app.target
+        {
+            let mut pm = state.shared.process_manager.lock().await;
+            pm.kill_process(app_id);
+            let _ = pm
+                .ensure_running(app_id, name, std::path::Path::new(root), kind)
+                .await;
+        }
+    }
     Redirect::to("/processes")
 }
 
