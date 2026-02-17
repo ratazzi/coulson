@@ -1319,43 +1319,10 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
         .strip_suffix(&format!(".{}", cfg.domain_suffix))
         .unwrap_or(name);
 
-    let mut removed_file = false;
     let mut removed_db = false;
 
     // Check apps_root for file/symlink
-    let link_path = cfg.apps_root.join(bare_name);
-    let mut symlink_target_file: Option<std::path::PathBuf> = None;
-    if link_path.symlink_metadata().is_ok() {
-        // If it's a symlink pointing to a file (.coulson or .coulson.toml), remember the target
-        if let Ok(meta) = std::fs::symlink_metadata(&link_path) {
-            if meta.file_type().is_symlink() {
-                if let Ok(target) = std::fs::read_link(&link_path) {
-                    let resolved = if target.is_absolute() {
-                        target
-                    } else {
-                        cfg.apps_root.join(&target)
-                    };
-                    if resolved.is_file() {
-                        if let Some(fname) = resolved.file_name().and_then(|n| n.to_str()) {
-                            if fname == ".coulson" || fname == ".coulson.toml" {
-                                symlink_target_file = Some(resolved);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        std::fs::remove_file(&link_path)
-            .with_context(|| format!("failed to remove {}", link_path.display()))?;
-        removed_file = true;
-
-        // Also remove the .coulson/.coulson.toml file the symlink pointed to
-        if let Some(target_file) = &symlink_target_file {
-            if let Err(err) = std::fs::remove_file(target_file) {
-                debug!("failed to remove {}: {err}", target_file.display());
-            }
-        }
-    }
+    let removed_file = scanner::remove_app_fs_entry(&cfg.apps_root, bare_name);
 
     // Best-effort RPC delete
     let client = RpcClient::new(&cfg.control_socket);

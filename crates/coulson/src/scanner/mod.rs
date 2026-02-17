@@ -111,6 +111,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                     kind_str,
                     app.enabled,
                     "apps_root",
+                    &app.fs_entry,
                 )?
             }
             "static_dir" => state.store.upsert_scanned_static_dir(
@@ -119,6 +120,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                 &app.target_value,
                 app.enabled,
                 "apps_root",
+                &app.fs_entry,
             )?,
             _ => state.store.upsert_scanned_static(
                 &StaticAppInput {
@@ -136,6 +138,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                 },
                 app.enabled,
                 "apps_root",
+                &app.fs_entry,
             )?,
         };
         match op {
@@ -187,6 +190,7 @@ struct DiscoveredStaticApp {
     listen_port: Option<u16>,
     enabled: bool,
     explicit_domain: bool,
+    fs_entry: String,
 }
 
 struct DiscoverResult {
@@ -287,6 +291,7 @@ fn discover(
                     listen_port: None,
                     enabled: true,
                     explicit_domain: file_name.ends_with(&format!(".{suffix}")),
+                    fs_entry: file_name.clone(),
                 };
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             }
@@ -332,6 +337,7 @@ fn discover(
                         listen_port: None,
                         enabled: true,
                         explicit_domain,
+                        fs_entry: dir_name.clone(),
                     };
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 }
@@ -367,6 +373,7 @@ fn discover(
                         listen_port: None,
                         enabled: true,
                         explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
+                        fs_entry: dir_name.clone(),
                     };
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 } else if entry.path().join("public").is_dir() {
@@ -394,6 +401,7 @@ fn discover(
                         listen_port: None,
                         enabled: true,
                         explicit_domain: dir_name.ends_with(&format!(".{suffix}")),
+                        fs_entry: dir_name.clone(),
                     };
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 }
@@ -439,6 +447,7 @@ fn discover(
                     listen_port: manifest.listen_port,
                     enabled,
                     explicit_domain,
+                    fs_entry: dir_name.clone(),
                 };
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             } else if let Some(routes) = manifest.routes {
@@ -472,6 +481,7 @@ fn discover(
                         listen_port: route.listen_port.or(manifest.listen_port),
                         enabled,
                         explicit_domain,
+                        fs_entry: dir_name.clone(),
                     };
                     insert_with_priority(&mut by_route, &mut conflicts, app);
                 }
@@ -502,6 +512,7 @@ fn discover(
                     listen_port: manifest.listen_port,
                     enabled,
                     explicit_domain,
+                    fs_entry: dir_name.clone(),
                 };
                 insert_with_priority(&mut by_route, &mut conflicts, app);
             }
@@ -587,6 +598,7 @@ fn discover_from_symlink(
                 listen_port: None,
                 enabled: true,
                 explicit_domain,
+                fs_entry: file_name.to_string(),
             });
         }
         return Ok(out);
@@ -614,6 +626,7 @@ fn discover_from_symlink(
                     listen_port: None,
                     enabled: true,
                     explicit_domain,
+                    fs_entry: file_name.to_string(),
                 });
             }
             return Ok(out);
@@ -642,6 +655,7 @@ fn discover_from_symlink(
                         listen_port: None,
                         enabled: true,
                         explicit_domain,
+                        fs_entry: file_name.to_string(),
                     });
                 }
                 return Ok(out);
@@ -670,6 +684,7 @@ fn discover_from_symlink(
                     listen_port: None,
                     enabled: true,
                     explicit_domain,
+                    fs_entry: file_name.to_string(),
                 });
             }
             return Ok(out);
@@ -696,6 +711,7 @@ fn discover_from_symlink(
                     listen_port: None,
                     enabled: true,
                     explicit_domain,
+                    fs_entry: file_name.to_string(),
                 }]);
             }
             if resolved_target.join("public").is_dir() {
@@ -715,6 +731,7 @@ fn discover_from_symlink(
                     listen_port: None,
                     enabled: true,
                     explicit_domain,
+                    fs_entry: file_name.to_string(),
                 }]);
             }
             return Ok(Vec::new());
@@ -737,6 +754,7 @@ fn discover_from_symlink(
                 listen_port: None,
                 enabled: true,
                 explicit_domain,
+                fs_entry: file_name.to_string(),
             }]);
         }
     }
@@ -927,6 +945,57 @@ fn parse_port_proxy_target(raw: &str) -> Option<(String, u16, Option<u64>)> {
     Some((route.target_host, route.target_port, route.timeout_ms))
 }
 
+/// Remove the filesystem entry from apps_root.
+///
+/// - symlink → remove symlink + clean up .coulson/.coulson.toml target file
+/// - file → remove file
+/// - directory → skip (return false)
+///
+/// Returns true if something was actually removed.
+pub fn remove_app_fs_entry(apps_root: &Path, fs_entry: &str) -> bool {
+    let path = apps_root.join(fs_entry);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    if meta.file_type().is_dir() {
+        tracing::debug!(path = %path.display(), "skipping directory removal");
+        return false;
+    }
+
+    // If it's a symlink pointing to a .coulson or .coulson.toml file, clean that up too
+    if meta.file_type().is_symlink() {
+        if let Ok(target) = std::fs::read_link(&path) {
+            let resolved = if target.is_absolute() {
+                target
+            } else {
+                apps_root.join(&target)
+            };
+            if resolved.is_file() {
+                if let Some(fname) = resolved.file_name().and_then(|n| n.to_str()) {
+                    if fname == ".coulson" || fname == ".coulson.toml" {
+                        if let Err(err) = std::fs::remove_file(&resolved) {
+                            tracing::warn!(path = %resolved.display(), error = %err, "failed to remove symlink target file");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    match std::fs::remove_file(&path) {
+        Ok(()) => {
+            tracing::info!(path = %path.display(), "removed fs entry");
+            true
+        }
+        Err(err) => {
+            tracing::warn!(path = %path.display(), error = %err, "failed to remove fs entry");
+            false
+        }
+    }
+}
+
 pub(crate) fn sanitize_name(name: &str) -> String {
     let mut out = String::new();
     for ch in name.chars() {
@@ -1072,6 +1141,7 @@ mod tests {
                 listen_port: None,
                 enabled: true,
                 explicit_domain: false,
+                fs_entry: "myapp".to_string(),
             },
         );
         insert_with_priority(
@@ -1092,6 +1162,7 @@ mod tests {
                 listen_port: None,
                 enabled: true,
                 explicit_domain: true,
+                fs_entry: "myapp.coulson.local".to_string(),
             },
         );
         let winner = map.get("myapp.coulson.local|").expect("winner");

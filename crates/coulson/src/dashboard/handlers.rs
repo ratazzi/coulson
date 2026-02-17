@@ -264,6 +264,9 @@ pub async fn action_delete(
         Ok(Some(app)) => app,
         _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
     };
+    if let Some(ref fs_entry) = app.fs_entry {
+        scanner::remove_app_fs_entry(&state.shared.apps_root, fs_entry);
+    }
     let _ = state.shared.store.delete(app.id.0);
     let _ = state.shared.reload_routes();
 
@@ -289,6 +292,9 @@ pub async fn action_delete_redirect(
     Path(id): Path<String>,
 ) -> Redirect {
     if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
+        if let Some(ref fs_entry) = app.fs_entry {
+            scanner::remove_app_fs_entry(&state.shared.apps_root, fs_entry);
+        }
         let _ = state.shared.store.delete(app.id.0);
     }
     let _ = state.shared.reload_routes();

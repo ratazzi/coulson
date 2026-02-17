@@ -843,6 +843,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "app.delete" => {
             let params: AppIdParams = parse_params!(req);
+            let app = find_app!(state, req, params.app_id);
+            if let Some(ref fs_entry) = app.fs_entry {
+                scanner::remove_app_fs_entry(&state.apps_root, fs_entry);
+            }
             match state.store.delete(params.app_id) {
                 Ok(found) => {
                     if !found {

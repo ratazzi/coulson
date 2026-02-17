@@ -104,6 +104,7 @@ impl AppRepository {
               app_tunnel_creds TEXT,
               share_auth INTEGER NOT NULL DEFAULT 0,
               inspect_enabled INTEGER NOT NULL DEFAULT 0,
+              fs_entry TEXT,
               UNIQUE(domain, path_prefix)
             );
 
@@ -153,6 +154,7 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT",
             "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN fs_entry TEXT",
         ] {
             add_column_if_missing(&conn, sql)?;
         }
@@ -232,6 +234,7 @@ impl AppRepository {
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
             inspect_enabled: false,
+            fs_entry: None,
             enabled: true,
             created_at: now,
             updated_at: now,
@@ -243,6 +246,7 @@ impl AppRepository {
         input: &StaticAppInput,
         enabled: bool,
         source: &str,
+        fs_entry: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -261,7 +265,7 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_type = ?3, target_value = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12 WHERE id = ?13",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_type = ?3, target_value = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12, fs_entry = ?13 WHERE id = ?14",
                     params![
                         input.name,
                         path_prefix_db,
@@ -275,6 +279,7 @@ impl AppRepository {
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
                         input.listen_port.map(|v| v as i64),
+                        fs_entry,
                         id
                     ],
                 )?;
@@ -282,8 +287,8 @@ impl AppRepository {
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port, fs_entry)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         input.name,
                         "static",
@@ -301,6 +306,7 @@ impl AppRepository {
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
                         input.listen_port.map(|v| v as i64),
+                        fs_entry,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -313,6 +319,7 @@ impl AppRepository {
     }
 
     /// Upsert a managed (ASGI, Rack, Node, Docker, etc.) app discovered by the scanner.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_scanned_managed(
         &self,
         name: &str,
@@ -321,6 +328,7 @@ impl AppRepository {
         kind: &str,
         enabled: bool,
         source: &str,
+        fs_entry: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -339,15 +347,15 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = ?2, target_type = 'managed', target_value = ?3, updated_at = ?4, scan_managed = 1, scan_source = ?5 WHERE id = ?6",
-                    params![name, kind, app_root, now, source, id],
+                    "UPDATE apps SET name = ?1, kind = ?2, target_type = 'managed', target_value = ?3, updated_at = ?4, scan_managed = 1, scan_source = ?5, fs_entry = ?6 WHERE id = ?7",
+                    params![name, kind, app_root, now, source, fs_entry, id],
                 )?;
                 ScanUpsertResult::Updated
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
-                     VALUES (?1, ?2, ?3, ?4, 'managed', ?5, NULL, ?6, 1, ?7, ?8, ?9)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, fs_entry)
+                     VALUES (?1, ?2, ?3, ?4, 'managed', ?5, NULL, ?6, 1, ?7, ?8, ?9, ?10)",
                     params![
                         name,
                         kind,
@@ -358,6 +366,7 @@ impl AppRepository {
                         source,
                         now,
                         now,
+                        fs_entry,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -376,6 +385,7 @@ impl AppRepository {
         static_root: &str,
         enabled: bool,
         source: &str,
+        fs_entry: &str,
     ) -> anyhow::Result<(AppSpec, ScanUpsertResult)> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -394,15 +404,15 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, kind = 'static', target_type = 'static_dir', target_value = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4 WHERE id = ?5",
-                    params![name, static_root, now, source, id],
+                    "UPDATE apps SET name = ?1, kind = 'static', target_type = 'static_dir', target_value = ?2, updated_at = ?3, scan_managed = 1, scan_source = ?4, fs_entry = ?5 WHERE id = ?6",
+                    params![name, static_root, now, source, fs_entry, id],
                 )?;
                 ScanUpsertResult::Updated
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at)
-                     VALUES (?1, 'static', ?2, ?3, 'static_dir', ?4, NULL, ?5, 1, ?6, ?7, ?8)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, fs_entry)
+                     VALUES (?1, 'static', ?2, ?3, 'static_dir', ?4, NULL, ?5, 1, ?6, ?7, ?8, ?9)",
                     params![
                         name,
                         domain_db,
@@ -412,6 +422,7 @@ impl AppRepository {
                         source,
                         now,
                         now,
+                        fs_entry,
                     ],
                 )?;
                 ScanUpsertResult::Inserted
@@ -874,7 +885,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled,fs_entry";
 
 fn backend_target_from_db(
     id: i64,
@@ -967,6 +978,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         app_tunnel_dns_id: row.get::<_, Option<String>>(20).unwrap_or(None),
         app_tunnel_creds: row.get::<_, Option<String>>(21).unwrap_or(None),
         inspect_enabled: row.get::<_, i64>(22).unwrap_or(0) == 1,
+        fs_entry: row.get::<_, Option<String>>(23).unwrap_or(None),
     })
 }
 
