@@ -2134,6 +2134,10 @@ fn run_trust(cfg: CoulsonConfig) -> anyhow::Result<()> {
     #[cfg(target_os = "macos")]
     {
         println!("Adding CA to macOS System keychain (requires sudo)...");
+        println!(
+            "$ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+            ca_path.display()
+        );
         let status = std::process::Command::new("sudo")
             .args([
                 "security",
