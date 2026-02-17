@@ -35,6 +35,8 @@ struct CoulsonManifest {
     #[serde(default)]
     cors_enabled: Option<bool>,
     #[serde(default)]
+    force_https: Option<bool>,
+    #[serde(default)]
     basic_auth_user: Option<String>,
     #[serde(default)]
     basic_auth_pass: Option<String>,
@@ -58,6 +60,8 @@ struct CoulsonManifestRoute {
     timeout_ms: Option<u64>,
     #[serde(default)]
     cors_enabled: Option<bool>,
+    #[serde(default)]
+    force_https: Option<bool>,
     #[serde(default)]
     basic_auth_user: Option<String>,
     #[serde(default)]
@@ -131,6 +135,7 @@ pub fn sync_from_apps_root(state: &SharedState) -> anyhow::Result<ScanStats> {
                     target_value: &app.target_value,
                     timeout_ms: app.timeout_ms,
                     cors_enabled: app.cors_enabled,
+                    force_https: app.force_https,
                     basic_auth_user: app.basic_auth_user.as_deref(),
                     basic_auth_pass: app.basic_auth_pass.as_deref(),
                     spa_rewrite: app.spa_rewrite,
@@ -184,6 +189,7 @@ struct DiscoveredStaticApp {
     target_value: String,
     timeout_ms: Option<u64>,
     cors_enabled: bool,
+    force_https: bool,
     basic_auth_user: Option<String>,
     basic_auth_pass: Option<String>,
     spa_rewrite: bool,
@@ -285,6 +291,7 @@ fn discover(
                     target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -331,6 +338,7 @@ fn discover(
                         target_value: format!("{}:{}", route.target_host, route.target_port),
                         timeout_ms: route.timeout_ms,
                         cors_enabled: false,
+                        force_https: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
@@ -367,6 +375,7 @@ fn discover(
                         target_value: root_str,
                         timeout_ms: None,
                         cors_enabled: false,
+                        force_https: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
@@ -395,6 +404,7 @@ fn discover(
                         target_value: public_root,
                         timeout_ms: None,
                         cors_enabled: false,
+                        force_https: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
@@ -441,6 +451,7 @@ fn discover(
                     target_value: root_str,
                     timeout_ms: None,
                     cors_enabled: manifest.cors_enabled.unwrap_or(false),
+                    force_https: manifest.force_https.unwrap_or(false),
                     basic_auth_user: manifest.basic_auth_user,
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
@@ -471,6 +482,7 @@ fn discover(
                             .cors_enabled
                             .or(manifest.cors_enabled)
                             .unwrap_or(false),
+                        force_https: route.force_https.or(manifest.force_https).unwrap_or(false),
                         basic_auth_user: route
                             .basic_auth_user
                             .or_else(|| manifest.basic_auth_user.clone()),
@@ -506,6 +518,7 @@ fn discover(
                     target_value: tv,
                     timeout_ms: manifest.timeout_ms,
                     cors_enabled: manifest.cors_enabled.unwrap_or(false),
+                    force_https: manifest.force_https.unwrap_or(false),
                     basic_auth_user: manifest.basic_auth_user,
                     basic_auth_pass: manifest.basic_auth_pass,
                     spa_rewrite: manifest.spa_rewrite.unwrap_or(false),
@@ -592,6 +605,7 @@ fn discover_from_symlink(
                 target_value: format!("{}:{}", route.target_host, route.target_port),
                 timeout_ms: route.timeout_ms,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -620,6 +634,7 @@ fn discover_from_symlink(
                     target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -649,6 +664,7 @@ fn discover_from_symlink(
                         target_value: format!("{}:{}", route.target_host, route.target_port),
                         timeout_ms: route.timeout_ms,
                         cors_enabled: false,
+                        force_https: false,
                         basic_auth_user: None,
                         basic_auth_pass: None,
                         spa_rewrite: false,
@@ -678,6 +694,7 @@ fn discover_from_symlink(
                     target_value: format!("{}:{}", route.target_host, route.target_port),
                     timeout_ms: route.timeout_ms,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -705,6 +722,7 @@ fn discover_from_symlink(
                     target_value: root_str,
                     timeout_ms: None,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -725,6 +743,7 @@ fn discover_from_symlink(
                     target_value: public_root,
                     timeout_ms: None,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -748,6 +767,7 @@ fn discover_from_symlink(
                 target_value: format!("{target_host}:{target_port}"),
                 timeout_ms,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1135,6 +1155,7 @@ mod tests {
                 target_value: "127.0.0.1:5006".to_string(),
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1156,6 +1177,7 @@ mod tests {
                 target_value: "127.0.0.1:5007".to_string(),
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,

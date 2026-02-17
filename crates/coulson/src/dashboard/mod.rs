@@ -79,6 +79,10 @@ pub fn router(state: DashboardState) -> Router {
         .route("/apps/{id}/frames/features", get(handlers::frame_features))
         .route("/apps/{id}/frames/urls", get(handlers::frame_urls))
         .route("/apps/{id}/toggle-cors", post(handlers::action_toggle_cors))
+        .route(
+            "/apps/{id}/toggle-https",
+            post(handlers::action_toggle_https),
+        )
         .route("/apps/{id}/toggle-spa", post(handlers::action_toggle_spa))
         .route(
             "/apps/{id}/toggle-inspect",

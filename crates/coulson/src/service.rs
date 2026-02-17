@@ -107,6 +107,7 @@ pub fn apps_warnings(state: &SharedState) -> Result<Option<ScanWarningsFile>, Se
 
 pub struct UpdateSettingsParams {
     pub cors_enabled: Option<bool>,
+    pub force_https: Option<bool>,
     pub basic_auth_user: Option<Option<String>>,
     pub basic_auth_pass: Option<Option<String>>,
     pub spa_rewrite: Option<bool>,
@@ -122,6 +123,7 @@ pub fn app_update_settings(
     match state.store.update_settings(
         app_id,
         params.cors_enabled,
+        params.force_https,
         params.basic_auth_user.as_ref().map(|v| v.as_deref()),
         params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
         params.spa_rewrite,
@@ -155,6 +157,8 @@ pub struct CreateAppParams {
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub cors_enabled: bool,
+    #[serde(default)]
+    pub force_https: bool,
     #[serde(default)]
     pub basic_auth_user: Option<String>,
     #[serde(default)]
@@ -250,6 +254,7 @@ pub fn app_create(state: &SharedState, params: &CreateAppParams) -> Result<AppSp
             target_value: &params.target_value,
             timeout_ms: params.timeout_ms,
             cors_enabled: params.cors_enabled,
+            force_https: params.force_https,
             basic_auth_user: params.basic_auth_user.as_deref(),
             basic_auth_pass: params.basic_auth_pass.as_deref(),
             spa_rewrite: params.spa_rewrite,
@@ -294,6 +299,7 @@ pub fn app_create_from_folder(state: &SharedState, path: &str) -> Result<AppSpec
             target_value,
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,

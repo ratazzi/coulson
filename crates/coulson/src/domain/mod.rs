@@ -152,6 +152,7 @@ pub struct AppSpec {
     pub target: BackendTarget,
     pub timeout_ms: Option<u64>,
     pub cors_enabled: bool,
+    pub force_https: bool,
     pub basic_auth_user: Option<String>,
     pub basic_auth_pass: Option<String>,
     pub spa_rewrite: bool,

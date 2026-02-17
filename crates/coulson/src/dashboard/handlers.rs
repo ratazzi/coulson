@@ -385,6 +385,29 @@ pub async fn action_toggle_cors(
             app.id.0,
             &service::UpdateSettingsParams {
                 cors_enabled: Some(!app.cors_enabled),
+                force_https: None,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: None,
+                listen_port: None,
+                timeout_ms: None,
+            },
+        );
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+pub async fn action_toggle_https(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        let _ = service::app_update_settings(
+            &state.shared,
+            app.id.0,
+            &service::UpdateSettingsParams {
+                cors_enabled: None,
+                force_https: Some(!app.force_https),
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: None,
@@ -406,6 +429,7 @@ pub async fn action_toggle_spa(
             app.id.0,
             &service::UpdateSettingsParams {
                 cors_enabled: None,
+                force_https: None,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: Some(!app.spa_rewrite),
@@ -628,6 +652,7 @@ pub async fn action_update_settings(
         app.id.0,
         &service::UpdateSettingsParams {
             cors_enabled: None,
+            force_https: None,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: None,
@@ -681,6 +706,7 @@ pub async fn action_create_app(
         target_value,
         timeout_ms,
         cors_enabled: false,
+        force_https: false,
         basic_auth_user: None,
         basic_auth_pass: None,
         spa_rewrite: false,
@@ -832,6 +858,7 @@ pub async fn action_set_basic_auth(
             app.id.0,
             &service::UpdateSettingsParams {
                 cors_enabled: None,
+                force_https: None,
                 basic_auth_user: user,
                 basic_auth_pass: pass,
                 spa_rewrite: None,

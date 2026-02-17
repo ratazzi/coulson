@@ -110,6 +110,7 @@ struct AppTunnelSetupParams {
 struct UpdateSettingsParams {
     app_id: i64,
     cors_enabled: Option<bool>,
+    force_https: Option<bool>,
     basic_auth_user: Option<Option<String>>,
     basic_auth_pass: Option<Option<String>>,
     spa_rewrite: Option<bool>,
@@ -377,6 +378,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.app_id,
                 &service::UpdateSettingsParams {
                     cors_enabled: params.cors_enabled,
+                    force_https: params.force_https,
                     basic_auth_user: params.basic_auth_user.clone(),
                     basic_auth_pass: params.basic_auth_pass.clone(),
                     spa_rewrite: params.spa_rewrite,

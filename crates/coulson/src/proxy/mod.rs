@@ -64,6 +64,62 @@ async fn mw_cors(session: &mut Session, route: &RouteRule) -> Result<Flow> {
     Ok(Flow::Next)
 }
 
+async fn mw_force_https(
+    session: &mut Session,
+    route: &RouteRule,
+    https_port: Option<u16>,
+) -> Result<Flow> {
+    if !route.force_https {
+        return Ok(Flow::Next);
+    }
+    let Some(https_port) = https_port else {
+        // No HTTPS listener configured — skip redirect
+        return Ok(Flow::Next);
+    };
+    // Skip if connection is already TLS, or X-Forwarded-Proto says https, or via CF tunnel
+    let is_tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
+    let forwarded_https = session
+        .req_header()
+        .headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("https"));
+    if is_tls
+        || forwarded_https
+        || session
+            .req_header()
+            .headers
+            .get(crate::tunnel::proxy::VIA_TUNNEL_HEADER)
+            .is_some()
+    {
+        return Ok(Flow::Next);
+    }
+    // Extract hostname (without port) from Host header, then build redirect with HTTPS port
+    let raw_host = session
+        .req_header()
+        .headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+    let hostname = raw_host.rsplit_once(':').map_or(raw_host, |(h, _)| h);
+    let pq = session
+        .req_header()
+        .uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let location = if https_port == 443 {
+        format!("https://{hostname}{pq}")
+    } else {
+        format!("https://{hostname}:{https_port}{pq}")
+    };
+    let mut resp = ResponseHeader::build(301, None)?;
+    resp.insert_header("location", &location)?;
+    resp.insert_header("content-length", "0")?;
+    session.write_response_header(Box::new(resp), true).await?;
+    Ok(Flow::Done)
+}
+
 async fn mw_static(session: &mut Session, route: &RouteRule, req_path: &str) -> Result<Flow> {
     if let Some(ref root) = route.static_root {
         if try_serve_static(session, root, req_path, route.cors_enabled).await? {
@@ -162,6 +218,12 @@ impl ProxyHttp for BridgeProxy {
                     if mw_auth(session, &route).await? == Flow::Done {
                         return Ok(true);
                     }
+                    if mw_force_https(session, &route, self.shared.listen_https.map(|a| a.port()))
+                        .await?
+                        == Flow::Done
+                    {
+                        return Ok(true);
+                    }
                     if mw_cors(session, &route).await? == Flow::Done {
                         return Ok(true);
                     }
@@ -250,6 +312,11 @@ impl ProxyHttp for BridgeProxy {
 
         // --- Middleware pipeline ---
         if mw_auth(session, &route).await? == Flow::Done {
+            return Ok(true);
+        }
+        if mw_force_https(session, &route, self.shared.listen_https.map(|a| a.port())).await?
+            == Flow::Done
+        {
             return Ok(true);
         }
         if mw_cors(session, &route).await? == Flow::Done {
@@ -1332,6 +1399,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1365,6 +1433,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1404,6 +1473,7 @@ mod tests {
                     path_prefix: Some("/api/v1".to_string()),
                     timeout_ms: None,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -1420,6 +1490,7 @@ mod tests {
                     path_prefix: Some("/api".to_string()),
                     timeout_ms: None,
                     cors_enabled: false,
+                    force_https: false,
                     basic_auth_user: None,
                     basic_auth_pass: None,
                     spa_rewrite: false,
@@ -1456,6 +1527,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1486,6 +1558,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1505,6 +1578,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1535,6 +1609,7 @@ mod tests {
                 path_prefix: None,
                 timeout_ms: None,
                 cors_enabled: false,
+                force_https: false,
                 basic_auth_user: None,
                 basic_auth_pass: None,
                 spa_rewrite: false,
@@ -1611,6 +1686,7 @@ mod tests {
             path_prefix: path_prefix.map(|s| s.to_string()),
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,

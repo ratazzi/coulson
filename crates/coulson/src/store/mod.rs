@@ -32,6 +32,7 @@ pub struct StaticAppInput<'a> {
     pub target_value: &'a str,
     pub timeout_ms: Option<u64>,
     pub cors_enabled: bool,
+    pub force_https: bool,
     pub basic_auth_user: Option<&'a str>,
     pub basic_auth_pass: Option<&'a str>,
     pub spa_rewrite: bool,
@@ -105,6 +106,7 @@ impl AppRepository {
               created_at INTEGER NOT NULL,
               updated_at INTEGER NOT NULL,
               cors_enabled INTEGER NOT NULL DEFAULT 0,
+              force_https INTEGER NOT NULL DEFAULT 0,
               basic_auth_user TEXT,
               basic_auth_pass TEXT,
               spa_rewrite INTEGER NOT NULL DEFAULT 0,
@@ -155,6 +157,7 @@ impl AppRepository {
         // so these are no-ops (add_column_if_missing silently skips).
         for sql in [
             "ALTER TABLE apps ADD COLUMN cors_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN force_https INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE apps ADD COLUMN basic_auth_user TEXT",
             "ALTER TABLE apps ADD COLUMN basic_auth_pass TEXT",
             "ALTER TABLE apps ADD COLUMN spa_rewrite INTEGER NOT NULL DEFAULT 0",
@@ -197,8 +200,8 @@ impl AppRepository {
 
         let conn = self.conn.lock();
         let result = conn.execute(
-            "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, force_https, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, NULL, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 input.name,
                 "static",
@@ -211,6 +214,7 @@ impl AppRepository {
                 now.unix_timestamp(),
                 now.unix_timestamp(),
                 if input.cors_enabled { 1 } else { 0 },
+                if input.force_https { 1 } else { 0 },
                 input.basic_auth_user,
                 input.basic_auth_pass,
                 if input.spa_rewrite { 1 } else { 0 },
@@ -236,6 +240,7 @@ impl AppRepository {
             target,
             timeout_ms: input.timeout_ms,
             cors_enabled: input.cors_enabled,
+            force_https: input.force_https,
             basic_auth_user: input.basic_auth_user.map(ToOwned::to_owned),
             basic_auth_pass: input.basic_auth_pass.map(ToOwned::to_owned),
             spa_rewrite: input.spa_rewrite,
@@ -303,6 +308,7 @@ impl AppRepository {
             },
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
@@ -359,6 +365,7 @@ impl AppRepository {
             },
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
@@ -402,7 +409,7 @@ impl AppRepository {
             Some((_id, 0)) => ScanUpsertResult::SkippedManual,
             Some((id, _)) => {
                 conn.execute(
-                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_type = ?3, target_value = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, basic_auth_user = ?9, basic_auth_pass = ?10, spa_rewrite = ?11, listen_port = ?12, fs_entry = ?13 WHERE id = ?14",
+                    "UPDATE apps SET name = ?1, path_prefix = ?2, target_type = ?3, target_value = ?4, timeout_ms = ?5, updated_at = ?6, scan_managed = 1, scan_source = ?7, cors_enabled = ?8, force_https = ?9, basic_auth_user = ?10, basic_auth_pass = ?11, spa_rewrite = ?12, listen_port = ?13, fs_entry = ?14 WHERE id = ?15",
                     params![
                         input.name,
                         path_prefix_db,
@@ -412,6 +419,7 @@ impl AppRepository {
                         now,
                         source,
                         if input.cors_enabled { 1 } else { 0 },
+                        if input.force_https { 1 } else { 0 },
                         input.basic_auth_user,
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
@@ -424,8 +432,8 @@ impl AppRepository {
             }
             None => {
                 conn.execute(
-                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port, fs_entry)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, cors_enabled, force_https, basic_auth_user, basic_auth_pass, spa_rewrite, listen_port, fs_entry)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
                     params![
                         input.name,
                         "static",
@@ -439,6 +447,7 @@ impl AppRepository {
                         now,
                         now,
                         if input.cors_enabled { 1 } else { 0 },
+                        if input.force_https { 1 } else { 0 },
                         input.basic_auth_user,
                         input.basic_auth_pass,
                         if input.spa_rewrite { 1 } else { 0 },
@@ -644,6 +653,7 @@ impl AppRepository {
         &self,
         app_id: i64,
         cors_enabled: Option<bool>,
+        force_https: Option<bool>,
         basic_auth_user: Option<Option<&str>>,
         basic_auth_pass: Option<Option<&str>>,
         spa_rewrite: Option<bool>,
@@ -659,6 +669,11 @@ impl AppRepository {
 
         if let Some(v) = cors_enabled {
             sets.push(format!("cors_enabled = ?{idx}"));
+            values.push(Box::new(if v { 1i64 } else { 0 }));
+            idx += 1;
+        }
+        if let Some(v) = force_https {
+            sets.push(format!("force_https = ?{idx}"));
             values.push(Box::new(if v { 1i64 } else { 0 }));
             idx += 1;
         }
@@ -1045,7 +1060,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled,fs_entry";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,force_https,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled,fs_entry";
 
 fn backend_target_from_db(
     id: i64,
@@ -1104,7 +1119,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
     let domain_prefix: String = row.get(3)?;
     let full_domain = domain_from_db(&domain_prefix, suffix);
     let tunnel_mode: TunnelMode = row
-        .get::<_, String>(17)
+        .get::<_, String>(18)
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or_default();
@@ -1123,22 +1138,23 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         updated_at: OffsetDateTime::from_unix_timestamp(updated_ts)
             .unwrap_or(OffsetDateTime::UNIX_EPOCH),
         cors_enabled: row.get::<_, i64>(11).unwrap_or(0) == 1,
-        basic_auth_user: row.get::<_, Option<String>>(12).unwrap_or(None),
-        basic_auth_pass: row.get::<_, Option<String>>(13).unwrap_or(None),
-        spa_rewrite: row.get::<_, i64>(14).unwrap_or(0) == 1,
+        force_https: row.get::<_, i64>(12).unwrap_or(0) == 1,
+        basic_auth_user: row.get::<_, Option<String>>(13).unwrap_or(None),
+        basic_auth_pass: row.get::<_, Option<String>>(14).unwrap_or(None),
+        spa_rewrite: row.get::<_, i64>(15).unwrap_or(0) == 1,
         listen_port: row
-            .get::<_, Option<i64>>(15)
+            .get::<_, Option<i64>>(16)
             .unwrap_or(None)
             .map(|v| v as u16),
-        tunnel_url: row.get::<_, Option<String>>(16).unwrap_or(None),
+        tunnel_url: row.get::<_, Option<String>>(17).unwrap_or(None),
         tunnel_exposed: tunnel_mode.is_exposed(),
         tunnel_mode,
-        app_tunnel_id: row.get::<_, Option<String>>(18).unwrap_or(None),
-        app_tunnel_domain: row.get::<_, Option<String>>(19).unwrap_or(None),
-        app_tunnel_dns_id: row.get::<_, Option<String>>(20).unwrap_or(None),
-        app_tunnel_creds: row.get::<_, Option<String>>(21).unwrap_or(None),
-        inspect_enabled: row.get::<_, i64>(22).unwrap_or(0) == 1,
-        fs_entry: row.get::<_, Option<String>>(23).unwrap_or(None),
+        app_tunnel_id: row.get::<_, Option<String>>(19).unwrap_or(None),
+        app_tunnel_domain: row.get::<_, Option<String>>(20).unwrap_or(None),
+        app_tunnel_dns_id: row.get::<_, Option<String>>(21).unwrap_or(None),
+        app_tunnel_creds: row.get::<_, Option<String>>(22).unwrap_or(None),
+        inspect_enabled: row.get::<_, i64>(23).unwrap_or(0) == 1,
+        fs_entry: row.get::<_, Option<String>>(24).unwrap_or(None),
     })
 }
 
@@ -1298,6 +1314,7 @@ mod tests {
             target_value: "127.0.0.1:9001",
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
@@ -1355,6 +1372,7 @@ mod tests {
             target_value: "127.0.0.1:9001",
             timeout_ms: None,
             cors_enabled: false,
+            force_https: false,
             basic_auth_user: None,
             basic_auth_pass: None,
             spa_rewrite: false,
