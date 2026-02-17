@@ -9,6 +9,7 @@ mod proxy;
 mod rpc_client;
 mod runtime;
 mod scanner;
+pub mod service;
 pub mod share;
 mod store;
 mod tunnel;

@@ -11,11 +11,8 @@ use tokio_stream::StreamExt;
 
 use super::render::*;
 use super::DashboardState;
-use crate::domain::{DomainName, TunnelMode};
-use crate::runtime;
-use crate::scanner;
-use crate::store::StaticAppInput;
-use crate::tunnel;
+use crate::domain::TunnelMode;
+use crate::service;
 use crate::SharedState;
 
 pub async fn favicon() -> impl IntoResponse {
@@ -47,9 +44,7 @@ pub async fn page_index(State(state): State<DashboardState>) -> Html<String> {
 }
 
 pub async fn page_warnings(State(state): State<DashboardState>) -> Html<String> {
-    let warnings = runtime::read_scan_warnings(&state.shared.scan_warnings_path)
-        .ok()
-        .flatten();
+    let warnings = service::apps_warnings(&state.shared).ok().flatten();
     let page = render_page("pages/warnings.html", &state.shared, |ctx| {
         ctx.insert("title", "Warnings");
         ctx.insert("active_nav", "warnings");
@@ -230,11 +225,7 @@ pub async fn sse_app_detail(
 }
 
 pub async fn action_scan(State(state): State<DashboardState>) -> Response {
-    let stats = scanner::sync_from_apps_root(&state.shared);
-    if let Ok(ref s) = stats {
-        let _ = runtime::write_scan_warnings(&state.shared.scan_warnings_path, s);
-        let _ = state.shared.reload_routes();
-    }
+    let stats = service::apps_scan(&state.shared);
 
     let port = state.shared.listen_http.port();
     let all = state.shared.store.list_all().unwrap_or_default();
@@ -288,36 +279,24 @@ pub async fn action_toggle(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> Response {
-    let app = match state.shared.store.get_by_name(&id) {
-        Ok(Some(app)) => app,
-        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    let app = match service::app_get_by_name(&state.shared, &id) {
+        Ok(app) => app,
+        Err(_) => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
     };
 
     let new_enabled = !app.enabled;
-    if state
-        .shared
-        .store
-        .set_enabled(app.id.0, new_enabled)
-        .is_err()
-    {
+    if service::app_set_enabled(&state.shared, app.id.0, new_enabled).is_err() {
         return html_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "Toggle failed".to_string(),
         );
     }
-    let _ = state.shared.reload_routes();
 
-    let updated = state
-        .shared
-        .store
-        .get_by_name(&id)
-        .ok()
-        .flatten()
-        .unwrap_or_else(|| {
-            let mut a = app.clone();
-            a.enabled = new_enabled;
-            a
-        });
+    let updated = service::app_get_by_name(&state.shared, &id).unwrap_or_else(|_| {
+        let mut a = app.clone();
+        a.enabled = new_enabled;
+        a
+    });
 
     let port = state.shared.listen_http.port();
     let all = state.shared.store.list_all().unwrap_or_default();
@@ -351,15 +330,17 @@ pub async fn action_delete(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> Response {
-    let app = match state.shared.store.get_by_name(&id) {
-        Ok(Some(app)) => app,
-        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    let app = match service::app_get_by_name(&state.shared, &id) {
+        Ok(app) => app,
+        Err(_) => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
     };
-    if let Some(ref fs_entry) = app.fs_entry {
-        scanner::remove_app_fs_entry(&state.shared.apps_root, fs_entry);
+    if let Err(e) = service::app_delete(&state.shared, app.id.0) {
+        tracing::error!(error = %e, app_id = app.id.0, "delete failed");
+        return html_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Delete failed".to_string(),
+        );
     }
-    let _ = state.shared.store.delete(app.id.0);
-    let _ = state.shared.reload_routes();
 
     let all = state.shared.store.list_all().unwrap_or_default();
     let stats_ctx = stats_context(&all);
@@ -381,32 +362,36 @@ pub async fn action_delete(
 pub async fn action_delete_redirect(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
-) -> Redirect {
-    if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
-        if let Some(ref fs_entry) = app.fs_entry {
-            scanner::remove_app_fs_entry(&state.shared.apps_root, fs_entry);
+) -> Response {
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        if let Err(e) = service::app_delete(&state.shared, app.id.0) {
+            tracing::error!(error = %e, app_id = app.id.0, "delete failed");
+            return html_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Delete failed".to_string(),
+            );
         }
-        let _ = state.shared.store.delete(app.id.0);
     }
-    let _ = state.shared.reload_routes();
-    Redirect::to("/")
+    Redirect::to("/").into_response()
 }
 
 pub async fn action_toggle_cors(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
-        let _ = state.shared.store.update_settings(
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        let _ = service::app_update_settings(
+            &state.shared,
             app.id.0,
-            Some(!app.cors_enabled),
-            None,
-            None,
-            None,
-            None,
-            None,
+            &service::UpdateSettingsParams {
+                cors_enabled: Some(!app.cors_enabled),
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: None,
+                listen_port: None,
+                timeout_ms: None,
+            },
         );
-        let _ = state.shared.reload_routes();
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -415,17 +400,19 @@ pub async fn action_toggle_spa(
     State(state): State<DashboardState>,
     Path(id): Path<String>,
 ) -> Response {
-    if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
-        let _ = state.shared.store.update_settings(
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        let _ = service::app_update_settings(
+            &state.shared,
             app.id.0,
-            None,
-            None,
-            None,
-            Some(!app.spa_rewrite),
-            None,
-            None,
+            &service::UpdateSettingsParams {
+                cors_enabled: None,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: Some(!app.spa_rewrite),
+                listen_port: None,
+                timeout_ms: None,
+            },
         );
-        let _ = state.shared.reload_routes();
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -579,19 +566,13 @@ pub async fn action_set_default_app(
     match value {
         Some(name) => {
             let name = name.to_ascii_lowercase();
-            if state
-                .shared
-                .store
-                .get_by_name(&name)
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                let _ = state.shared.store.set_setting("default_app", &name);
+            // Only set if app exists
+            if service::app_get_by_name(&state.shared, &name).is_ok() {
+                let _ = service::set_default_app(&state.shared, Some(&name));
             }
         }
         None => {
-            let _ = state.shared.store.delete_setting("default_app");
+            let _ = service::set_default_app(&state.shared, None);
         }
     }
     Redirect::to("/")
@@ -636,19 +617,19 @@ pub async fn action_update_settings(
         }
     };
 
-    match state.shared.store.update_settings(
+    match service::app_update_settings(
+        &state.shared,
         app.id.0,
-        None,
-        None,
-        None,
-        None,
-        listen_port,
-        timeout_ms,
+        &service::UpdateSettingsParams {
+            cors_enabled: None,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: None,
+            listen_port,
+            timeout_ms,
+        },
     ) {
-        Ok(_) => {
-            let _ = state.shared.reload_routes();
-            Redirect::to(&format!("/apps/{id}")).into_response()
-        }
+        Ok(_) => Redirect::to(&format!("/apps/{id}")).into_response(),
         Err(e) => {
             render_settings_modal_error(&state, &app, &format!("Failed to update: {e}"), &form)
         }
@@ -669,60 +650,29 @@ pub async fn action_create_app(
 ) -> Response {
     let suffix = &state.shared.domain_suffix;
 
-    // Validate name
+    // Basic form validation
     let name = form.name.trim().to_string();
     if name.is_empty() {
         return render_new_app_modal_error(&state, "Name is required.", &form);
     }
-
-    // Domain derived from name
-    let domain_prefix = name.to_ascii_lowercase();
-    let full_domain = format!("{domain_prefix}.{suffix}");
-    let domain = match DomainName::parse(&full_domain, suffix) {
-        Ok(d) => d,
-        Err(e) => {
-            return render_new_app_modal_error(&state, &format!("Invalid domain: {e}"), &form)
-        }
-    };
-
-    // Validate target (modal only supports TCP)
     let target_value = form.target_value.trim().to_string();
     if target_value.is_empty() {
         return render_new_app_modal_error(&state, "Target is required.", &form);
     }
-    if let Some((_, port_str)) = target_value.rsplit_once(':') {
-        if port_str.parse::<u16>().unwrap_or(0) == 0 {
-            return render_new_app_modal_error(
-                &state,
-                "Invalid target: port must be 1–65535.",
-                &form,
-            );
-        }
-    } else {
-        return render_new_app_modal_error(
-            &state,
-            "Target must be host:port (e.g. 127.0.0.1:5006).",
-            &form,
-        );
-    }
-    let target_type = "tcp";
 
-    let path_prefix = form
-        .path_prefix
-        .as_deref()
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
+    let domain_prefix = name.to_ascii_lowercase();
+    let full_domain = format!("{domain_prefix}.{suffix}");
     let timeout_ms = form
         .timeout_ms
         .as_deref()
         .and_then(|s| s.trim().parse::<u64>().ok());
 
-    let input = StaticAppInput {
-        name: &name,
-        domain: &domain,
-        path_prefix,
-        target_type,
-        target_value: &target_value,
+    let create_params = service::CreateAppParams {
+        name: name.clone(),
+        domain: full_domain,
+        path_prefix: form.path_prefix.clone(),
+        target_type: "tcp".to_string(),
+        target_value,
         timeout_ms,
         cors_enabled: false,
         basic_auth_user: None,
@@ -731,10 +681,8 @@ pub async fn action_create_app(
         listen_port: None,
     };
 
-    match state.shared.store.insert_static(&input) {
+    match service::app_create(&state.shared, &create_params) {
         Ok(_) => {
-            let _ = state.shared.reload_routes();
-
             let port = state.shared.listen_http.port();
             let all = state.shared.store.list_all().unwrap_or_default();
 
@@ -787,7 +735,7 @@ pub async fn action_create_app(
             turbo_stream_response(&streams)
         }
         Err(e) => {
-            let msg = if e.to_string().contains("domain conflict") {
+            let msg = if matches!(e, service::ServiceError::DomainConflict) {
                 "An app with this domain and path prefix already exists.".to_string()
             } else {
                 format!("Failed to create app: {e}")
@@ -858,24 +806,33 @@ pub async fn action_set_basic_auth(
     Path(id): Path<String>,
     Form(form): Form<BasicAuthForm>,
 ) -> Response {
-    if let Ok(Some(app)) = state.shared.store.get_by_name(&id) {
-        let user: Option<Option<&str>> = Some(
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        let user: Option<Option<String>> = Some(
             form.basic_auth_user
                 .as_deref()
                 .map(|s| s.trim())
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         );
-        let pass: Option<Option<&str>> = Some(
+        let pass: Option<Option<String>> = Some(
             form.basic_auth_pass
                 .as_deref()
                 .map(|s| s.trim())
-                .filter(|s| !s.is_empty()),
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
         );
-        let _ = state
-            .shared
-            .store
-            .update_settings(app.id.0, None, user, pass, None, None, None);
-        let _ = state.shared.reload_routes();
+        let _ = service::app_update_settings(
+            &state.shared,
+            app.id.0,
+            &service::UpdateSettingsParams {
+                cors_enabled: None,
+                basic_auth_user: user,
+                basic_auth_pass: pass,
+                spa_rewrite: None,
+                listen_port: None,
+                timeout_ms: None,
+            },
+        );
     }
     StatusCode::NO_CONTENT.into_response()
 }
@@ -892,9 +849,9 @@ pub async fn action_set_tunnel_mode(
     Path(id): Path<String>,
     Form(form): Form<TunnelModeForm>,
 ) -> Response {
-    let app = match state.shared.store.get_by_name(&id) {
-        Ok(Some(app)) => app,
-        _ => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
+    let app = match service::app_get_by_name(&state.shared, &id) {
+        Ok(app) => app,
+        Err(_) => return html_response(StatusCode::NOT_FOUND, "Not found".to_string()),
     };
 
     let new_mode = match form.tunnel_mode.as_str() {
@@ -905,166 +862,19 @@ pub async fn action_set_tunnel_mode(
         _ => return StatusCode::NO_CONTENT.into_response(),
     };
 
-    let old_mode = &app.tunnel_mode;
-    if *old_mode == new_mode {
-        return StatusCode::NO_CONTENT.into_response();
+    if let Err(e) = service::app_set_tunnel_mode(
+        &state.shared,
+        app.id.0,
+        new_mode,
+        form.app_tunnel_domain.as_deref(),
+        form.app_tunnel_token.as_deref(),
+        false,
+    )
+    .await
+    {
+        tracing::error!(error = %e, app_id = app.id.0, "tunnel mode switch failed");
     }
 
-    let app_id = app.id.0;
-    let routing = tunnel::transport::TunnelRouting::FixedHost {
-        local_host: app.domain.0.clone(),
-        local_proxy_port: state.shared.listen_http.port(),
-    };
-
-    // Pre-validate named mode params before teardown to avoid losing current tunnel
-    if new_mode == TunnelMode::Named {
-        let has_domain = form
-            .app_tunnel_domain
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .is_some()
-            || app.app_tunnel_domain.is_some();
-        let has_token = form
-            .app_tunnel_token
-            .as_deref()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .and_then(|t| tunnel::decode_tunnel_token(t).ok())
-            .is_some();
-        let has_saved_creds = app
-            .app_tunnel_creds
-            .as_ref()
-            .and_then(|c| serde_json::from_str::<tunnel::TunnelCredentials>(c).ok())
-            .is_some();
-        if !has_domain || (!has_token && !has_saved_creds) {
-            return StatusCode::NO_CONTENT.into_response();
-        }
-    }
-
-    // Teardown old mode
-    match old_mode {
-        TunnelMode::Quick => {
-            let _ = tunnel::stop_tunnel(&state.shared.tunnels, app_id);
-            let _ = state.shared.store.update_tunnel_url(app_id, None);
-            let _ = state.shared.store.set_tunnel_mode(app_id, TunnelMode::None);
-        }
-        TunnelMode::Named => {
-            let _ = tunnel::stop_app_named_tunnel(&state.shared.app_tunnels, app_id);
-            let _ = state.shared.store.set_tunnel_mode(app_id, TunnelMode::None);
-        }
-        TunnelMode::Global => {
-            let _ = state.shared.store.set_tunnel_mode(app_id, TunnelMode::None);
-        }
-        TunnelMode::None => {}
-    }
-
-    // Setup new mode
-    match new_mode {
-        TunnelMode::Quick => {
-            match tunnel::start_quick_tunnel(state.shared.tunnels.clone(), app_id, routing).await {
-                Ok(hostname) => {
-                    let url = format!("https://{hostname}");
-                    let _ = state.shared.store.update_tunnel_url(app_id, Some(&url));
-                    let _ = state
-                        .shared
-                        .store
-                        .set_tunnel_mode(app_id, TunnelMode::Quick);
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to start quick tunnel");
-                    let _ = state.shared.change_tx.send("detail-tunnel".to_string());
-                }
-            }
-        }
-        TunnelMode::Global => {
-            let _ = state
-                .shared
-                .store
-                .set_tunnel_mode(app_id, TunnelMode::Global);
-        }
-        TunnelMode::Named => {
-            let tunnel_domain = form
-                .app_tunnel_domain
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .or(app.app_tunnel_domain.as_deref())
-                .unwrap() // safe: pre-validated above
-                .to_string();
-
-            // Try token-based connect first (only if decodable), then saved creds
-            let decoded_token = form
-                .app_tunnel_token
-                .as_deref()
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .and_then(|t| tunnel::decode_tunnel_token(t).ok());
-
-            if let Some(credentials) = decoded_token {
-                // Token-based connect
-                let tunnel_id = credentials.tunnel_id.clone();
-                match tunnel::start_app_named_tunnel(
-                    state.shared.app_tunnels.clone(),
-                    app_id,
-                    credentials.clone(),
-                    tunnel_domain.clone(),
-                    routing,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        let creds_json = serde_json::to_string(&credentials).unwrap_or_default();
-                        let _ = state.shared.store.set_app_tunnel_state(
-                            app_id,
-                            Some(&tunnel_id),
-                            Some(&tunnel_domain),
-                            None,
-                            Some(&creds_json),
-                            TunnelMode::Named,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to start named tunnel");
-                        let _ = state.shared.change_tx.send("detail-tunnel".to_string());
-                    }
-                }
-            } else if let Some(creds) = app
-                .app_tunnel_creds
-                .as_ref()
-                .and_then(|c| serde_json::from_str::<tunnel::TunnelCredentials>(c).ok())
-            {
-                // Reconnect with saved creds
-                match tunnel::start_app_named_tunnel(
-                    state.shared.app_tunnels.clone(),
-                    app_id,
-                    creds,
-                    tunnel_domain.clone(),
-                    routing,
-                )
-                .await
-                {
-                    Ok(_) => {
-                        let _ = state.shared.store.set_app_tunnel_state(
-                            app_id,
-                            app.app_tunnel_id.as_deref(),
-                            Some(&tunnel_domain),
-                            None,
-                            app.app_tunnel_creds.as_deref(),
-                            TunnelMode::Named,
-                        );
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to reconnect named tunnel");
-                        let _ = state.shared.change_tx.send("detail-tunnel".to_string());
-                    }
-                }
-            }
-        }
-        TunnelMode::None => {}
-    }
-
-    let _ = state.shared.reload_routes();
     StatusCode::NO_CONTENT.into_response()
 }
 

@@ -7,9 +7,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
-use crate::domain::{AppSpec, DomainName, TunnelMode};
-use crate::scanner;
-use crate::store::{StaticAppInput, StoreError};
+use crate::domain::TunnelMode;
+use crate::service;
+use crate::service::ServiceError;
 use crate::tunnel;
 use crate::SharedState;
 
@@ -53,32 +53,16 @@ enum ControlError {
     Internal(String),
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateAppParams {
-    name: String,
-    domain: String,
-    #[serde(default)]
-    path_prefix: Option<String>,
-    #[serde(default = "default_target_type")]
-    target_type: String,
-    #[serde(default)]
-    target_value: String,
-    #[serde(default)]
-    timeout_ms: Option<u64>,
-    #[serde(default)]
-    cors_enabled: bool,
-    #[serde(default)]
-    basic_auth_user: Option<String>,
-    #[serde(default)]
-    basic_auth_pass: Option<String>,
-    #[serde(default)]
-    spa_rewrite: bool,
-    #[serde(default)]
-    listen_port: Option<u16>,
-}
-
-fn default_target_type() -> String {
-    "tcp".to_string()
+impl From<ServiceError> for ControlError {
+    fn from(err: ServiceError) -> Self {
+        match err {
+            ServiceError::InvalidParams(msg) => ControlError::InvalidParams(msg),
+            ServiceError::NotFound => ControlError::NotFound,
+            ServiceError::DomainConflict => ControlError::DomainConflict,
+            ServiceError::DetectionFailed(msg) => ControlError::DetectionFailed(msg),
+            ServiceError::Internal(msg) => ControlError::Internal(msg),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,13 +261,9 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             "https_port": state.listen_https.map(|a| a.port()),
             "runtime_dir": state.runtime_dir.to_string_lossy(),
         })),
-        "app.list" => {
-            let apps = match state.store.list_all() {
-                Ok(v) => v,
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
-            Ok(json!({ "apps": apps }))
-        }
+        "app.list" => service::app_list(state)
+            .map(|apps| json!({ "apps": apps }))
+            .map_err(ControlError::from),
         "request.list" => {
             let params: RequestListParams = parse_params!(req);
             // Verify app exists (consistent with request.get/request.watch)
@@ -377,640 +357,66 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         | "app.create_static"
         | "app.create_static_dir"
         | "app.create_unix_socket" => {
-            let params: CreateAppParams = parse_params!(req);
-
-            if params.name.trim().is_empty() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("name cannot be empty".to_string()),
-                );
-            }
-            if params.target_value.is_empty() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("target_value cannot be empty".to_string()),
-                );
-            }
-
-            let domain = match DomainName::parse(&params.domain, &state.domain_suffix) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
-
-            if matches!(params.timeout_ms, Some(0)) {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams("timeout_ms must be > 0".to_string()),
-                );
-            }
-
-            if let Some(port) = params.listen_port {
-                if port == 0 {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams("listen_port must be > 0".to_string()),
-                    );
-                }
-            }
-
-            // Type-specific validation
-            match params.target_type.as_str() {
-                "tcp" => {
-                    let (_, port_str) = params.target_value.rsplit_once(':').unwrap_or(("", ""));
-                    match port_str.parse::<u16>() {
-                        Ok(p) if p > 0 => {}
-                        _ => {
-                            return render_err(
-                                req.request_id,
-                                ControlError::InvalidParams(format!(
-                                    "tcp target_value must be host:port (port > 0), got: {}",
-                                    params.target_value
-                                )),
-                            );
-                        }
-                    }
-                }
-                "static_dir" => {
-                    let root = std::path::Path::new(&params.target_value);
-                    if !root.is_dir() {
-                        return render_err(
-                            req.request_id,
-                            ControlError::InvalidParams(format!(
-                                "static_dir target is not a directory: {}",
-                                params.target_value
-                            )),
-                        );
-                    }
-                }
-                "unix_socket" => {
-                    let sock = std::path::Path::new(&params.target_value);
-                    if !sock.exists() {
-                        return render_err(
-                            req.request_id,
-                            ControlError::InvalidParams(format!(
-                                "unix_socket target does not exist: {}",
-                                params.target_value
-                            )),
-                        );
-                    }
-                }
-                other => {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams(format!(
-                            "unknown target_type: {other}, must be tcp/static_dir/unix_socket"
-                        )),
-                    );
-                }
-            }
-
-            let path_prefix = match normalize_path_prefix(params.path_prefix.as_deref()) {
-                Ok(v) => v,
-                Err(msg) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(msg));
-                }
-            };
-
-            match state.store.insert_static(&StaticAppInput {
-                name: &params.name,
-                domain: &domain,
-                path_prefix: path_prefix.as_deref(),
-                target_type: &params.target_type,
-                target_value: &params.target_value,
-                timeout_ms: params.timeout_ms,
-                cors_enabled: params.cors_enabled,
-                basic_auth_user: params.basic_auth_user.as_deref(),
-                basic_auth_pass: params.basic_auth_pass.as_deref(),
-                spa_rewrite: params.spa_rewrite,
-                listen_port: params.listen_port,
-            }) {
-                Ok(app) => {
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "app": app }))
-                }
-                Err(e) => {
-                    if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
-                        return render_err(req.request_id, ControlError::DomainConflict);
-                    }
-                    return internal_error(req.request_id, e.to_string());
-                }
-            }
+            let params: service::CreateAppParams = parse_params!(req);
+            service::app_create(state, &params)
+                .map(|app| json!({ "app": app }))
+                .map_err(ControlError::from)
         }
         "app.create_from_folder" => {
-            let params: CreateFromFolderParams = match serde_json::from_value(req.params) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
-
-            let folder = std::path::Path::new(&params.path);
-            if !folder.is_dir() {
-                return render_err(
-                    req.request_id,
-                    ControlError::InvalidParams(format!(
-                        "path is not a directory: {}",
-                        params.path
-                    )),
-                );
-            }
-
-            let folder_name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("app");
-            let name = scanner::sanitize_name(folder_name);
-            let domain_str = format!("{}.{}", name, state.domain_suffix);
-            let domain = match DomainName::parse(&domain_str, &state.domain_suffix) {
-                Ok(v) => v,
-                Err(e) => {
-                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
-                }
-            };
-
-            // Helper: insert app, reload routes, return response
-            let insert_and_respond = |result: anyhow::Result<AppSpec>| -> ResponseEnvelope {
-                match result {
-                    Ok(app) => {
-                        let _ = state.reload_routes();
-                        ok_response(req.request_id.clone(), json!({ "app": app }))
-                    }
-                    Err(e) => {
-                        if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
-                            render_err(req.request_id.clone(), ControlError::DomainConflict)
-                        } else {
-                            internal_error(req.request_id.clone(), e.to_string())
-                        }
-                    }
-                }
-            };
-
-            let insert_tcp = |target_value: &str| -> ResponseEnvelope {
-                let input = StaticAppInput {
-                    name: &name,
-                    domain: &domain,
-                    path_prefix: None,
-                    target_type: "tcp",
-                    target_value,
-                    timeout_ms: None,
-                    cors_enabled: false,
-                    basic_auth_user: None,
-                    basic_auth_pass: None,
-                    spa_rewrite: false,
-                    listen_port: None,
-                };
-                insert_and_respond(state.store.insert_static(&input))
-            };
-
-            // 1. coulson.json
-            let manifest_path = folder.join("coulson.json");
-            if manifest_path.exists() {
-                let raw = match std::fs::read_to_string(&manifest_path) {
-                    Ok(v) => v,
-                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                };
-                let manifest: serde_json::Value = match serde_json::from_str(&raw) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        return internal_error(req.request_id, format!("invalid coulson.json: {e}"))
-                    }
-                };
-
-                if let Some((_prov, detected)) =
-                    state.provider_registry.detect(folder, Some(&manifest))
-                {
-                    let root_str = folder.to_string_lossy().to_string();
-                    return insert_and_respond(state.store.insert_managed(
-                        &name,
-                        &domain,
-                        &root_str,
-                        &detected.kind,
-                        None,
-                    ));
-                }
-
-                if let Some(raw_port) = manifest.get("target_port").and_then(|v| v.as_u64()) {
-                    if raw_port > u16::MAX as u64 {
-                        return render_err(
-                            req.request_id,
-                            ControlError::InvalidParams(format!(
-                                "target_port out of range: {raw_port}"
-                            )),
-                        );
-                    }
-                    let port = raw_port as u16;
-                    if port > 0 {
-                        let host = manifest
-                            .get("target_host")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("127.0.0.1");
-                        let target_value = format!("{host}:{port}");
-                        return insert_tcp(&target_value);
-                    }
-                }
-            }
-
-            // 2. coulson.routes — parse first non-empty line
-            let routes_path = folder.join("coulson.routes");
-            if routes_path.exists() {
-                let raw = match std::fs::read_to_string(&routes_path) {
-                    Ok(v) => v,
-                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                };
-                if let Some(target_value) = parse_first_route_target(&raw) {
-                    return insert_tcp(&target_value);
-                }
-            }
-
-            // 3. Provider registry auto-detect
-            if let Some((_prov, detected)) = state.provider_registry.detect(folder, None) {
-                let root_str = folder.to_string_lossy().to_string();
-                return insert_and_respond(state.store.insert_managed(
-                    &name,
-                    &domain,
-                    &root_str,
-                    &detected.kind,
-                    None,
-                ));
-            }
-
-            // 4. public/ subdirectory
-            let public_dir = folder.join("public");
-            if public_dir.is_dir() {
-                let root_str = public_dir.to_string_lossy().to_string();
-                return insert_and_respond(
-                    state
-                        .store
-                        .insert_static_dir(&name, &domain, &root_str, None),
-                );
-            }
-
-            // 5. index.html
-            if folder.join("index.html").exists() {
-                let root_str = folder.to_string_lossy().to_string();
-                return insert_and_respond(
-                    state
-                        .store
-                        .insert_static_dir(&name, &domain, &root_str, None),
-                );
-            }
-
-            // 6. Nothing detected
-            Err(ControlError::DetectionFailed(format!(
-                "could not detect app type for: {}",
-                params.path
-            )))
+            let params: CreateFromFolderParams = parse_params!(req);
+            service::app_create_from_folder(state, &params.path)
+                .map(|app| json!({ "app": app }))
+                .map_err(ControlError::from)
         }
         "app.update" => {
             let params: UpdateSettingsParams = parse_params!(req);
-            match state.store.update_settings(
+
+            // Apply non-tunnel settings
+            if let Err(e) = service::app_update_settings(
+                state,
                 params.app_id,
-                params.cors_enabled,
-                params.basic_auth_user.as_ref().map(|v| v.as_deref()),
-                params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
-                params.spa_rewrite,
-                params.listen_port,
-                None,
+                &service::UpdateSettingsParams {
+                    cors_enabled: params.cors_enabled,
+                    basic_auth_user: params.basic_auth_user.clone(),
+                    basic_auth_pass: params.basic_auth_pass.clone(),
+                    spa_rewrite: params.spa_rewrite,
+                    listen_port: params.listen_port,
+                    timeout_ms: None,
+                },
             ) {
-                Ok(found) => {
-                    if !found {
-                        return render_err(req.request_id, ControlError::NotFound);
-                    }
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
+                return render_err(req.request_id, ControlError::from(e));
             }
 
             // Handle tunnel_mode change
             if let Some(new_mode) = params.tunnel_mode {
-                let app = find_app!(state, req, params.app_id);
-
-                let old_mode = &app.tunnel_mode;
-
-                // Check if named mode has required params
-                if new_mode == TunnelMode::Named
-                    && params.app_tunnel_domain.is_none()
-                    && app.app_tunnel_domain.is_none()
+                match service::app_set_tunnel_mode(
+                    state,
+                    params.app_id,
+                    new_mode,
+                    params.app_tunnel_domain.as_deref(),
+                    params.app_tunnel_token.as_deref(),
+                    params.app_tunnel_auto_dns.unwrap_or(false),
+                )
+                .await
                 {
-                    return render_err(
-                        req.request_id,
-                        ControlError::InvalidParams(
-                            "app_tunnel_domain is required for named tunnel mode".to_string(),
-                        ),
-                    );
-                }
-
-                // Check if named mode needs re-setup (domain changed)
-                let named_domain_changed = new_mode == TunnelMode::Named
-                    && *old_mode == TunnelMode::Named
-                    && params.app_tunnel_domain.is_some()
-                    && params.app_tunnel_domain.as_deref() != app.app_tunnel_domain.as_deref();
-
-                if *old_mode != new_mode || named_domain_changed {
-                    let routing = routing_for_app(&app, state.listen_http.port());
-
-                    // Teardown old mode (best-effort: log errors and continue)
-                    match old_mode {
-                        TunnelMode::Quick => {
-                            let _ = tunnel::stop_tunnel(&state.tunnels, params.app_id);
-                            if let Err(e) = state.store.update_tunnel_url(params.app_id, None) {
-                                tracing::warn!(error = %e, "failed to clear tunnel_url during teardown");
-                            }
-                            if let Err(e) =
-                                state.store.set_tunnel_mode(params.app_id, TunnelMode::None)
-                            {
-                                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
-                            }
+                    Ok(result) => {
+                        let mut resp =
+                            json!({ "updated": true, "tunnel_mode": result.tunnel_mode.as_str() });
+                        if let Some(url) = &result.tunnel_url {
+                            resp["tunnel_url"] = json!(url);
                         }
-                        TunnelMode::Named => {
-                            // Stop the tunnel connection but preserve credentials
-                            // so the tunnel can be reconnected via `start` without re-creating CF resources.
-                            let _ =
-                                tunnel::stop_app_named_tunnel(&state.app_tunnels, params.app_id);
-                            if let Err(e) =
-                                state.store.set_tunnel_mode(params.app_id, TunnelMode::None)
-                            {
-                                tracing::warn!(error = %e, "failed to reset tunnel_mode during teardown");
-                            }
+                        if let Some(tid) = &result.tunnel_id {
+                            resp["tunnel_id"] = json!(tid);
                         }
-                        _ => {}
+                        if let Some(td) = &result.tunnel_domain {
+                            resp["tunnel_domain"] = json!(td);
+                        }
+                        if result.reconnected {
+                            resp["reconnected"] = json!(true);
+                        }
+                        return ok_response(req.request_id, resp);
                     }
-
-                    // Setup new mode
-                    match new_mode {
-                        TunnelMode::Quick => {
-                            match tunnel::start_quick_tunnel(
-                                state.tunnels.clone(),
-                                params.app_id,
-                                routing.clone(),
-                            )
-                            .await
-                            {
-                                Ok(hostname) => {
-                                    let url = format!("https://{hostname}");
-                                    if let Err(e) =
-                                        state.store.update_tunnel_url(params.app_id, Some(&url))
-                                    {
-                                        return internal_error(req.request_id, e.to_string());
-                                    }
-                                    if let Err(e) = state
-                                        .store
-                                        .set_tunnel_mode(params.app_id, TunnelMode::Quick)
-                                    {
-                                        return internal_error(req.request_id, e.to_string());
-                                    }
-                                    let _ = state.reload_routes();
-                                    return ok_response(
-                                        req.request_id,
-                                        json!({ "updated": true, "tunnel_mode": "quick", "tunnel_url": url }),
-                                    );
-                                }
-                                Err(e) => return internal_error(req.request_id, e.to_string()),
-                            }
-                        }
-                        TunnelMode::Named => {
-                            let tunnel_domain =
-                                match params
-                                    .app_tunnel_domain
-                                    .as_deref()
-                                    .or(app.app_tunnel_domain.as_deref())
-                                {
-                                    Some(d) => d.to_string(),
-                                    None => return render_err(
-                                        req.request_id,
-                                        ControlError::InvalidParams(
-                                            "app_tunnel_domain is required for named tunnel mode"
-                                                .to_string(),
-                                        ),
-                                    ),
-                                };
-
-                            // Reconnect using saved credentials if available
-                            // (skip when domain changed — that requires a full rebuild)
-                            if !named_domain_changed
-                                && params.app_tunnel_token.is_none()
-                                && app.app_tunnel_creds.is_some()
-                            {
-                                let creds: tunnel::TunnelCredentials = match serde_json::from_str(
-                                    app.app_tunnel_creds.as_ref().unwrap(),
-                                ) {
-                                    Ok(v) => v,
-                                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                                };
-                                if let Err(e) = tunnel::start_app_named_tunnel(
-                                    state.app_tunnels.clone(),
-                                    params.app_id,
-                                    creds.clone(),
-                                    tunnel_domain.clone(),
-                                    routing.clone(),
-                                )
-                                .await
-                                {
-                                    return internal_error(req.request_id, e.to_string());
-                                }
-                                if let Err(e) = state
-                                    .store
-                                    .set_tunnel_mode(params.app_id, TunnelMode::Named)
-                                {
-                                    return internal_error(req.request_id, e.to_string());
-                                }
-                                let _ = state.reload_routes();
-                                return ok_response(
-                                    req.request_id,
-                                    json!({
-                                        "updated": true,
-                                        "tunnel_mode": "named",
-                                        "tunnel_id": creds.tunnel_id,
-                                        "tunnel_domain": tunnel_domain,
-                                        "reconnected": true,
-                                    }),
-                                );
-                            }
-
-                            // Token-based: decode token and connect directly
-                            if let Some(token) = &params.app_tunnel_token {
-                                let credentials = match tunnel::decode_tunnel_token(token) {
-                                    Ok(v) => v,
-                                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                                };
-                                let tunnel_id = credentials.tunnel_id.clone();
-
-                                if let Err(e) = tunnel::start_app_named_tunnel(
-                                    state.app_tunnels.clone(),
-                                    params.app_id,
-                                    credentials.clone(),
-                                    tunnel_domain.clone(),
-                                    routing.clone(),
-                                )
-                                .await
-                                {
-                                    return internal_error(req.request_id, e.to_string());
-                                }
-
-                                let creds_json = match serde_json::to_string(&credentials) {
-                                    Ok(v) => v,
-                                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                                };
-                                if let Err(e) = state.store.set_app_tunnel_state(
-                                    params.app_id,
-                                    Some(&tunnel_id),
-                                    Some(&tunnel_domain),
-                                    None,
-                                    Some(&creds_json),
-                                    TunnelMode::Named,
-                                ) {
-                                    return internal_error(req.request_id, e.to_string());
-                                }
-
-                                let _ = state.reload_routes();
-                                return ok_response(
-                                    req.request_id,
-                                    json!({
-                                        "updated": true,
-                                        "tunnel_mode": "named",
-                                        "tunnel_id": tunnel_id,
-                                        "tunnel_domain": tunnel_domain,
-                                    }),
-                                );
-                            }
-
-                            // API-based: create tunnel via CF API
-                            let auto_dns = params.app_tunnel_auto_dns.unwrap_or(false);
-
-                            let api_token = require_setting!(
-                                state,
-                                req,
-                                "cf.api_token",
-                                "CF credentials not configured, run tunnel.configure first"
-                            );
-                            let account_id = require_setting!(
-                                state,
-                                req,
-                                "cf.account_id",
-                                "cf.account_id not configured"
-                            );
-
-                            let tunnel_name = format!("coulson-{}", params.app_id);
-                            let (credentials, tunnel_id) = match tunnel::named::create_named_tunnel(
-                                &api_token,
-                                &account_id,
-                                &tunnel_name,
-                            )
-                            .await
-                            {
-                                Ok(v) => v,
-                                Err(e) => return internal_error(req.request_id, e.to_string()),
-                            };
-
-                            let mut dns_record_id: Option<String> = None;
-                            let mut zone_id_used: Option<String> = None;
-                            if auto_dns {
-                                match tunnel::named::find_zone_id(&api_token, &tunnel_domain).await
-                                {
-                                    Ok(zid) => {
-                                        zone_id_used = Some(zid.clone());
-                                        match tunnel::named::create_dns_cname(
-                                            &api_token,
-                                            &zid,
-                                            &tunnel_domain,
-                                            &tunnel_id,
-                                        )
-                                        .await
-                                        {
-                                            Ok(rid) => dns_record_id = Some(rid),
-                                            Err(e) => {
-                                                let _ = tunnel::named::delete_named_tunnel(
-                                                    &api_token,
-                                                    &account_id,
-                                                    &tunnel_id,
-                                                )
-                                                .await;
-                                                return internal_error(
-                                                    req.request_id,
-                                                    format!("failed to create DNS CNAME: {e}"),
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        let _ = tunnel::named::delete_named_tunnel(
-                                            &api_token,
-                                            &account_id,
-                                            &tunnel_id,
-                                        )
-                                        .await;
-                                        return internal_error(
-                                            req.request_id,
-                                            format!("failed to find zone for domain: {e}"),
-                                        );
-                                    }
-                                }
-                            }
-
-                            if let Err(e) = tunnel::start_app_named_tunnel(
-                                state.app_tunnels.clone(),
-                                params.app_id,
-                                credentials.clone(),
-                                tunnel_domain.clone(),
-                                routing.clone(),
-                            )
-                            .await
-                            {
-                                if let (Some(rid), Some(zid)) = (&dns_record_id, &zone_id_used) {
-                                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid)
-                                        .await;
-                                }
-                                let _ = tunnel::named::delete_named_tunnel(
-                                    &api_token,
-                                    &account_id,
-                                    &tunnel_id,
-                                )
-                                .await;
-                                return internal_error(req.request_id, e.to_string());
-                            }
-
-                            let creds_json = match serde_json::to_string(&credentials) {
-                                Ok(v) => v,
-                                Err(e) => return internal_error(req.request_id, e.to_string()),
-                            };
-                            if let Err(e) = state.store.set_app_tunnel_state(
-                                params.app_id,
-                                Some(&tunnel_id),
-                                Some(&tunnel_domain),
-                                dns_record_id.as_deref(),
-                                Some(&creds_json),
-                                TunnelMode::Named,
-                            ) {
-                                return internal_error(req.request_id, e.to_string());
-                            }
-
-                            let _ = state.reload_routes();
-                            return ok_response(
-                                req.request_id,
-                                json!({
-                                    "updated": true,
-                                    "tunnel_mode": "named",
-                                    "tunnel_id": tunnel_id,
-                                    "tunnel_domain": tunnel_domain,
-                                    "dns_record_id": dns_record_id,
-                                }),
-                            );
-                        }
-                        // None / Global — teardown already done above, just set mode
-                        _ => {
-                            if let Err(e) = state.store.set_tunnel_mode(params.app_id, new_mode) {
-                                return internal_error(req.request_id, e.to_string());
-                            }
-                            let _ = state.reload_routes();
-                            return ok_response(
-                                req.request_id,
-                                json!({ "updated": true, "tunnel_mode": new_mode.as_str() }),
-                            );
-                        }
-                    }
+                    Err(e) => return render_err(req.request_id, ControlError::from(e)),
                 }
             }
 
@@ -1018,71 +424,29 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         }
         "app.delete" => {
             let params: AppIdParams = parse_params!(req);
-            let app = find_app!(state, req, params.app_id);
-            if let Some(ref fs_entry) = app.fs_entry {
-                scanner::remove_app_fs_entry(&state.apps_root, fs_entry);
-            }
-            match state.store.delete(params.app_id) {
-                Ok(found) => {
-                    if !found {
-                        return render_err(req.request_id, ControlError::NotFound);
-                    }
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "deleted": true }))
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            }
+            service::app_delete(state, params.app_id)
+                .map(|_| json!({ "deleted": true }))
+                .map_err(ControlError::from)
         }
         "app.start" => {
             let params: AppIdParams = parse_params!(req);
-            match state.store.set_enabled(params.app_id, true) {
-                Ok(found) => {
-                    if !found {
-                        return render_err(req.request_id, ControlError::NotFound);
-                    }
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "enabled": true }))
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            }
+            service::app_set_enabled(state, params.app_id, true)
+                .map(|_| json!({ "enabled": true }))
+                .map_err(ControlError::from)
         }
         "app.stop" => {
             let params: AppIdParams = parse_params!(req);
-            match state.store.set_enabled(params.app_id, false) {
-                Ok(found) => {
-                    if !found {
-                        return render_err(req.request_id, ControlError::NotFound);
-                    }
-                    if let Err(e) = state.reload_routes() {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "enabled": false }))
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            }
+            service::app_set_enabled(state, params.app_id, false)
+                .map(|_| json!({ "enabled": false }))
+                .map_err(ControlError::from)
         }
         "route.reload" => match state.reload_routes() {
             Ok(_) => Ok(json!({ "reloaded": true })),
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
-        "apps.scan" => match scanner::sync_from_apps_root(state) {
-            Ok(stats) => {
-                if let Err(e) =
-                    crate::runtime::write_scan_warnings(&state.scan_warnings_path, &stats)
-                {
-                    return internal_error(req.request_id, e.to_string());
-                }
-                if let Err(e) = state.reload_routes() {
-                    return internal_error(req.request_id, e.to_string());
-                }
-                Ok(json!({ "scan": stats }))
-            }
-            Err(e) => return internal_error(req.request_id, e.to_string()),
-        },
+        "apps.scan" => service::apps_scan(state)
+            .map(|stats| json!({ "scan": stats }))
+            .map_err(ControlError::from),
         "process.list" => {
             let mut pm = state.process_manager.lock().await;
             let infos = pm.list_status();
@@ -1112,50 +476,38 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             }
         }
-        "apps.warnings" => match crate::runtime::read_scan_warnings(&state.scan_warnings_path) {
-            Ok(data) => Ok(json!({ "warnings": data })),
-            Err(e) => return internal_error(req.request_id, e.to_string()),
-        },
+        "apps.warnings" => service::apps_warnings(state)
+            .map(|data| json!({ "warnings": data }))
+            .map_err(ControlError::from),
         "tunnel.start" => {
             let params: AppIdParams = parse_params!(req);
-
-            // Look up the app to get its target port
-            let app = find_app!(state, req, params.app_id);
-
-            let routing = routing_for_app(&app, state.listen_http.port());
-
-            match tunnel::start_quick_tunnel(state.tunnels.clone(), params.app_id, routing).await {
-                Ok(hostname) => {
-                    let url = format!("https://{}", hostname);
-                    if let Err(e) = state.store.update_tunnel_url(params.app_id, Some(&url)) {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    if let Err(e) = state
-                        .store
-                        .set_tunnel_mode(params.app_id, TunnelMode::Quick)
-                    {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "tunnel_url": url, "hostname": hostname }))
+            match service::app_set_tunnel_mode(
+                state,
+                params.app_id,
+                TunnelMode::Quick,
+                None,
+                None,
+                false,
+            )
+            .await
+            {
+                Ok(result) => {
+                    let hostname = result
+                        .tunnel_url
+                        .as_deref()
+                        .and_then(|u| u.strip_prefix("https://"))
+                        .unwrap_or("");
+                    Ok(json!({ "tunnel_url": result.tunnel_url, "hostname": hostname }))
                 }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
+                Err(e) => Err(ControlError::from(e)),
             }
         }
         "tunnel.stop" => {
             let params: AppIdParams = parse_params!(req);
-
-            match tunnel::stop_tunnel(&state.tunnels, params.app_id) {
-                Ok(()) => {
-                    if let Err(e) = state.store.update_tunnel_url(params.app_id, None) {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    if let Err(e) = state.store.set_tunnel_mode(params.app_id, TunnelMode::None) {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "stopped": true }))
-                }
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            }
+            service::app_set_tunnel_mode(state, params.app_id, TunnelMode::None, None, None, false)
+                .await
+                .map(|_| json!({ "stopped": true }))
+                .map_err(ControlError::from)
         }
         "tunnel.status" => {
             let tunnels = tunnel::tunnel_status(&state.tunnels);
@@ -1459,27 +811,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     );
                 }
             };
-            match default_app {
-                Some(raw) => {
-                    let app_domain = raw.trim().to_ascii_lowercase();
-                    if app_domain.is_empty() {
-                        return render_err(
-                            req.request_id,
-                            ControlError::InvalidParams("default_app cannot be empty".to_string()),
-                        );
-                    }
-                    if let Err(e) = state.store.set_setting("default_app", &app_domain) {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "default_app": app_domain }))
-                }
-                None => {
-                    if let Err(e) = state.store.delete_setting("default_app") {
-                        return internal_error(req.request_id, e.to_string());
-                    }
-                    Ok(json!({ "default_app": null }))
-                }
+            if let Err(e) = service::set_default_app(state, default_app.as_deref()) {
+                return render_err(req.request_id, ControlError::from(e));
             }
+            Ok(json!({ "default_app": default_app }))
         }
         "tunnel.configure" => {
             let params: TunnelConfigureParams = parse_params!(req);
@@ -1514,22 +849,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            // Read CF credentials from settings
-            let api_token = require_setting!(
-                state,
-                req,
-                "cf.api_token",
-                "CF credentials not configured, run tunnel.configure first"
-            );
-            let account_id =
-                require_setting!(state, req, "cf.account_id", "cf.account_id not configured");
-
-            // Look up app and get target port
-            let app = find_app!(state, req, params.app_id);
-
-            let routing = routing_for_app(&app, state.listen_http.port());
-
             // Check if app already has a tunnel
+            let app = find_app!(state, req, params.app_id);
             if app.app_tunnel_id.is_some() {
                 return render_err(
                     req.request_id,
@@ -1539,101 +860,30 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 );
             }
 
-            // Create CF named tunnel
-            let tunnel_name = format!("coulson-{}", params.app_id);
-            let (credentials, tunnel_id) =
-                match tunnel::named::create_named_tunnel(&api_token, &account_id, &tunnel_name)
-                    .await
-                {
-                    Ok(v) => v,
-                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                };
-
-            // Auto DNS if requested
-            let mut dns_record_id: Option<String> = None;
-            let mut zone_id_used: Option<String> = None;
-            if params.auto_dns {
-                match tunnel::named::find_zone_id(&api_token, &params.domain).await {
-                    Ok(zid) => {
-                        zone_id_used = Some(zid.clone());
-                        match tunnel::named::create_dns_cname(
-                            &api_token,
-                            &zid,
-                            &params.domain,
-                            &tunnel_id,
-                        )
-                        .await
-                        {
-                            Ok(rid) => dns_record_id = Some(rid),
-                            Err(e) => {
-                                // Best effort: delete the tunnel we just created
-                                let _ = tunnel::named::delete_named_tunnel(
-                                    &api_token,
-                                    &account_id,
-                                    &tunnel_id,
-                                )
-                                .await;
-                                return internal_error(
-                                    req.request_id,
-                                    format!("failed to create DNS CNAME: {e}"),
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        let _ =
-                            tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id)
-                                .await;
-                        return internal_error(
-                            req.request_id,
-                            format!("failed to find zone for domain: {e}"),
-                        );
-                    }
-                }
-            }
-
-            // Start tunnel connection
-            if let Err(e) = tunnel::start_app_named_tunnel(
-                state.app_tunnels.clone(),
+            match service::app_set_tunnel_mode(
+                state,
                 params.app_id,
-                credentials.clone(),
-                params.domain.clone(),
-                routing,
+                TunnelMode::Named,
+                Some(&params.domain),
+                None,
+                params.auto_dns,
             )
             .await
             {
-                // Cleanup on failure
-                if let (Some(rid), Some(zid)) = (&dns_record_id, &zone_id_used) {
-                    let _ = tunnel::named::delete_dns_record(&api_token, zid, rid).await;
+                Ok(result) => {
+                    let cname_target = result
+                        .tunnel_id
+                        .as_deref()
+                        .map(|tid| format!("{tid}.cfargotunnel.com"));
+                    Ok(json!({
+                        "tunnel_id": result.tunnel_id,
+                        "domain": result.tunnel_domain,
+                        "cname_target": cname_target,
+                        "dns_record_id": result.dns_record_id,
+                    }))
                 }
-                let _ =
-                    tunnel::named::delete_named_tunnel(&api_token, &account_id, &tunnel_id).await;
-                return internal_error(req.request_id, e.to_string());
+                Err(e) => Err(ControlError::from(e)),
             }
-
-            // Persist tunnel info
-            let creds_json = match serde_json::to_string(&credentials) {
-                Ok(v) => v,
-                Err(e) => return internal_error(req.request_id, e.to_string()),
-            };
-            if let Err(e) = state.store.set_app_tunnel_state(
-                params.app_id,
-                Some(&tunnel_id),
-                Some(&params.domain),
-                dns_record_id.as_deref(),
-                Some(&creds_json),
-                TunnelMode::Named,
-            ) {
-                return internal_error(req.request_id, e.to_string());
-            }
-
-            let cname_target = format!("{tunnel_id}.cfargotunnel.com");
-            Ok(json!({
-                "tunnel_id": tunnel_id,
-                "domain": params.domain,
-                "cname_target": cname_target,
-                "dns_record_id": dns_record_id,
-            }))
         }
         "tunnel.app_teardown" => {
             let params: AppIdParams = parse_params!(req);
@@ -1741,45 +991,6 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
     }
 }
 
-/// Parse the first route target from a coulson.routes file content.
-/// Returns `Some("host:port")` on success, `None` if nothing parseable.
-fn parse_first_route_target(raw: &str) -> Option<String> {
-    for line in raw.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        let target_token = if parts[0].starts_with('/') {
-            parts.get(1).copied()
-        } else {
-            Some(parts[0])
-        };
-        if let Some(token) = target_token {
-            // bare port
-            if let Ok(port) = token.parse::<u16>() {
-                if port > 0 {
-                    return Some(format!("127.0.0.1:{port}"));
-                }
-            }
-            // host:port
-            if let Some((host, port_str)) = token.rsplit_once(':') {
-                let host = host
-                    .strip_prefix("http://")
-                    .or_else(|| host.strip_prefix("https://"))
-                    .unwrap_or(host);
-                if let Ok(port) = port_str.parse::<u16>() {
-                    if port > 0 && !host.is_empty() {
-                        return Some(format!("{host}:{port}"));
-                    }
-                }
-            }
-        }
-        break; // only try the first route line
-    }
-    None
-}
-
 fn render_err(request_id: String, err: ControlError) -> ResponseEnvelope {
     let (code, message) = match err {
         ControlError::InvalidParams(msg) => ("invalid_params", msg),
@@ -1812,32 +1023,4 @@ fn ok_response(request_id: String, result: serde_json::Value) -> ResponseEnvelop
 
 fn internal_error(request_id: String, message: String) -> ResponseEnvelope {
     render_err(request_id, ControlError::Internal(message))
-}
-
-/// Build the appropriate tunnel routing for an app based on its backend type.
-fn routing_for_app(
-    app: &crate::domain::AppSpec,
-    proxy_port: u16,
-) -> tunnel::transport::TunnelRouting {
-    tunnel::transport::TunnelRouting::FixedHost {
-        local_host: app.domain.0.clone(),
-        local_proxy_port: proxy_port,
-    }
-}
-
-fn normalize_path_prefix(input: Option<&str>) -> Result<Option<String>, String> {
-    let Some(raw) = input else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if !trimmed.starts_with('/') {
-        return Err("path_prefix must start with '/'".to_string());
-    }
-    if trimmed.len() > 1 && trimmed.ends_with('/') {
-        return Ok(Some(trimmed.trim_end_matches('/').to_string()));
-    }
-    Ok(Some(trimmed.to_string()))
 }
