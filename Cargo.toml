@@ -50,3 +50,6 @@ jsonwebtoken = "9"
 p256 = { version = "0.13", features = ["pem"] }
 toml = "0.8"
 tera = "1"
+axum = { version = "0.8", features = ["tokio"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tower = { version = "0.5", features = ["util"] }

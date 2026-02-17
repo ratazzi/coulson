@@ -47,6 +47,9 @@ jsonwebtoken.workspace = true
 p256.workspace = true
 toml.workspace = true
 tera.workspace = true
+axum.workspace = true
+tokio-stream.workspace = true
+tower.workspace = true
 
 [features]
 builtin-quick-tunnel = []

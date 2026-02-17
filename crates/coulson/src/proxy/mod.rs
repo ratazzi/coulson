@@ -67,6 +67,7 @@ async fn mw_static(session: &mut Session, route: &RouteRule, req_path: &str) -> 
 struct BridgeProxy {
     shared: SharedState,
     process_manager: ProcessManagerHandle,
+    dashboard_router: axum::Router,
 }
 
 const INSPECT_BODY_MAX: usize = 65536;
@@ -128,7 +129,7 @@ impl ProxyHttp for BridgeProxy {
 
         // Dashboard dedicated domain: dashboard.{suffix}
         if crate::dashboard::is_dashboard_host(&host, &self.shared.domain_suffix) {
-            crate::dashboard::handle(session, &self.shared).await?;
+            crate::dashboard::bridge(session, self.dashboard_router.clone()).await?;
             return Ok(true);
         }
 
@@ -221,7 +222,7 @@ impl ProxyHttp for BridgeProxy {
                 }
                 // default_app route not found → fall through to dashboard
             }
-            crate::dashboard::handle(session, &self.shared).await?;
+            crate::dashboard::bridge(session, self.dashboard_router.clone()).await?;
             return Ok(true);
         }
 
@@ -470,11 +471,17 @@ fn run_proxy_blocking(
     let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 
+    let dashboard_state = crate::dashboard::DashboardState {
+        shared: state.clone(),
+    };
+    let dashboard_router = crate::dashboard::router(dashboard_state);
+
     let mut service = http_proxy_service(
         &server.configuration,
         BridgeProxy {
             shared: state,
             process_manager,
+            dashboard_router,
         },
     );
     service.add_tcp(bind);
