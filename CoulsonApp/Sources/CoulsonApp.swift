@@ -49,6 +49,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApplication.shared.activate(ignoringOtherApps: true)
     }
 
+    func application(_ application: NSApplication, open urls: [URL]) {
+        guard let vm else { return }
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard url.isFileURL,
+                  FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+
+            Task { @MainActor in
+                let result = await vm.createAppFromDrop(folderPath: url.path)
+                switch result {
+                case .created:
+                    break
+                case .detectionFailed:
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    for window in NSApplication.shared.windows where window.title.contains("Coulson") {
+                        window.makeKeyAndOrderFront(nil)
+                    }
+                case .error:
+                    break
+                }
+            }
+        }
+    }
+
     @MainActor
     func setupStatusBar(vm: CoulsonViewModel, updater: UpdaterController) {
         guard statusItem == nil else { return }
@@ -78,6 +103,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.delegate = self
         statusItem?.menu = menu
 
+        // Add drop target overlay on status bar button
+        if let button = statusItem?.button {
+            let dropView = StatusBarDropView(frame: button.bounds, vm: vm)
+            dropView.autoresizingMask = [.width, .height]
+            button.addSubview(dropView)
+        }
+
         refreshTask = Task {
             await vm.refreshAll()
             while !Task.isCancelled {
@@ -85,6 +117,76 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 await vm.refreshAll()
             }
         }
+    }
+}
+
+// MARK: - StatusBarDropView
+
+class StatusBarDropView: NSView {
+    private weak var vm: CoulsonViewModel?
+
+    init(frame: NSRect, vm: CoulsonViewModel) {
+        self.vm = vm
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else {
+            return []
+        }
+        for url in urls {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue {
+                return .copy
+            }
+        }
+        return []
+    }
+
+    override func performDragOperation(_ sender: any NSDraggingInfo) -> Bool {
+        guard let urls = sender.draggingPasteboard.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL] else {
+            return false
+        }
+
+        for url in urls {
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                  isDir.boolValue else { continue }
+
+            Task { @MainActor [weak self] in
+                guard let vm = self?.vm else { return }
+                let result = await vm.createAppFromDrop(folderPath: url.path)
+                switch result {
+                case .created:
+                    break // app list refreshes automatically
+                case .detectionFailed:
+                    // Open main window and navigate to AddAppView
+                    NSApplication.shared.activate(ignoringOtherApps: true)
+                    for window in NSApplication.shared.windows where window.title.contains("Coulson") {
+                        window.makeKeyAndOrderFront(nil)
+                    }
+                case .error:
+                    break // errorMessage already set by vm
+                }
+            }
+        }
+        return true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        // Forward click to the status bar button so menu still works
+        superview?.mouseDown(with: event)
     }
 }
 

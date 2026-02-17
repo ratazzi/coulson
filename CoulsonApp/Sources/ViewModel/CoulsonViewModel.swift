@@ -253,14 +253,45 @@ final class CoulsonViewModel: ObservableObject {
         }
     }
 
-    func createApp(params: [String: Any]) async -> Bool {
+    func createApp(params: [String: Any]) async -> Int? {
         do {
-            _ = try client.request(method: "app.create", params: params)
+            let response = try client.request(method: "app.create", params: params)
             await refreshAll()
-            return true
+            if let app = response["app"] as? [String: Any],
+               let appId = app["id"] as? Int {
+                return appId
+            }
+            errorMessage = "Unexpected response: missing app id"
+            return nil
         } catch {
             errorMessage = error.localizedDescription
-            return false
+            return nil
+        }
+    }
+
+    enum DropResult {
+        case created(appId: Int)
+        case detectionFailed
+        case error(String)
+    }
+
+    func createAppFromDrop(folderPath: String) async -> DropResult {
+        do {
+            let response = try client.request(method: "app.create_from_folder", params: ["path": folderPath])
+            await refreshAll()
+            if let app = response["app"] as? [String: Any],
+               let appId = app["id"] as? Int {
+                return .created(appId: appId)
+            }
+            errorMessage = "Unexpected response: missing app id"
+            return .error("Unexpected response: missing app id")
+        } catch {
+            if let clientErr = error as? UDSControlClient.ClientError,
+               clientErr.rpcCode == "detection_failed" {
+                return .detectionFailed
+            }
+            errorMessage = error.localizedDescription
+            return .error(error.localizedDescription)
         }
     }
 

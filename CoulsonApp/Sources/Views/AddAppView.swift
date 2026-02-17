@@ -227,8 +227,8 @@ struct AddAppView: View {
             params["target_value"] = socketPath.trimmingCharacters(in: .whitespaces)
         }
 
-        let ok = await vm.createApp(params: params)
-        if ok, !path.isEmpty {
+        let appId = await vm.createApp(params: params)
+        if appId != nil, !path.isEmpty {
             path.removeLast()
         }
     }

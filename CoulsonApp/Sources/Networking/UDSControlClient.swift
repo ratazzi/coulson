@@ -72,9 +72,10 @@ struct UDSControlClient {
             return result
         }
         if let err = json["error"] as? [String: Any], let msg = err["message"] as? String {
-            throw ClientError.rpcFailed(msg)
+            let code = err["code"] as? String
+            throw ClientError.rpcFailed(code: code, message: msg)
         }
-        throw ClientError.rpcFailed("unknown error")
+        throw ClientError.rpcFailed(code: nil, message: "unknown error")
     }
 
     enum ClientError: Error, LocalizedError {
@@ -82,7 +83,7 @@ struct UDSControlClient {
         case pathTooLong
         case emptyResponse
         case invalidResponse
-        case rpcFailed(String)
+        case rpcFailed(code: String?, message: String)
 
         var errorDescription: String? {
             switch self {
@@ -90,8 +91,13 @@ struct UDSControlClient {
             case .pathTooLong: return "Socket path too long"
             case .emptyResponse: return "Empty response from daemon"
             case .invalidResponse: return "Invalid response from daemon"
-            case .rpcFailed(let msg): return msg
+            case .rpcFailed(_, let msg): return msg
             }
+        }
+
+        var rpcCode: String? {
+            if case .rpcFailed(let code, _) = self { return code }
+            return nil
         }
     }
 }

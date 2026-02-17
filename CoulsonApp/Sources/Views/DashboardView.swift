@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 enum DashboardDestination: Hashable {
     case appDetail(Int)
@@ -10,6 +11,7 @@ struct DashboardView: View {
     @EnvironmentObject var vm: CoulsonViewModel
     @State private var path = NavigationPath()
     @State private var searchText = ""
+    @State private var isDropTargeted = false
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -27,10 +29,47 @@ struct DashboardView: View {
                     }
                 }
         }
+        .overlay {
+            if isDropTargeted {
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.accentColor, lineWidth: 3)
+                    .padding(4)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onDrop(of: [.fileURL], isTargeted: $isDropTargeted) { providers in
+            handleDrop(providers: providers)
+            return true
+        }
         .task { await vm.startAutoRefresh() }
         .onDisappear { vm.stopAutoRefresh() }
         .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
             path.append(DashboardDestination.settings)
+        }
+    }
+
+    private func handleDrop(providers: [NSItemProvider]) {
+        for provider in providers {
+            provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { data, _ in
+                guard let data = data as? Data,
+                      let url = URL(dataRepresentation: data, relativeTo: nil) else { return }
+
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir),
+                      isDir.boolValue else { return }
+
+                Task { @MainActor in
+                    let result = await vm.createAppFromDrop(folderPath: url.path)
+                    switch result {
+                    case .created(let appId):
+                        path.append(DashboardDestination.appDetail(appId))
+                    case .detectionFailed:
+                        path.append(DashboardDestination.addApp)
+                    case .error:
+                        break // errorMessage already set by vm
+                    }
+                }
+            }
         }
     }
 }
