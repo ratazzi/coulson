@@ -1,32 +1,86 @@
-<div class="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+<div id="detail-tunnel" class="rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
   <div class="px-5 py-3 border-b border-zinc-100 dark:border-zinc-800">
     <h2 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400">Tunnel</h2>
   </div>
-{% if app.tunnel_url %}
+  <div class="px-5 py-3">
+    <form method="post" action="/apps/{{ app.name }}/tunnel" id="tunnel-form">
+      <div class="flex items-center justify-between">
+        <span class="inline-flex items-center gap-2">
+          <label for="tunnel_mode" class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel Mode</label>
+          <span id="tunnel-spinner" style="display:none" class="inline-flex items-center gap-1.5 text-xs text-zinc-400 dark:text-zinc-500">
+            <svg class="h-3.5 w-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+            Switching…
+          </span>
+        </span>
+        <input type="hidden" id="tunnel_mode_hidden" name="tunnel_mode" value="{{ app.tunnel_mode }}">
+        <select id="tunnel_mode" onchange="(function(el){var h=document.getElementById('tunnel_mode_hidden');h.value=el.value;if(el.value!=='named'){document.getElementById('tunnel-spinner').style.display='inline-flex';el.disabled=true;el.form.requestSubmit()}else{document.getElementById('named-fields').style.display='block'}})(this)" class="rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-sm shadow-sm focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:focus:bg-zinc-800 transition-colors">
+          <option value="none"{% if app.tunnel_mode == "none" %} selected{% endif %}>None</option>
+          <option value="quick"{% if app.tunnel_mode == "quick" %} selected{% endif %}>Quick</option>
+          <option value="global"{% if app.tunnel_mode == "global" %} selected{% endif %}>Global</option>
+          <option value="named"{% if app.tunnel_mode == "named" %} selected{% endif %}>Named</option>
+        </select>
+      </div>
+
+      <div id="named-fields" style="{% if app.tunnel_mode != 'named' %}display:none{% endif %}" class="mt-4 space-y-3 border-t border-zinc-100 dark:border-zinc-800 pt-4">
+        <div>
+          <label for="app_tunnel_domain" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">Tunnel Domain</label>
+          <input type="text" id="app_tunnel_domain" name="app_tunnel_domain" value="{{ app.app_tunnel_domain | default(value='') }}" class="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-sm placeholder-zinc-400 focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:bg-zinc-800 transition-colors" placeholder="myapp.example.com">
+        </div>
+        <div>
+          <label for="app_tunnel_token" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">Tunnel Token <span class="text-zinc-400 dark:text-zinc-600">(optional{% if app.app_tunnel_token_hint %}, saved creds available{% endif %})</span></label>
+          <input type="password" id="app_tunnel_token" name="app_tunnel_token" class="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-sm placeholder-zinc-400 focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:bg-zinc-800 transition-colors" placeholder="eyJ...">
+        </div>
+        <div class="flex justify-end">
+          <button type="submit" class="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-zinc-800 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200">Connect</button>
+        </div>
+      </div>
+    </form>
+  </div>
+
+{% if app.tunnel_mode == "quick" and app.tunnel_url %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="flex items-center justify-between px-5 py-3">
     <span class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel URL</span>
     <a href="{{ app.tunnel_url }}" target="_blank" rel="noopener" class="font-mono text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">{{ app.tunnel_url }}</a>
   </div>
 {% endif %}
-{% if app.tunnel_exposed %}
-  {% if app.tunnel_url %}<div class="border-t border-zinc-100 dark:border-zinc-800"></div>{% endif %}
+
+{% if app.tunnel_mode == "global" %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="flex items-center justify-between px-5 py-3">
-    <span class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel Mode</span>
-    <span class="text-sm">{{ app.tunnel_mode }}</span>
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Status</span>
+    <span class="text-sm">Exposed via global tunnel</span>
   </div>
+  {% if tunnel and tunnel.tunnel_domain %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Domain</span>
+    <span class="font-mono text-sm">{{ app.name }}.{{ tunnel.tunnel_domain }}</span>
+  </div>
+  {% endif %}
 {% endif %}
-{% if app.app_tunnel_id %}
+
+{% if app.tunnel_mode == "named" %}
+  {% if app.app_tunnel_domain %}
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Domain</span>
+    <a href="https://{{ app.app_tunnel_domain }}" target="_blank" rel="noopener" class="font-mono text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">{{ app.app_tunnel_domain }}</a>
+  </div>
+  {% endif %}
+  {% if app.app_tunnel_id %}
   <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="flex items-center justify-between px-5 py-3">
     <span class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel ID</span>
     <span class="font-mono text-xs text-zinc-500 dark:text-zinc-400">{{ app.app_tunnel_id }}</span>
   </div>
-{% endif %}
-{% if app.app_tunnel_domain %}
+  {% endif %}
+  {% if app.tunnel_url %}
   <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="flex items-center justify-between px-5 py-3">
-    <span class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel Domain</span>
-    <a href="https://{{ app.app_tunnel_domain }}" target="_blank" rel="noopener" class="font-mono text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">{{ app.app_tunnel_domain }}</a>
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">Tunnel URL</span>
+    <a href="{{ app.tunnel_url }}" target="_blank" rel="noopener" class="font-mono text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400">{{ app.tunnel_url }}</a>
   </div>
+  {% endif %}
 {% endif %}
 </div>

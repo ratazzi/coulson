@@ -1,0 +1,29 @@
+<div id="settings-modal-content">
+  <div class="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-700">
+    <h2 class="text-base font-semibold tracking-tight">Edit Settings</h2>
+    <button data-action="modal#close" class="rounded-md p-1 text-zinc-400 hover:text-zinc-600 dark:hover:text-zinc-200 transition-colors">
+      <svg class="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+    </button>
+  </div>
+
+  {% if settings_error %}<div class="mx-6 mt-4 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-800 ring-1 ring-inset ring-red-600/10 dark:bg-red-900/20 dark:text-red-300 dark:ring-red-400/20">{{ settings_error }}</div>{% endif %}
+
+  <form method="post" action="/apps/{{ app.name }}/settings" class="px-6 py-5 space-y-4">
+    <div>
+      <label for="settings_timeout_ms" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">Timeout (ms) <span class="text-zinc-400 dark:text-zinc-600">(optional)</span></label>
+      <input type="number" id="settings_timeout_ms" name="timeout_ms" value="{{ form_timeout_ms | default(value='') }}" min="0" class="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-sm placeholder-zinc-400 focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:bg-zinc-800 transition-colors" placeholder="30000">
+      <p class="mt-1 text-xs text-zinc-400 dark:text-zinc-600">Leave empty for default.</p>
+    </div>
+
+    <div>
+      <label for="settings_listen_port" class="block text-xs font-medium text-zinc-500 dark:text-zinc-400 mb-1.5">Listen Port <span class="text-zinc-400 dark:text-zinc-600">(optional)</span></label>
+      <input type="number" id="settings_listen_port" name="listen_port" value="{{ form_listen_port | default(value='') }}" min="1" max="65535" class="w-full rounded-lg border border-zinc-200 bg-zinc-50 px-3 py-2 text-sm shadow-sm placeholder-zinc-400 focus:border-zinc-400 focus:bg-white focus:outline-none focus:ring-1 focus:ring-zinc-400 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-100 dark:placeholder-zinc-500 dark:focus:bg-zinc-800 transition-colors" placeholder="8080">
+      <p class="mt-1 text-xs text-zinc-400 dark:text-zinc-600">Dedicated port for this app.</p>
+    </div>
+
+    <div class="flex items-center justify-end gap-3 border-t border-zinc-100 dark:border-zinc-800 mt-5 pt-4">
+      <button type="button" data-action="modal#close" class="rounded-lg px-4 py-2 text-sm font-medium text-zinc-600 hover:bg-zinc-100 dark:text-zinc-400 dark:hover:bg-zinc-800 transition-colors">Cancel</button>
+      <button type="submit" class="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-5 py-2 text-sm font-medium text-white shadow-sm hover:bg-zinc-800 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200">Save</button>
+    </div>
+  </form>
+</div>

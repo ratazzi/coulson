@@ -622,6 +622,7 @@ impl AppRepository {
         Self::query_apps(&conn, true, &self.domain_suffix)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn update_settings(
         &self,
         app_id: i64,
@@ -630,6 +631,7 @@ impl AppRepository {
         basic_auth_pass: Option<Option<&str>>,
         spa_rewrite: Option<bool>,
         listen_port: Option<Option<u16>>,
+        timeout_ms: Option<Option<u64>>,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -661,6 +663,11 @@ impl AppRepository {
         if let Some(v) = listen_port {
             sets.push(format!("listen_port = ?{idx}"));
             values.push(Box::new(v.map(|p| p as i64)));
+            idx += 1;
+        }
+        if let Some(v) = timeout_ms {
+            sets.push(format!("timeout_ms = ?{idx}"));
+            values.push(Box::new(v.map(|t| t as i64)));
             idx += 1;
         }
 

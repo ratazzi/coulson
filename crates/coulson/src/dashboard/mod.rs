@@ -47,12 +47,32 @@ pub fn router(state: DashboardState) -> Router {
             "/apps/{id}/requests/{req_id}",
             get(handlers::page_request_detail),
         )
+        .route("/apps/new", post(handlers::action_create_app))
+        .route("/processes", get(handlers::page_processes))
+        .route(
+            "/processes/{app_id}/restart",
+            post(handlers::action_restart_process),
+        )
+        .route("/processes/{app_id}/log", get(handlers::page_process_log))
+        .route(
+            "/settings/default-app",
+            post(handlers::action_set_default_app),
+        )
         .route("/scan", post(handlers::action_scan))
         .route("/apps/{id}/toggle", post(handlers::action_toggle))
         .route("/apps/{id}/delete", post(handlers::action_delete))
         .route(
             "/apps/{id}/delete-go",
             post(handlers::action_delete_redirect),
+        )
+        .route(
+            "/apps/{id}/settings",
+            post(handlers::action_update_settings),
+        )
+        .route("/apps/{id}/tunnel", post(handlers::action_set_tunnel_mode))
+        .route(
+            "/apps/{id}/basic-auth",
+            post(handlers::action_set_basic_auth),
         )
         .route("/apps/{id}/toggle-cors", post(handlers::action_toggle_cors))
         .route("/apps/{id}/toggle-spa", post(handlers::action_toggle_spa))
@@ -100,8 +120,38 @@ pub async fn bridge(session: &mut Session, dashboard_router: Router) -> Result<(
     for (name, value) in session.req_header().headers.iter() {
         builder = builder.header(name, value);
     }
+
+    // Read request body with 1MB limit
+    const MAX_BODY: usize = 1_048_576;
+    let mut body_bytes = Vec::new();
+    loop {
+        match session.read_request_body().await {
+            Ok(Some(chunk)) => {
+                if body_bytes.len() + chunk.len() > MAX_BODY {
+                    return Err(Error::explain(
+                        ErrorType::InternalError,
+                        "request body too large",
+                    ));
+                }
+                body_bytes.extend_from_slice(&chunk);
+            }
+            Ok(None) => break,
+            Err(e) => {
+                return Err(Error::explain(
+                    ErrorType::InternalError,
+                    format!("read body: {e}"),
+                ));
+            }
+        }
+    }
+
+    let body = if body_bytes.is_empty() {
+        axum::body::Body::empty()
+    } else {
+        axum::body::Body::from(body_bytes)
+    };
     let request = builder
-        .body(axum::body::Body::empty())
+        .body(body)
         .map_err(|e| Error::explain(ErrorType::InternalError, format!("build request: {e}")))?;
 
     let response = dashboard_router

@@ -19,11 +19,14 @@
   </div>
 </div>
 
-<div class="grid gap-6">
+<div class="grid gap-6" data-controller="modal">
 {% include "partials/detail/urls.html" %}
 {% include "partials/detail/info.html" %}
 {% include "partials/detail/features.html" %}
 {% include "partials/detail/tunnel.html" %}
 {% include "partials/detail/danger.html" %}
+  <dialog data-modal-target="dialog" data-action="click->modal#backdropClose">
+    {% include "partials/settings_modal.html" %}
+  </dialog>
 </div>
 {% endblock content %}

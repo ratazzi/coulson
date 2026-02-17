@@ -1,6 +1,16 @@
-      <tr id="app-row-{{ app.name }}" class="border-b border-zinc-100 last:border-0 hover:bg-zinc-50/50 transition-colors dark:border-zinc-800/50 dark:hover:bg-zinc-800/30">
+      <tr id="app-row-{{ app.name }}" class="group/row border-b border-zinc-100 last:border-0 hover:bg-zinc-50/50 transition-colors dark:border-zinc-800/50 dark:hover:bg-zinc-800/30">
         <td class="pl-4 pr-2 py-3">{% if app.enabled %}<span class="relative flex h-2.5 w-2.5"><span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span><span class="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500"></span></span>{% else %}<span class="inline-flex h-2.5 w-2.5 rounded-full bg-zinc-300 dark:bg-zinc-600"></span>{% endif %}</td>
-        <td class="px-3 py-3"><a href="/apps/{{ app.name }}" class="text-sm font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors">{{ app.name }}</a></td>
+        <td class="px-3 py-3">
+          <div class="flex items-center justify-between">
+            <a href="/apps/{{ app.name }}" class="text-sm font-medium hover:text-blue-600 dark:hover:text-blue-400 transition-colors">{{ app.name }}</a>
+            <form method="post" action="/settings/default-app" class="inline ml-2 flex-shrink-0">
+              <input type="hidden" name="default_app" value="{% if app.name == default_app %}{% else %}{{ app.name }}{% endif %}">
+              <button type="submit" class="inline-flex items-center justify-center h-5 w-5 rounded {% if app.name == default_app %}text-blue-500 dark:text-blue-400{% else %}opacity-0 group-hover/row:opacity-100 text-zinc-300 hover:text-blue-500 dark:text-zinc-600 dark:hover:text-blue-400{% endif %} transition-all" title="{% if app.name == default_app %}Unset default{% else %}Set as default{% endif %}">
+                <svg class="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path stroke-linecap="round" stroke-linejoin="round" d="m2.25 12 8.954-8.955c.44-.439 1.152-.439 1.591 0L21.75 12M4.5 9.75v10.125c0 .621.504 1.125 1.125 1.125H9.75v-4.875c0-.621.504-1.125 1.125-1.125h2.25c.621 0 1.125.504 1.125 1.125V21h4.125c.621 0 1.125-.504 1.125-1.125V9.75M8.25 21h8.25"/></svg>
+              </button>
+            </form>
+          </div>
+        </td>
         <td class="px-3 py-3">
           <a href="{{ app.domain_href }}" target="_blank" rel="noopener" class="group inline-flex items-center gap-1">
             <code class="text-xs bg-zinc-100 text-zinc-700 px-1.5 py-0.5 rounded font-mono group-hover:bg-zinc-200 transition-colors dark:bg-zinc-800 dark:text-zinc-300 dark:group-hover:bg-zinc-700">{{ app.domain }}{% if app.path_prefix %}<span class="text-zinc-400 dark:text-zinc-500">{{ app.path_prefix }}</span>{% endif %}</code>

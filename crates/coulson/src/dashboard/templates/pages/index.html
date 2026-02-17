@@ -1,7 +1,17 @@
 {% extends "base.html" %}
 {% block content %}
 {% include "partials/stats.html" %}
-<div class="mt-6">
+<div class="mt-4 flex items-center justify-between" data-controller="modal">
+  <div></div>
+  <button data-action="modal#open" class="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-zinc-800 transition-colors dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200">
+    <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 4.5v15m7.5-7.5h-15"/></svg>
+    New App
+  </button>
+  <dialog data-modal-target="dialog" data-action="click->modal#backdropClose">
+    {% include "partials/new_app_modal.html" %}
+  </dialog>
+</div>
+<div class="mt-4">
 {% if apps | length == 0 %}
 {% include "partials/empty_state.html" %}
 {% else %}

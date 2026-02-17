@@ -23,11 +23,20 @@ Stimulus.register("toast", class extends Controller {
     }, 4000)
   }
 })
+Stimulus.register("modal", class extends Controller {
+  static targets = ["dialog"]
+  open() { this.dialogTarget.showModal() }
+  close() { this.dialogTarget.close() }
+  backdropClose(e) { if (e.target === this.dialogTarget) this.close() }
+})
 </script>
 <style>
   turbo-frame { display: contents; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .animate-spin-slow { animation: spin 1.5s linear infinite; }
+  dialog::backdrop { background: rgba(0,0,0,.4); backdrop-filter: blur(2px); }
+  dialog { border: none; border-radius: 0.75rem; padding: 0; max-width: 28rem; width: calc(100% - 2rem); overflow: hidden; }
+  @media (prefers-color-scheme: dark) { dialog { background: #18181b; color: #fafafa; } dialog::backdrop { background: rgba(0,0,0,.6); } }
 </style>
 </head>
 <body class="bg-zinc-50 text-zinc-900 antialiased dark:bg-zinc-950 dark:text-zinc-50">
@@ -42,6 +51,7 @@ Stimulus.register("toast", class extends Controller {
       </a>
       <nav class="flex items-center gap-1">
         <a href="/" data-turbo-action="advance" class="text-sm font-medium px-3 py-1.5 rounded-md transition-colors {% if active_nav == "apps" %}bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100{% else %}text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800/50{% endif %}">Apps</a>
+        <a href="/processes" data-turbo-action="advance" class="text-sm font-medium px-3 py-1.5 rounded-md transition-colors {% if active_nav == "processes" %}bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100{% else %}text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800/50{% endif %}">Processes</a>
         <a href="/warnings" data-turbo-action="advance" class="text-sm font-medium px-3 py-1.5 rounded-md transition-colors {% if active_nav == "warnings" %}bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100{% else %}text-zinc-600 hover:text-zinc-900 hover:bg-zinc-50 dark:text-zinc-400 dark:hover:text-zinc-100 dark:hover:bg-zinc-800/50{% endif %}">Warnings{% if warning_count > 0 %} <span class="ml-1 inline-flex items-center rounded-full bg-amber-100 px-1.5 py-0.5 text-xs font-medium text-amber-800 dark:bg-amber-900/30 dark:text-amber-400">{{ warning_count }}</span>{% endif %}</a>
       </nav>
     </div>

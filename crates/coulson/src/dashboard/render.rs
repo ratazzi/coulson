@@ -74,6 +74,18 @@ pub fn templates() -> &'static Tera {
                     include_str!("templates/pages/not_found.html"),
                 ),
                 (
+                    "partials/settings_modal.html",
+                    include_str!("templates/partials/settings_modal.html"),
+                ),
+                (
+                    "pages/processes.html",
+                    include_str!("templates/pages/processes.html"),
+                ),
+                (
+                    "pages/process_log.html",
+                    include_str!("templates/pages/process_log.html"),
+                ),
+                (
                     "partials/stats.html",
                     include_str!("templates/partials/stats.html"),
                 ),
@@ -92,6 +104,10 @@ pub fn templates() -> &'static Tera {
                 (
                     "partials/toast.html",
                     include_str!("templates/partials/toast.html"),
+                ),
+                (
+                    "partials/new_app_modal.html",
+                    include_str!("templates/partials/new_app_modal.html"),
                 ),
                 (
                     "partials/detail/urls.html",
@@ -153,9 +169,12 @@ pub struct AppView {
     pub cors_enabled: bool,
     pub spa_rewrite: bool,
     pub basic_auth_user: Option<String>,
+    pub basic_auth_pass_set: bool,
     pub timeout_display: String,
+    pub timeout_ms: Option<u64>,
     pub listen_port: Option<u16>,
     pub inspect_enabled: bool,
+    pub app_tunnel_token_hint: bool,
 }
 
 #[derive(Serialize)]
@@ -191,13 +210,63 @@ impl AppView {
             cors_enabled: app.cors_enabled,
             spa_rewrite: app.spa_rewrite,
             basic_auth_user: app.basic_auth_user.clone(),
+            basic_auth_pass_set: app.basic_auth_pass.is_some(),
             timeout_display: app
                 .timeout_ms
                 .map(|ms| format!("{ms} ms"))
                 .unwrap_or_else(|| "default".to_string()),
+            timeout_ms: app.timeout_ms,
             listen_port: app.listen_port,
             inspect_enabled: app.inspect_enabled,
+            app_tunnel_token_hint: app.app_tunnel_creds.is_some(),
         }
+    }
+}
+
+#[derive(Serialize)]
+pub struct ProcessView {
+    pub app_id: i64,
+    pub app_name: Option<String>,
+    pub pid: u32,
+    pub kind: String,
+    pub uptime_display: String,
+    pub idle_display: String,
+    pub alive: bool,
+}
+
+pub fn process_views(
+    infos: &[crate::process::ProcessInfo],
+    state: &SharedState,
+) -> Vec<ProcessView> {
+    infos
+        .iter()
+        .map(|info| {
+            let app_name = state
+                .store
+                .get_by_id(info.app_id)
+                .ok()
+                .flatten()
+                .map(|a| a.name);
+            ProcessView {
+                app_id: info.app_id,
+                app_name,
+                pid: info.pid,
+                kind: info.kind.clone(),
+                uptime_display: format_duration(info.uptime_secs),
+                idle_display: format_duration(info.idle_secs),
+                alive: info.alive,
+            }
+        })
+        .collect()
+}
+
+fn format_duration(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else if secs < 3600 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -458,6 +527,11 @@ pub fn tunnel_status_view(state: &SharedState) -> Option<TunnelStatusView> {
     })
 }
 
+pub fn global_tunnel_domain(state: &SharedState) -> Option<String> {
+    let guard = state.named_tunnel.lock();
+    guard.as_ref().map(|h| h.tunnel_domain.clone())
+}
+
 pub fn base_context(state: &SharedState) -> Context {
     let mut ctx = Context::new();
     ctx.insert("suffix", &state.domain_suffix);
@@ -466,6 +540,14 @@ pub fn base_context(state: &SharedState) -> Context {
     if let Some(ts) = tunnel_status_view(state) {
         ctx.insert("tunnel", &ts);
     }
+    ctx.insert(
+        "default_app",
+        &state
+            .store
+            .get_setting("default_app")
+            .unwrap_or(None)
+            .unwrap_or_default(),
+    );
     ctx
 }
 
@@ -514,7 +596,7 @@ pub fn build_urls(
     app: &AppSpec,
     port: u16,
     https_port: Option<u16>,
-    _domain_suffix: &str,
+    global_tunnel_domain: Option<&str>,
 ) -> Vec<UrlView> {
     let mut urls = Vec::new();
     let path = app.path_prefix.as_deref().unwrap_or("/");
@@ -546,6 +628,17 @@ pub fn build_urls(
     if app.tunnel_mode.is_exposed() {
         if let Some(ref tunnel_domain) = app.app_tunnel_domain {
             let href = format!("https://{tunnel_domain}");
+            if !urls.iter().any(|u| u.href == href) {
+                urls.push(UrlView {
+                    href,
+                    is_link: true,
+                });
+            }
+        }
+    }
+    if matches!(app.tunnel_mode, crate::domain::TunnelMode::Global) {
+        if let Some(td) = global_tunnel_domain {
+            let href = format!("https://{}.{td}", app.name);
             if !urls.iter().any(|u| u.href == href) {
                 urls.push(UrlView {
                     href,

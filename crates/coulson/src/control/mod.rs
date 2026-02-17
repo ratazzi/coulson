@@ -671,6 +671,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.basic_auth_pass.as_ref().map(|v| v.as_deref()),
                 params.spa_rewrite,
                 params.listen_port,
+                None,
             ) {
                 Ok(found) => {
                     if !found {
