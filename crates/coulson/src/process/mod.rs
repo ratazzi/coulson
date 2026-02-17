@@ -58,6 +58,14 @@ struct ManagedProcess {
     last_active: Instant,
     #[allow(dead_code)]
     kind: String,
+    ready: bool,
+}
+
+pub enum StartStatus {
+    /// Process is running and UDS is connectable.
+    Ready(String),
+    /// Process has been spawned but UDS is not yet ready.
+    Starting,
 }
 
 #[derive(serde::Serialize)]
@@ -201,10 +209,128 @@ impl ProcessManager {
                 started_at: now,
                 last_active: now,
                 kind: kind.to_string(),
+                ready: true,
             },
         );
 
         Ok(path_str)
+    }
+
+    /// Non-blocking variant: spawns the process if needed but does NOT wait for UDS readiness.
+    /// Returns `StartStatus::Ready` if the process is running and connectable,
+    /// or `StartStatus::Starting` if the process has been spawned but isn't ready yet.
+    pub async fn ensure_started(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+    ) -> anyhow::Result<StartStatus> {
+        if let Some(proc) = self.processes.get_mut(&app_id) {
+            match proc.child.try_wait() {
+                Ok(None) => {
+                    if proc.ready {
+                        proc.last_active = Instant::now();
+                        return Ok(StartStatus::Ready(
+                            proc.socket_path.to_string_lossy().to_string(),
+                        ));
+                    }
+                    // Not yet marked ready — probe the UDS
+                    if quick_uds_check(&proc.socket_path).await {
+                        proc.ready = true;
+                        proc.last_active = Instant::now();
+                        return Ok(StartStatus::Ready(
+                            proc.socket_path.to_string_lossy().to_string(),
+                        ));
+                    }
+                    // Still not ready — check startup timeout
+                    const STARTUP_TIMEOUT_SECS: u64 = 30;
+                    if proc.started_at.elapsed() > Duration::from_secs(STARTUP_TIMEOUT_SECS) {
+                        let _ = proc.child.start_kill();
+                        let removed = self.processes.remove(&app_id).unwrap();
+                        cleanup_socket(&removed.socket_path);
+                        anyhow::bail!(
+                            "managed process for {name} (app_id={app_id}) failed to become ready within {STARTUP_TIMEOUT_SECS}s"
+                        );
+                    }
+                    return Ok(StartStatus::Starting);
+                }
+                _ => {
+                    info!(app_id, "managed process exited, will restart");
+                    let removed = self.processes.remove(&app_id).unwrap();
+                    cleanup_socket(&removed.socket_path);
+                }
+            }
+        }
+
+        // Spawn a new process (same as ensure_running but skip wait_for_uds_ready)
+        let prov = self
+            .registry
+            .get(kind)
+            .ok_or_else(|| anyhow::anyhow!("no process provider for kind: {kind}"))?;
+
+        let managed_dir = self.runtime_dir.join("managed");
+        std::fs::create_dir_all(&managed_dir)
+            .with_context(|| format!("failed to create {}", managed_dir.display()))?;
+        let sockets_dir = std::fs::canonicalize(&managed_dir).unwrap_or(managed_dir);
+
+        let managed_app = ManagedApp {
+            name: name.to_string(),
+            root: root.to_path_buf(),
+            kind: kind.to_string(),
+            manifest: None,
+            env_overrides: HashMap::new(),
+            socket_dir: sockets_dir.clone(),
+        };
+
+        let spec: ProcessSpec = prov.resolve(&managed_app)?;
+
+        info!(
+            app_id,
+            kind,
+            socket = %spec.socket_path.display(),
+            command = %spec.command.display(),
+            root = %root.display(),
+            "starting managed process via {} provider (non-blocking)",
+            prov.display_name()
+        );
+
+        cleanup_socket(&spec.socket_path);
+
+        let log_path = sockets_dir.join(format!("{name}.log"));
+        let log_file = std::fs::File::create(&log_path)
+            .with_context(|| format!("failed to create log file {}", log_path.display()))?;
+        let stderr_file = log_file
+            .try_clone()
+            .with_context(|| "failed to clone log file handle")?;
+
+        let mut cmd = Command::new(&spec.command);
+        cmd.args(&spec.args);
+        for (k, v) in &spec.env {
+            cmd.env(k, v);
+        }
+        let child = cmd
+            .current_dir(&spec.working_dir)
+            .kill_on_drop(true)
+            .stdout(stderr_file)
+            .stderr(log_file)
+            .spawn()
+            .with_context(|| format!("failed to spawn {} for {app_id}", spec.command.display()))?;
+
+        let now = Instant::now();
+        self.processes.insert(
+            app_id,
+            ManagedProcess {
+                child,
+                socket_path: spec.socket_path,
+                started_at: now,
+                last_active: now,
+                kind: kind.to_string(),
+                ready: false,
+            },
+        );
+
+        Ok(StartStatus::Starting)
     }
 
     /// Kill a specific managed process. Returns true if it was found and killed.
@@ -268,4 +394,15 @@ impl ProcessManager {
 
 fn cleanup_socket(path: &Path) {
     let _ = std::fs::remove_file(path);
+}
+
+/// Single-shot UDS probe with a short timeout.
+async fn quick_uds_check(path: &Path) -> bool {
+    const PROBE_TIMEOUT_MS: u64 = 200;
+    tokio::time::timeout(
+        Duration::from_millis(PROBE_TIMEOUT_MS),
+        tokio::net::UnixStream::connect(path),
+    )
+    .await
+    .is_ok_and(|r| r.is_ok())
 }

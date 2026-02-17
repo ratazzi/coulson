@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{name}} — Starting</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = { darkMode: "media" };
+    </script>
+    <style>
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+      @keyframes fade-in {
+        from {
+          opacity: 0;
+          transform: translateY(4px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes blink {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0;
+        }
+      }
+      .line {
+        opacity: 0;
+        animation: fade-in 0.3s ease forwards;
+      }
+      .cursor {
+        animation: blink 1s step-end infinite;
+      }
+    </style>
+  </head>
+  <body class="bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-50 font-mono antialiased">
+    <div class="flex min-h-screen flex-col items-center justify-center p-4">
+      <div class="w-full max-w-md">
+        <div class="mb-6 flex items-center gap-3">
+          <div
+            class="h-8 w-8 rounded-full border-[3px] border-zinc-200 border-t-emerald-500 dark:border-zinc-700 dark:border-t-emerald-400"
+            style="animation: spin 0.8s linear infinite"></div>
+          <div>
+            <p class="text-sm font-medium">
+              Starting up&hellip;
+              <span
+                id="elapsed"
+                class="text-zinc-400 dark:text-zinc-600"
+              ></span>
+            </p>
+            <code class="text-xs text-zinc-500 dark:text-zinc-500">
+              {{name}}
+            </code>
+          </div>
+        </div>
+        <div class="rounded-lg border border-zinc-200 bg-zinc-50 p-4 dark:border-zinc-800 dark:bg-zinc-900">
+          <div class="space-y-1.5 text-xs leading-relaxed">
+            <div class="line" style="animation-delay: 0s">
+              <span class="text-zinc-400 dark:text-zinc-600">$</span>
+              <span class="text-emerald-600 dark:text-emerald-400">
+                coulson
+              </span>
+              <span class="text-zinc-500 dark:text-zinc-400">
+                spawning process
+              </span>
+            </div>
+            <div class="line" style="animation-delay: 0.4s">
+              <span class="text-zinc-400 dark:text-zinc-600">&rsaquo;</span>
+              <span class="text-zinc-500 dark:text-zinc-400">
+                resolving provider&hellip;
+              </span>
+              <span class="text-emerald-600 dark:text-emerald-400">asgi</span>
+            </div>
+            <div class="line" style="animation-delay: 0.8s">
+              <span class="text-zinc-400 dark:text-zinc-600">&rsaquo;</span>
+              <span class="text-zinc-500 dark:text-zinc-400">
+                binding socket&hellip;
+              </span>
+            </div>
+            <div class="line" style="animation-delay: 1.2s">
+              <span class="text-zinc-400 dark:text-zinc-600">&rsaquo;</span>
+              <span class="text-zinc-500 dark:text-zinc-400">
+                waiting for ready
+              </span>
+              <span class="cursor text-emerald-500">_</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        var start = Date.now();
+        var el = document.getElementById("elapsed");
+
+        function tick() {
+          el.textContent = (((Date.now() - start) / 1000) | 0) + "s";
+        }
+        tick();
+        setInterval(tick, 1000);
+
+        function poll() {
+          fetch(location.href, {
+            method: "HEAD",
+            redirect: "manual",
+            cache: "no-store",
+          })
+            .then(function (r) {
+              if (r.status !== 503) location.reload();
+            })
+            .catch(function () {});
+        }
+        setInterval(poll, 1000);
+      })();
+    </script>
+  </body>
+</html>

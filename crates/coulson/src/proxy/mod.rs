@@ -15,7 +15,7 @@ use tracing::info;
 use parking_lot::RwLock;
 
 use crate::domain::BackendTarget;
-use crate::process::ProcessManagerHandle;
+use crate::process::{ProcessManagerHandle, StartStatus};
 use crate::store::CapturedRequest;
 use crate::{RouteRule, SharedState};
 
@@ -169,16 +169,24 @@ impl ProxyHttp for BridgeProxy {
                     } = route.target
                     {
                         let root_path = std::path::PathBuf::from(root);
-                        let socket_path = {
+                        let status = {
                             let mut pm = self.process_manager.lock().await;
-                            pm.ensure_running(*app_id, name, &root_path, kind)
+                            pm.ensure_started(*app_id, name, &root_path, kind)
                                 .await
                                 .map_err(|e| {
                                     Error::explain(ErrorType::ConnectError, format!("{e}"))
                                 })?
                         };
-                        pm_mark_active(&self.process_manager, *app_id).await;
-                        BackendTarget::UnixSocket { path: socket_path }
+                        match status {
+                            StartStatus::Ready(socket_path) => {
+                                pm_mark_active(&self.process_manager, *app_id).await;
+                                BackendTarget::UnixSocket { path: socket_path }
+                            }
+                            StartStatus::Starting => {
+                                write_loading_page(session, name).await?;
+                                return Ok(true);
+                            }
+                        }
                     } else {
                         route.target.clone()
                     };
@@ -255,15 +263,22 @@ impl ProxyHttp for BridgeProxy {
         } = route.target
         {
             let root_path = std::path::PathBuf::from(root);
-            let socket_path = {
+            let status = {
                 let mut pm = self.process_manager.lock().await;
-                pm.ensure_running(*app_id, name, &root_path, kind)
+                pm.ensure_started(*app_id, name, &root_path, kind)
                     .await
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
-            // Mark active for idle reaper
-            pm_mark_active(&self.process_manager, *app_id).await;
-            BackendTarget::UnixSocket { path: socket_path }
+            match status {
+                StartStatus::Ready(socket_path) => {
+                    pm_mark_active(&self.process_manager, *app_id).await;
+                    BackendTarget::UnixSocket { path: socket_path }
+                }
+                StartStatus::Starting => {
+                    write_loading_page(session, name).await?;
+                    return Ok(true);
+                }
+            }
         } else {
             route.target.clone()
         };
@@ -1231,6 +1246,22 @@ async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: i64) {
 // ---------------------------------------------------------------------------
 // Error / routing helpers
 // ---------------------------------------------------------------------------
+
+async fn write_loading_page(session: &mut Session, app_name: &str) -> Result<()> {
+    static TEMPLATE: &str = include_str!("loading.html");
+    let body = TEMPLATE.replace("{{name}}", &html_escape(app_name));
+    let mut resp = ResponseHeader::build(503, None)?;
+    resp.insert_header("content-type", "text/html; charset=utf-8")?;
+    resp.insert_header("content-length", body.len().to_string())?;
+    resp.insert_header("retry-after", "1")?;
+    resp.insert_header("cache-control", "no-cache, no-store")?;
+
+    session.write_response_header(Box::new(resp), false).await?;
+    session
+        .write_response_body(Some(Bytes::from(body)), true)
+        .await?;
+    Ok(())
+}
 
 async fn write_error_page(session: &mut Session, status: u16, message: &str) -> Result<()> {
     let body = format!(
