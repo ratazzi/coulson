@@ -578,6 +578,32 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
         );
     }
 
+    // 8. TLS certificates
+    if cfg.listen_https.is_some() {
+        let ca_path = cfg.certs_dir.join("ca.crt");
+        let cert_path = cfg.certs_dir.join("server.crt");
+        let key_path = cfg.certs_dir.join("server.key");
+        if ca_path.is_file() && cert_path.is_file() && key_path.is_file() {
+            print_check(
+                true,
+                &format!("TLS certificates exist ({})", cfg.certs_dir.display()),
+            );
+            // Check if CA in macOS keychain matches the one on disk
+            check_keychain_ca(&ca_path, &mut issues);
+        } else {
+            print_check(
+                false,
+                &format!(
+                    "TLS certificate files missing in {}",
+                    cfg.certs_dir.display()
+                ),
+            );
+            issues += 1;
+        }
+    } else {
+        print_check(true, "HTTPS listener disabled (no TLS check needed)");
+    }
+
     println!();
     if issues == 0 {
         println!("{}", "All checks passed!".green().bold());
@@ -598,6 +624,64 @@ fn print_check(ok: bool, msg: &str) {
 
 fn print_warn(msg: &str) {
     println!("  {} {msg}", "!".yellow());
+}
+
+/// Compare CA cert on disk with the one trusted in macOS system keychain.
+/// Uses `security find-certificate -p` to export the keychain cert as PEM and compares directly.
+#[cfg(target_os = "macos")]
+fn check_keychain_ca(ca_path: &std::path::Path, issues: &mut u32) {
+    use std::process::Command;
+
+    let disk_pem = match std::fs::read_to_string(ca_path) {
+        Ok(p) => p.trim().to_string(),
+        Err(_) => {
+            print_check(false, "cannot read CA cert from disk");
+            *issues += 1;
+            return;
+        }
+    };
+
+    let output = Command::new("security")
+        .args([
+            "find-certificate",
+            "-c",
+            "Coulson Dev CA",
+            "-p",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let kc_pem = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if disk_pem == kc_pem {
+                print_check(true, "CA cert in system keychain matches disk");
+            } else {
+                print_check(
+                    false,
+                    "CA cert in system keychain does NOT match disk (stale)",
+                );
+                print_warn("run: sudo security delete-certificate -c \"Coulson Dev CA\" /Library/Keychains/System.keychain");
+                print_warn(&format!(
+                    "then: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                    ca_path.display()
+                ));
+                *issues += 1;
+            }
+        }
+        _ => {
+            print_warn("CA cert not found in system keychain (HTTPS will show cert warnings)");
+            print_warn(&format!(
+                "run: sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
+                ca_path.display()
+            ));
+            *issues += 1;
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn check_keychain_ca(_ca_path: &std::path::Path, _issues: &mut u32) {
+    // Keychain check is macOS-only
 }
 
 fn dns_resolves_to_localhost(host: &str) -> Option<bool> {
