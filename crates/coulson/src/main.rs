@@ -51,7 +51,8 @@ pub struct InspectEvent {
     pub timestamp: i64,
 }
 
-type DedicatedPortMap = HashMap<u16, Arc<RwLock<Vec<RouteRule>>>>;
+/// Maps dedicated listen_port → app domain for forwarding to main proxy.
+type DedicatedPortMap = HashMap<u16, String>;
 
 #[derive(Clone, PartialEq)]
 pub struct RouteRule {
@@ -101,7 +102,7 @@ impl SharedState {
     pub fn reload_routes(&self) -> anyhow::Result<bool> {
         let enabled_apps = self.store.list_enabled()?;
         let mut table: HashMap<String, Vec<RouteRule>> = HashMap::new();
-        let mut port_rules: HashMap<u16, Vec<RouteRule>> = HashMap::new();
+        let mut port_domains: HashMap<u16, String> = HashMap::new();
         for app in enabled_apps {
             let static_root = match &app.target {
                 BackendTarget::Managed { root, .. } => {
@@ -114,6 +115,9 @@ impl SharedState {
                 }
                 _ => None,
             };
+            if let Some(port) = app.listen_port {
+                port_domains.insert(port, app.domain.0.clone());
+            }
             let rule = RouteRule {
                 app_id: Some(app.id.0),
                 inspect_enabled: app.inspect_enabled,
@@ -127,23 +131,14 @@ impl SharedState {
                 listen_port: app.listen_port,
                 static_root,
             };
-            if let Some(port) = app.listen_port {
-                port_rules.entry(port).or_default().push(rule.clone());
-            }
             table.entry(app.domain.0).or_default().push(rule);
         }
-        let sort_rules = |rules: &mut Vec<RouteRule>| {
+        for rules in table.values_mut() {
             rules.sort_by(|a, b| {
                 let a_len = a.path_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
                 let b_len = b.path_prefix.as_ref().map(|s| s.len()).unwrap_or(0);
                 b_len.cmp(&a_len)
             });
-        };
-        for rules in table.values_mut() {
-            sort_rules(rules);
-        }
-        for rules in port_rules.values_mut() {
-            sort_rules(rules);
         }
         let changed = {
             let current = self.routes.read();
@@ -151,28 +146,19 @@ impl SharedState {
         };
         *self.routes.write() = table;
 
-        // Update dedicated port rule sets
-        {
-            let mut dp = self.dedicated_ports.write();
-            // Remove ports no longer needed
-            dp.retain(|port, _| port_rules.contains_key(port));
-            // Add or update
-            for (port, rules) in port_rules {
-                match dp.get(&port) {
-                    Some(existing) => {
-                        *existing.write() = rules;
-                    }
-                    None => {
-                        dp.insert(port, Arc::new(RwLock::new(rules)));
-                    }
-                }
-            }
+        // Update dedicated port mappings
+        let ports_changed = {
+            let current = self.dedicated_ports.read();
+            *current != port_domains
+        };
+        if ports_changed {
+            *self.dedicated_ports.write() = port_domains;
         }
 
-        if changed {
+        if changed || ports_changed {
             let _ = self.route_tx.send(());
         }
-        Ok(changed)
+        Ok(changed || ports_changed)
     }
 }
 
@@ -934,12 +920,13 @@ fn sync_dedicated_proxies(
     state: &SharedState,
     running: &mut HashMap<u16, tokio::task::JoinHandle<()>>,
 ) {
-    let wanted: HashSet<u16> = {
+    let snapshot: HashMap<u16, String> = {
         let dp = state.dedicated_ports.read();
-        dp.keys().copied().collect()
+        dp.clone()
     };
 
     // Stop proxies for removed ports
+    let wanted: HashSet<u16> = snapshot.keys().copied().collect();
     let current: HashSet<u16> = running.keys().copied().collect();
     for port in current.difference(&wanted) {
         if let Some(handle) = running.remove(port) {
@@ -949,23 +936,26 @@ fn sync_dedicated_proxies(
     }
 
     // Start proxies for new ports
+    let upstream = format!("127.0.0.1:{}", state.listen_http.port());
+    let ca_file = {
+        let p = state.certs_dir.join("ca.crt");
+        if p.exists() {
+            Some(p.to_string_lossy().into_owned())
+        } else {
+            None
+        }
+    };
     for port in wanted.difference(&current) {
-        let rules = {
-            let dp = state.dedicated_ports.read();
-            match dp.get(port) {
-                Some(r) => Arc::clone(r),
-                None => continue,
-            }
+        let Some(domain) = snapshot.get(port) else {
+            continue;
         };
         let port = *port;
-        let store = state.store.clone();
-        let max_requests = state.inspect_max_requests;
-        let inspect_tx = state.inspect_tx.clone();
-        info!(port, "starting dedicated proxy");
+        let host = domain.clone();
+        let upstream = upstream.clone();
+        let ca_file = ca_file.clone();
+        info!(port, host = %host, "starting dedicated proxy");
         let handle = tokio::task::spawn_blocking(move || {
-            if let Err(err) =
-                proxy::run_dedicated_proxy_blocking(port, rules, store, max_requests, inspect_tx)
-            {
+            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, &upstream, &host, ca_file) {
                 error!(error = %err, port, "dedicated proxy exited with error");
             }
         });

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -11,8 +10,6 @@ use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::{http_proxy_service, FailToProxy};
 use tracing::info;
-
-use parking_lot::RwLock;
 
 use percent_encoding::percent_decode_str;
 use serde::Serialize;
@@ -557,248 +554,77 @@ fn run_proxy_blocking(
 
 // ---------------------------------------------------------------------------
 // Dedicated per-app proxy (listen_port)
+// Thin reverse proxy: rewrites Host header and forwards to the main proxy.
+// All business logic (auth, CORS, managed process, etc.) is handled by main.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 struct DedicatedProxy {
-    rules: Arc<RwLock<Vec<RouteRule>>>,
-    store: std::sync::Arc<crate::store::AppRepository>,
-    inspect_max_requests: usize,
-    inspect_tx: tokio::sync::broadcast::Sender<crate::InspectEvent>,
+    /// Main proxy address, e.g. "127.0.0.1:8080"
+    upstream_addr: String,
+    /// App domain used as Host header, e.g. "asgi.coulson.local"
+    host: String,
 }
 
 #[async_trait]
 impl ProxyHttp for DedicatedProxy {
-    type CTX = ProxyCtx;
+    type CTX = ();
 
-    fn new_ctx(&self) -> Self::CTX {
-        ProxyCtx::default()
-    }
-
-    async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool>
-    where
-        Self::CTX: Send + Sync,
-    {
-        let req_path = session.req_header().uri.path().to_string();
-
-        let route = {
-            let rules = self.rules.read();
-            select_route(Some(&rules), &req_path)
-        };
-
-        let Some(route) = route else {
-            write_error_page(session, 502, "no_backend").await?;
-            return Ok(true);
-        };
-
-        // --- Middleware pipeline ---
-        if mw_auth(session, &route).await? == Flow::Done {
-            return Ok(true);
-        }
-        if mw_cors(session, &route).await? == Flow::Done {
-            return Ok(true);
-        }
-        if mw_static(session, &route, &req_path).await? == Flow::Done {
-            return Ok(true);
-        }
-
-        // Static directory serving (full, with 404 / directory listing)
-        if let BackendTarget::StaticDir { ref root } = route.target {
-            serve_static(session, root, &req_path, route.cors_enabled).await?;
-            return Ok(true);
-        }
-
-        // SPA Rewrite
-        if route.spa_rewrite && should_rewrite_for_spa(&req_path) {
-            let _ = session.req_header_mut().set_uri("/".try_into().unwrap());
-        }
-
-        // --- Request Inspector ---
-        if route.inspect_enabled {
-            ctx.inspect = true;
-            ctx.inspect_app_id = route.app_id;
-            ctx.inspect_store = Some(self.store.clone());
-            ctx.inspect_max_requests = self.inspect_max_requests;
-            ctx.inspect_tx = Some(self.inspect_tx.clone());
-            ctx.inspect_start = Some(std::time::Instant::now());
-            ctx.inspect_method = Some(session.req_header().method.to_string());
-            let uri = &session.req_header().uri;
-            ctx.inspect_path = Some(uri.path().to_string());
-            ctx.inspect_query = uri.query().map(|q| q.to_string());
-            let headers: std::collections::HashMap<String, String> = session
-                .req_header()
-                .headers
-                .iter()
-                .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
-                .collect();
-            ctx.inspect_req_headers = serde_json::to_string(&headers).ok();
-        }
-
-        ctx.target = Some(route.target);
-        ctx.timeout_ms = route.timeout_ms;
-        ctx.cors_enabled = route.cors_enabled;
-        ctx.spa_rewrite = route.spa_rewrite;
-        ctx.is_upgrade = session.req_header().headers.get("upgrade").is_some();
-        Ok(false)
-    }
+    fn new_ctx(&self) {}
 
     async fn upstream_peer(
         &self,
         _session: &mut Session,
-        ctx: &mut Self::CTX,
+        _ctx: &mut Self::CTX,
     ) -> Result<Box<HttpPeer>> {
-        let Some(target) = ctx.target.take() else {
-            return Error::e_explain(ErrorType::InternalError, "missing upstream target");
-        };
-
-        match target {
-            BackendTarget::Tcp { host, port } => {
-                let mut peer = Box::new(HttpPeer::new(format!("{host}:{port}"), false, host));
-                if let Some(timeout_ms) = ctx.timeout_ms {
-                    let timeout = Duration::from_millis(timeout_ms);
-                    peer.options.connection_timeout = Some(timeout);
-                    peer.options.total_connection_timeout = Some(timeout);
-                    if !ctx.is_upgrade {
-                        peer.options.read_timeout = Some(timeout);
-                        peer.options.idle_timeout = Some(timeout);
-                    }
-                }
-                Ok(peer)
-            }
-            BackendTarget::UnixSocket { path } => {
-                let mut peer = HttpPeer::new_uds(&path, false, String::new())?;
-                if let Some(timeout_ms) = ctx.timeout_ms {
-                    let timeout = Duration::from_millis(timeout_ms);
-                    peer.options.connection_timeout = Some(timeout);
-                    peer.options.total_connection_timeout = Some(timeout);
-                    if !ctx.is_upgrade {
-                        peer.options.read_timeout = Some(timeout);
-                        peer.options.idle_timeout = Some(timeout);
-                    }
-                }
-                Ok(Box::new(peer))
-            }
-            BackendTarget::StaticDir { .. } | BackendTarget::Managed { .. } => {
-                Error::e_explain(ErrorType::InternalError, "non-proxy target has no upstream")
-            }
-        }
-    }
-
-    async fn request_body_filter(
-        &self,
-        _session: &mut Session,
-        body: &mut Option<Bytes>,
-        _end_of_stream: bool,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        inspect_capture_req_body(ctx, body);
-        Ok(())
+        Ok(Box::new(HttpPeer::new(
+            &self.upstream_addr,
+            false,
+            String::new(),
+        )))
     }
 
     async fn upstream_request_filter(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         upstream_request: &mut RequestHeader,
         _ctx: &mut Self::CTX,
     ) -> Result<()>
     where
         Self::CTX: Send + Sync,
     {
-        // Strip internal tunnel marker before forwarding to backend
-        upstream_request.remove_header(crate::tunnel::proxy::VIA_TUNNEL_HEADER);
+        upstream_request.insert_header("host", &self.host)?;
 
-        if let Some(upgrade) = _session.req_header().headers.get("upgrade").cloned() {
+        if let Some(upgrade) = session.req_header().headers.get("upgrade").cloned() {
             upstream_request.insert_header("Upgrade", upgrade)?;
             upstream_request.insert_header("Connection", "Upgrade")?;
         }
 
-        let is_tls = _session.digest().is_some_and(|d| d.ssl_digest.is_some());
-        upstream_request
-            .insert_header("X-Forwarded-Proto", if is_tls { "https" } else { "http" })?;
-
         Ok(())
-    }
-
-    fn upstream_response_filter(
-        &self,
-        _session: &mut Session,
-        upstream_response: &mut ResponseHeader,
-        ctx: &mut Self::CTX,
-    ) -> Result<()> {
-        if ctx.cors_enabled {
-            upstream_response
-                .insert_header("access-control-allow-origin", "*")
-                .ok();
-            upstream_response
-                .insert_header(
-                    "access-control-allow-methods",
-                    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-                )
-                .ok();
-            upstream_response
-                .insert_header("access-control-allow-headers", "*")
-                .ok();
-            upstream_response
-                .insert_header("access-control-expose-headers", "*")
-                .ok();
-        }
-        inspect_capture_response_meta(ctx, upstream_response);
-        Ok(())
-    }
-
-    fn response_body_filter(
-        &self,
-        _session: &mut Session,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
-        ctx: &mut Self::CTX,
-    ) -> Result<Option<Duration>> {
-        inspect_capture_resp_body(ctx, body, end_of_stream);
-        Ok(None)
-    }
-
-    async fn fail_to_proxy(
-        &self,
-        session: &mut Session,
-        e: &Error,
-        _ctx: &mut Self::CTX,
-    ) -> FailToProxy
-    where
-        Self::CTX: Send + Sync,
-    {
-        let code = error_to_status_code(e);
-        if code > 0 {
-            write_error_page(session, code, "upstream_error")
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("failed to send error page: {e}");
-                });
-        }
-        FailToProxy {
-            error_code: code,
-            can_reuse_downstream: false,
-        }
     }
 }
 
 pub fn run_dedicated_proxy_blocking(
     port: u16,
-    rules: Arc<RwLock<Vec<RouteRule>>>,
-    store: std::sync::Arc<crate::store::AppRepository>,
-    inspect_max_requests: usize,
-    inspect_tx: tokio::sync::broadcast::Sender<crate::InspectEvent>,
+    upstream_addr: &str,
+    host: &str,
+    ca_file: Option<String>,
 ) -> anyhow::Result<()> {
     let bind = format!("0.0.0.0:{port}");
-    let mut server = Server::new(None)?;
+    // Avoid loading macOS system certificates which may contain unsupported
+    // critical extensions that crash rustls. Use provided CA or /dev/null.
+    let conf = pingora::server::configuration::ServerConf {
+        ca_file: Some(ca_file.unwrap_or_else(|| "/dev/null".to_string())),
+        ..Default::default()
+    };
+    let mut server = Server::new_with_opt_and_conf(None, conf);
     server.bootstrap();
 
     let mut service = http_proxy_service(
         &server.configuration,
         DedicatedProxy {
-            rules,
-            store,
-            inspect_max_requests,
-            inspect_tx,
+            upstream_addr: upstream_addr.to_string(),
+            host: host.to_string(),
         },
     );
     service.add_tcp(&bind);
