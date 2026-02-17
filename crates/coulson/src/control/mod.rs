@@ -7,7 +7,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, error, info};
 
-use crate::domain::{DomainName, TunnelMode};
+use crate::domain::{AppSpec, DomainName, TunnelMode};
 use crate::scanner;
 use crate::store::{StaticAppInput, StoreError};
 use crate::tunnel;
@@ -47,6 +47,8 @@ enum ControlError {
     NotFound,
     #[error("domain conflict")]
     DomainConflict,
+    #[error("detection failed: {0}")]
+    DetectionFailed(String),
     #[error("internal error: {0}")]
     Internal(String),
 }
@@ -133,6 +135,11 @@ struct UpdateSettingsParams {
     app_tunnel_token: Option<String>,
     #[serde(default)]
     app_tunnel_auto_dns: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateFromFolderParams {
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -492,6 +499,168 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     return internal_error(req.request_id, e.to_string());
                 }
             }
+        }
+        "app.create_from_folder" => {
+            let params: CreateFromFolderParams = match serde_json::from_value(req.params) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            let folder = std::path::Path::new(&params.path);
+            if !folder.is_dir() {
+                return render_err(
+                    req.request_id,
+                    ControlError::InvalidParams(format!(
+                        "path is not a directory: {}",
+                        params.path
+                    )),
+                );
+            }
+
+            let folder_name = folder.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+            let name = scanner::sanitize_name(folder_name);
+            let domain_str = format!("{}.{}", name, state.domain_suffix);
+            let domain = match DomainName::parse(&domain_str, &state.domain_suffix) {
+                Ok(v) => v,
+                Err(e) => {
+                    return render_err(req.request_id, ControlError::InvalidParams(e.to_string()));
+                }
+            };
+
+            // Helper: insert app, reload routes, return response
+            let insert_and_respond = |result: anyhow::Result<AppSpec>| -> ResponseEnvelope {
+                match result {
+                    Ok(app) => {
+                        let _ = state.reload_routes();
+                        ok_response(req.request_id.clone(), json!({ "app": app }))
+                    }
+                    Err(e) => {
+                        if let Some(StoreError::DomainConflict) = e.downcast_ref::<StoreError>() {
+                            render_err(req.request_id.clone(), ControlError::DomainConflict)
+                        } else {
+                            internal_error(req.request_id.clone(), e.to_string())
+                        }
+                    }
+                }
+            };
+
+            let insert_tcp = |target_value: &str| -> ResponseEnvelope {
+                let input = StaticAppInput {
+                    name: &name,
+                    domain: &domain,
+                    path_prefix: None,
+                    target_type: "tcp",
+                    target_value,
+                    timeout_ms: None,
+                    cors_enabled: false,
+                    basic_auth_user: None,
+                    basic_auth_pass: None,
+                    spa_rewrite: false,
+                    listen_port: None,
+                };
+                insert_and_respond(state.store.insert_static(&input))
+            };
+
+            // 1. coulson.json
+            let manifest_path = folder.join("coulson.json");
+            if manifest_path.exists() {
+                let raw = match std::fs::read_to_string(&manifest_path) {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+                let manifest: serde_json::Value = match serde_json::from_str(&raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        return internal_error(req.request_id, format!("invalid coulson.json: {e}"))
+                    }
+                };
+
+                if let Some((_prov, detected)) =
+                    state.provider_registry.detect(folder, Some(&manifest))
+                {
+                    let root_str = folder.to_string_lossy().to_string();
+                    return insert_and_respond(state.store.insert_managed(
+                        &name,
+                        &domain,
+                        &root_str,
+                        &detected.kind,
+                        None,
+                    ));
+                }
+
+                if let Some(raw_port) = manifest.get("target_port").and_then(|v| v.as_u64()) {
+                    if raw_port > u16::MAX as u64 {
+                        return render_err(
+                            req.request_id,
+                            ControlError::InvalidParams(format!(
+                                "target_port out of range: {raw_port}"
+                            )),
+                        );
+                    }
+                    let port = raw_port as u16;
+                    if port > 0 {
+                        let host = manifest
+                            .get("target_host")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("127.0.0.1");
+                        let target_value = format!("{host}:{port}");
+                        return insert_tcp(&target_value);
+                    }
+                }
+            }
+
+            // 2. coulson.routes — parse first non-empty line
+            let routes_path = folder.join("coulson.routes");
+            if routes_path.exists() {
+                let raw = match std::fs::read_to_string(&routes_path) {
+                    Ok(v) => v,
+                    Err(e) => return internal_error(req.request_id, e.to_string()),
+                };
+                if let Some(target_value) = parse_first_route_target(&raw) {
+                    return insert_tcp(&target_value);
+                }
+            }
+
+            // 3. Provider registry auto-detect
+            if let Some((_prov, detected)) = state.provider_registry.detect(folder, None) {
+                let root_str = folder.to_string_lossy().to_string();
+                return insert_and_respond(state.store.insert_managed(
+                    &name,
+                    &domain,
+                    &root_str,
+                    &detected.kind,
+                    None,
+                ));
+            }
+
+            // 4. public/ subdirectory
+            let public_dir = folder.join("public");
+            if public_dir.is_dir() {
+                let root_str = public_dir.to_string_lossy().to_string();
+                return insert_and_respond(
+                    state
+                        .store
+                        .insert_static_dir(&name, &domain, &root_str, None),
+                );
+            }
+
+            // 5. index.html
+            if folder.join("index.html").exists() {
+                let root_str = folder.to_string_lossy().to_string();
+                return insert_and_respond(
+                    state
+                        .store
+                        .insert_static_dir(&name, &domain, &root_str, None),
+                );
+            }
+
+            // 6. Nothing detected
+            Err(ControlError::DetectionFailed(format!(
+                "could not detect app type for: {}",
+                params.path
+            )))
         }
         "app.update" => {
             let params: UpdateSettingsParams = parse_params!(req);
@@ -1566,11 +1735,51 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
     }
 }
 
+/// Parse the first route target from a coulson.routes file content.
+/// Returns `Some("host:port")` on success, `None` if nothing parseable.
+fn parse_first_route_target(raw: &str) -> Option<String> {
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        let target_token = if parts[0].starts_with('/') {
+            parts.get(1).copied()
+        } else {
+            Some(parts[0])
+        };
+        if let Some(token) = target_token {
+            // bare port
+            if let Ok(port) = token.parse::<u16>() {
+                if port > 0 {
+                    return Some(format!("127.0.0.1:{port}"));
+                }
+            }
+            // host:port
+            if let Some((host, port_str)) = token.rsplit_once(':') {
+                let host = host
+                    .strip_prefix("http://")
+                    .or_else(|| host.strip_prefix("https://"))
+                    .unwrap_or(host);
+                if let Ok(port) = port_str.parse::<u16>() {
+                    if port > 0 && !host.is_empty() {
+                        return Some(format!("{host}:{port}"));
+                    }
+                }
+            }
+        }
+        break; // only try the first route line
+    }
+    None
+}
+
 fn render_err(request_id: String, err: ControlError) -> ResponseEnvelope {
     let (code, message) = match err {
         ControlError::InvalidParams(msg) => ("invalid_params", msg),
         ControlError::NotFound => ("not_found", "resource not found".to_string()),
         ControlError::DomainConflict => ("domain_conflict", "domain already exists".to_string()),
+        ControlError::DetectionFailed(msg) => ("detection_failed", msg),
         ControlError::Internal(msg) => ("internal_error", msg),
     };
 

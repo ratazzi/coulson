@@ -241,6 +241,129 @@ impl AppRepository {
         })
     }
 
+    pub fn insert_managed(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        app_root: &str,
+        kind: &str,
+        listen_port: Option<u16>,
+    ) -> anyhow::Result<AppSpec> {
+        let now = OffsetDateTime::now_utc();
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+        let kind_enum = match kind {
+            "asgi" => AppKind::Asgi,
+            "rack" => AppKind::Rack,
+            "container" => AppKind::Container,
+            _ => AppKind::Static,
+        };
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, listen_port)
+             VALUES (?1, ?2, ?3, '', 'managed', ?4, NULL, 1, 0, NULL, ?5, ?6, ?7)",
+            params![
+                name,
+                kind,
+                domain_db,
+                app_root,
+                now.unix_timestamp(),
+                now.unix_timestamp(),
+                listen_port.map(|v| v as i64),
+            ],
+        );
+        check_insert(result)?;
+        let id = conn.last_insert_rowid();
+
+        Ok(AppSpec {
+            id: AppId(id),
+            name: name.to_string(),
+            kind: kind_enum,
+            domain: domain.clone(),
+            path_prefix: None,
+            target: BackendTarget::Managed {
+                app_id: id,
+                root: app_root.to_string(),
+                kind: kind.to_string(),
+                name: name.to_string(),
+            },
+            timeout_ms: None,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            listen_port,
+            tunnel_url: None,
+            tunnel_exposed: false,
+            tunnel_mode: TunnelMode::None,
+            app_tunnel_id: None,
+            app_tunnel_domain: None,
+            app_tunnel_dns_id: None,
+            app_tunnel_creds: None,
+            inspect_enabled: false,
+            fs_entry: None,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
+    pub fn insert_static_dir(
+        &self,
+        name: &str,
+        domain: &DomainName,
+        root: &str,
+        listen_port: Option<u16>,
+    ) -> anyhow::Result<AppSpec> {
+        let now = OffsetDateTime::now_utc();
+        let domain_db = domain_to_db(&domain.0, &self.domain_suffix);
+
+        let conn = self.conn.lock();
+        let result = conn.execute(
+            "INSERT INTO apps (name, kind, domain, path_prefix, target_type, target_value, timeout_ms, enabled, scan_managed, scan_source, created_at, updated_at, listen_port)
+             VALUES (?1, 'static', ?2, '', 'static_dir', ?3, NULL, 1, 0, NULL, ?4, ?5, ?6)",
+            params![
+                name,
+                domain_db,
+                root,
+                now.unix_timestamp(),
+                now.unix_timestamp(),
+                listen_port.map(|v| v as i64),
+            ],
+        );
+        check_insert(result)?;
+        let id = conn.last_insert_rowid();
+
+        Ok(AppSpec {
+            id: AppId(id),
+            name: name.to_string(),
+            kind: AppKind::Static,
+            domain: domain.clone(),
+            path_prefix: None,
+            target: BackendTarget::StaticDir {
+                root: root.to_string(),
+            },
+            timeout_ms: None,
+            cors_enabled: false,
+            basic_auth_user: None,
+            basic_auth_pass: None,
+            spa_rewrite: false,
+            listen_port,
+            tunnel_url: None,
+            tunnel_exposed: false,
+            tunnel_mode: TunnelMode::None,
+            app_tunnel_id: None,
+            app_tunnel_domain: None,
+            app_tunnel_dns_id: None,
+            app_tunnel_creds: None,
+            inspect_enabled: false,
+            fs_entry: None,
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        })
+    }
+
     pub fn upsert_scanned_static(
         &self,
         input: &StaticAppInput,
