@@ -50,6 +50,7 @@ tera.workspace = true
 axum.workspace = true
 tokio-stream.workspace = true
 tower.workspace = true
+percent-encoding.workspace = true
 
 [features]
 builtin-quick-tunnel = []

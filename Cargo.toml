@@ -53,3 +53,4 @@ tera = "1"
 axum = { version = "0.8", features = ["tokio"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
+percent-encoding = "2"

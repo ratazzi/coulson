@@ -14,6 +14,10 @@ use tracing::info;
 
 use parking_lot::RwLock;
 
+use percent_encoding::percent_decode_str;
+use serde::Serialize;
+use tera::{Context, Tera};
+
 use crate::domain::BackendTarget;
 use crate::process::{ProcessManagerHandle, StartStatus};
 use crate::store::CapturedRequest;
@@ -754,7 +758,7 @@ async fn try_serve_static(
     req_path: &str,
     cors: bool,
 ) -> Result<bool> {
-    let decoded = percent_decode(req_path);
+    let decoded = percent_decode_str(req_path).decode_utf8_lossy();
     let clean = sanitize_path(&decoded);
     let full_path = PathBuf::from(root).join(&clean);
 
@@ -795,7 +799,7 @@ async fn try_serve_static(
 }
 
 async fn serve_static(session: &mut Session, root: &str, req_path: &str, cors: bool) -> Result<()> {
-    let decoded = percent_decode(req_path);
+    let decoded = percent_decode_str(req_path).decode_utf8_lossy();
     let clean = sanitize_path(&decoded);
     let full_path = PathBuf::from(root).join(&clean);
 
@@ -914,11 +918,16 @@ async fn serve_directory_listing(
         } else {
             format!("{req_path}{name}")
         };
+        let size_display = if is_dir {
+            "-".to_string()
+        } else {
+            format_size(size)
+        };
         entries.push(DirEntry {
             href,
             display_name,
             is_dir,
-            size,
+            size_display,
             modified,
         });
     }
@@ -956,18 +965,34 @@ async fn serve_directory_listing(
     Ok(())
 }
 
+#[derive(Serialize)]
 struct DirEntry {
     href: String,
     display_name: String,
     is_dir: bool,
-    size: u64,
+    size_display: String,
     modified: String,
 }
 
-fn render_directory_html(title: &str, req_path: &str, entries: &[DirEntry]) -> String {
-    let mut rows = String::new();
+fn directory_tera() -> &'static Tera {
+    use std::sync::LazyLock;
+    static T: LazyLock<Tera> = LazyLock::new(|| {
+        let mut tera = Tera::default();
+        tera.add_raw_templates(vec![(
+            "directory_listing.html",
+            include_str!("directory_listing.html"),
+        )])
+        .expect("directory listing template parse error");
+        tera.autoescape_on(vec![".html"]);
+        tera
+    });
+    &T
+}
 
-    // Parent directory link
+fn render_directory_html(title: &str, req_path: &str, entries: &[DirEntry]) -> String {
+    let mut ctx = Context::new();
+    ctx.insert("title", title);
+    ctx.insert("entries", entries);
     if req_path != "/" {
         let trimmed = req_path.trim_end_matches('/');
         let parent = match trimmed.rsplit_once('/') {
@@ -975,85 +1000,11 @@ fn render_directory_html(title: &str, req_path: &str, entries: &[DirEntry]) -> S
             Some((p, _)) => format!("{p}/"),
             None => "/".to_string(),
         };
-        rows.push_str(&format!(
-            r#"<tr class="parent"><td><a href="{parent}">../</a></td><td>-</td><td>-</td></tr>"#
-        ));
+        ctx.insert("parent", &parent);
     }
-
-    for e in entries {
-        let size_str = if e.is_dir {
-            "-".to_string()
-        } else {
-            format_size(e.size)
-        };
-        rows.push_str(&format!(
-            r#"<tr><td><a href="{href}">{name}</a></td><td class="size">{size}</td><td class="mod">{modified}</td></tr>"#,
-            href = html_escape(&e.href),
-            name = html_escape(&e.display_name),
-            size = size_str,
-            modified = html_escape(&e.modified),
-        ));
-    }
-
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Index of {title}</title>
-<style>
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-    background: #f5f5f7; color: #1d1d1f; padding: 2rem;
-  }}
-  .container {{ max-width: 960px; margin: 0 auto; }}
-  h1 {{
-    font-size: 1.5rem; font-weight: 600; margin-bottom: 1.5rem;
-    padding-bottom: 0.75rem; border-bottom: 1px solid #d2d2d7;
-    color: #1d1d1f;
-  }}
-  h1 code {{ font-size: 1.3rem; background: #e8e8ed; padding: 0.15em 0.5em; border-radius: 6px; }}
-  table {{ width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-  th {{ text-align: left; padding: 0.75rem 1rem; font-weight: 600; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; color: #86868b; background: #fafafa; border-bottom: 1px solid #e8e8ed; }}
-  td {{ padding: 0.6rem 1rem; border-bottom: 1px solid #f0f0f2; font-size: 0.9rem; }}
-  tr:last-child td {{ border-bottom: none; }}
-  tr:hover {{ background: #f5f5f7; }}
-  a {{ color: #0066cc; text-decoration: none; }}
-  a:hover {{ text-decoration: underline; }}
-  .size, .mod {{ color: #86868b; white-space: nowrap; }}
-  .size {{ text-align: right; }}
-  .parent a {{ color: #86868b; }}
-  @media (prefers-color-scheme: dark) {{
-    body {{ background: #1d1d1f; color: #f5f5f7; }}
-    h1 {{ color: #f5f5f7; border-bottom-color: #424245; }}
-    h1 code {{ background: #2d2d30; }}
-    table {{ background: #2d2d30; box-shadow: 0 1px 3px rgba(0,0,0,0.3); }}
-    th {{ background: #262628; color: #a1a1a6; border-bottom-color: #424245; }}
-    td {{ border-bottom-color: #3a3a3c; }}
-    tr:hover {{ background: #38383a; }}
-    a {{ color: #2997ff; }}
-    .size, .mod {{ color: #a1a1a6; }}
-    .parent a {{ color: #a1a1a6; }}
-  }}
-</style>
-</head>
-<body>
-<div class="container">
-<h1>Index of <code>{title}</code></h1>
-<table>
-  <thead><tr><th>Name</th><th class="size">Size</th><th class="mod">Modified</th></tr></thead>
-  <tbody>
-    {rows}
-  </tbody>
-</table>
-</div>
-</body>
-</html>"#,
-        title = html_escape(title),
-        rows = rows,
-    )
+    directory_tera()
+        .render("directory_listing.html", &ctx)
+        .unwrap_or_else(|e| format!("<html><body><pre>Template error: {e}</pre></body></html>"))
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1124,33 +1075,6 @@ fn sanitize_path(path: &str) -> String {
         .filter(|s| !s.is_empty() && *s != "." && *s != "..")
         .collect();
     segments.join("/")
-}
-
-fn percent_decode(input: &str) -> String {
-    let mut out = Vec::with_capacity(input.len());
-    let bytes = input.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).to_string()
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
 }
 
 fn html_escape(s: &str) -> String {
@@ -1719,8 +1643,11 @@ mod tests {
 
     #[test]
     fn percent_decode_works() {
-        assert_eq!(percent_decode("/foo%20bar"), "/foo bar");
-        assert_eq!(percent_decode("/a%2Fb"), "/a/b");
+        assert_eq!(
+            percent_decode_str("/foo%20bar").decode_utf8_lossy(),
+            "/foo bar"
+        );
+        assert_eq!(percent_decode_str("/a%2Fb").decode_utf8_lossy(), "/a/b");
     }
 
     #[test]
