@@ -209,7 +209,11 @@ enum Commands {
         name: Option<String>,
     },
     /// Check system health
-    Doctor,
+    Doctor {
+        /// Also check pf port forwarding configuration
+        #[arg(long)]
+        pf: bool,
+    },
     /// Generate a sharing URL for a tunnel-exposed app
     Share {
         /// App name or domain
@@ -242,7 +246,11 @@ enum Commands {
         name: Option<String>,
     },
     /// Trust the Coulson CA certificate (add to macOS login keychain)
-    Trust,
+    Trust {
+        /// Also set up pf port forwarding (80/443 -> Coulson listen ports)
+        #[arg(long)]
+        pf: bool,
+    },
     /// Manage tunnels
     Tunnel {
         #[command(subcommand)]
@@ -441,7 +449,7 @@ fn run_warnings(cfg: CoulsonConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
+fn run_doctor(cfg: CoulsonConfig, check_pf: bool) -> anyhow::Result<()> {
     println!("{}", "Coulson Doctor".bold());
     println!();
 
@@ -602,6 +610,32 @@ fn run_doctor(cfg: CoulsonConfig) -> anyhow::Result<()> {
         }
     } else {
         print_check(true, "HTTPS listener disabled (no TLS check needed)");
+    }
+
+    // 9. pf port forwarding (optional)
+    if check_pf {
+        #[cfg(target_os = "macos")]
+        {
+            if is_pf_configured(&cfg) {
+                let http_port = cfg.listen_http.port();
+                let https_port = cfg.listen_https.map(|a| a.port());
+                print_check(
+                    true,
+                    &format!(
+                        "pf forwarding configured (80 -> {http_port}, 443 -> {})",
+                        https_port.map_or("n/a".to_string(), |p| p.to_string())
+                    ),
+                );
+            } else {
+                print_check(false, "pf forwarding not configured");
+                print_warn("run: sudo coulson trust --pf");
+                issues += 1;
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            print_check(true, "pf check skipped (not macOS)");
+        }
     }
 
     println!();
@@ -1108,7 +1142,7 @@ async fn main() -> anyhow::Result<()> {
             tunnel,
         } => run_add(cfg, name, target, port, tunnel),
         Commands::Rm { name } => run_rm(cfg, name),
-        Commands::Doctor => run_doctor(cfg),
+        Commands::Doctor { pf } => run_doctor(cfg, pf),
         Commands::Share { name, expires } => run_share(cfg, name, expires),
         Commands::Unshare { name } => run_unshare(cfg, name),
         Commands::Logs {
@@ -1118,7 +1152,7 @@ async fn main() -> anyhow::Result<()> {
         } => run_logs(cfg, name, follow, lines),
         Commands::Ps => run_ps(cfg),
         Commands::Restart { name } => run_restart(cfg, name),
-        Commands::Trust => run_trust(cfg),
+        Commands::Trust { pf } => run_trust(cfg, pf),
         Commands::Tunnel { action } => run_tunnel(cfg, action),
     }
 }
@@ -2183,7 +2217,7 @@ fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json:
         .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))
 }
 
-fn run_trust(cfg: CoulsonConfig) -> anyhow::Result<()> {
+fn run_trust(cfg: CoulsonConfig, pf: bool) -> anyhow::Result<()> {
     let ca_path = cfg.certs_dir.join("ca.crt");
 
     if !ca_path.exists() {
@@ -2193,46 +2227,238 @@ fn run_trust(cfg: CoulsonConfig) -> anyhow::Result<()> {
         );
     }
 
-    println!("CA certificate: {}", ca_path.display());
-
     #[cfg(target_os = "macos")]
     {
-        println!("Adding CA to macOS System keychain (requires sudo)...");
-        println!(
-            "$ sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}",
-            ca_path.display()
-        );
-        let status = std::process::Command::new("sudo")
-            .args([
-                "security",
-                "add-trusted-cert",
-                "-d",
-                "-r",
-                "trustRoot",
-                "-k",
-                "/Library/Keychains/System.keychain",
-            ])
-            .arg(&ca_path)
-            .status()
-            .context("failed to run security command")?;
+        let ca_trusted = is_ca_trusted(&ca_path);
+        let pf_ok = if pf { is_pf_configured(&cfg) } else { true };
 
-        if status.success() {
-            println!("{}", "CA certificate trusted successfully!".green().bold());
+        println!("CA certificate: {}", ca_path.display());
+
+        if ca_trusted && pf_ok {
             println!(
-                "HTTPS connections to *.{} will now be trusted.",
-                cfg.domain_suffix
+                "{}",
+                "CA certificate already trusted in system keychain."
+                    .green()
+                    .bold()
+            );
+            if pf {
+                let http_port = cfg.listen_http.port();
+                let https_port = cfg.listen_https.map(|a| a.port());
+                println!(
+                    "{}",
+                    format!(
+                        "Port forwarding already configured (80 -> {http_port}, 443 -> {}).",
+                        https_port.map_or("disabled".to_string(), |p| p.to_string())
+                    )
+                    .green()
+                    .bold()
+                );
+            }
+            return Ok(());
+        }
+
+        // Changes needed — require root
+        let is_root = std::process::Command::new("id")
+            .arg("-u")
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+            .unwrap_or(false);
+        if !is_root {
+            let cmd = if pf {
+                "sudo coulson trust --pf"
+            } else {
+                "sudo coulson trust"
+            };
+            bail!("This command requires root privileges. Run: {cmd}");
+        }
+
+        if ca_trusted {
+            println!(
+                "{}",
+                "CA certificate already trusted in system keychain."
+                    .green()
+                    .bold()
             );
         } else {
-            eprintln!("{}", "Failed to add CA to System keychain.".red());
-            eprintln!("You can manually trust it:");
-            eprintln!("  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain {}", ca_path.display());
+            println!("Adding CA to macOS System keychain...");
+            let status = std::process::Command::new("security")
+                .args([
+                    "add-trusted-cert",
+                    "-d",
+                    "-r",
+                    "trustRoot",
+                    "-k",
+                    "/Library/Keychains/System.keychain",
+                ])
+                .arg(&ca_path)
+                .status()
+                .context("failed to run security command")?;
+
+            if status.success() {
+                println!("{}", "CA certificate trusted successfully!".green().bold());
+                println!(
+                    "HTTPS connections to *.{} will now be trusted.",
+                    cfg.domain_suffix
+                );
+            } else {
+                eprintln!("{}", "Failed to add CA to System keychain.".red());
+            }
+        }
+
+        if pf {
+            setup_pf_forwarding(&cfg)?;
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     {
+        println!("CA certificate: {}", ca_path.display());
         println!("To trust this CA certificate, import it into your system trust store:");
         println!("  {}", ca_path.display());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_ca_trusted(ca_path: &std::path::Path) -> bool {
+    let disk_pem = match std::fs::read_to_string(ca_path) {
+        Ok(p) => p.trim().to_string(),
+        Err(_) => return false,
+    };
+    let output = std::process::Command::new("security")
+        .args([
+            "find-certificate",
+            "-c",
+            "Coulson Dev CA",
+            "-p",
+            "/Library/Keychains/System.keychain",
+        ])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            let kc_pem = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            disk_pem == kc_pem
+        }
+        _ => false,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_pf_rules(cfg: &CoulsonConfig) -> (String, String, String) {
+    let http_port = cfg.listen_http.port();
+    let https_port = cfg.listen_https.map(|a| a.port());
+    let anchor_ref = "rdr-anchor \"coulson\"".to_string();
+    let anchor_load = "load anchor \"coulson\" from \"/etc/pf.anchors/coulson\"".to_string();
+
+    let mut rules = format!(
+        "rdr pass inet proto tcp from any to any port 80 -> 127.0.0.1 port {http_port}\n\
+         rdr pass inet6 proto tcp from any to any port 80 -> ::1 port {http_port}\n"
+    );
+    if let Some(port) = https_port {
+        rules.push_str(&format!(
+            "rdr pass inet proto tcp from any to any port 443 -> 127.0.0.1 port {port}\n\
+             rdr pass inet6 proto tcp from any to any port 443 -> ::1 port {port}\n"
+        ));
+    }
+    (rules, anchor_ref, anchor_load)
+}
+
+#[cfg(target_os = "macos")]
+fn is_pf_configured(cfg: &CoulsonConfig) -> bool {
+    let (rules, anchor_ref, anchor_load) = build_pf_rules(cfg);
+    let anchor_path = std::path::Path::new("/etc/pf.anchors/coulson");
+    let pf_conf_path = std::path::Path::new("/etc/pf.conf");
+    let existing_anchor = std::fs::read_to_string(anchor_path).unwrap_or_default();
+    let existing_pf_conf = std::fs::read_to_string(pf_conf_path).unwrap_or_default();
+    existing_anchor == rules
+        && existing_pf_conf.contains(&anchor_ref)
+        && existing_pf_conf.contains(&anchor_load)
+}
+
+#[cfg(target_os = "macos")]
+fn setup_pf_forwarding(cfg: &CoulsonConfig) -> anyhow::Result<()> {
+    let http_port = cfg.listen_http.port();
+    let https_port = cfg.listen_https.map(|a| a.port());
+
+    let anchor_path = std::path::Path::new("/etc/pf.anchors/coulson");
+    let pf_conf_path = std::path::Path::new("/etc/pf.conf");
+    let (rules, anchor_ref, anchor_load) = build_pf_rules(cfg);
+
+    // Check if already configured
+    let existing_anchor = std::fs::read_to_string(anchor_path).unwrap_or_default();
+    let existing_pf_conf = std::fs::read_to_string(pf_conf_path).unwrap_or_default();
+    let anchor_ok = existing_anchor == rules;
+    let pf_conf_ok =
+        existing_pf_conf.contains(&anchor_ref) && existing_pf_conf.contains(&anchor_load);
+
+    if anchor_ok && pf_conf_ok {
+        println!(
+            "{}",
+            format!(
+                "Port forwarding already configured (80 -> {http_port}, 443 -> {}).",
+                https_port.map_or("disabled".to_string(), |p| p.to_string())
+            )
+            .green()
+            .bold()
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Setting up port forwarding (80 -> {http_port}, 443 -> {})...",
+        https_port.map_or("disabled".to_string(), |p| p.to_string())
+    );
+
+    // Write anchor file
+    std::fs::write(anchor_path, &rules).context("failed to write /etc/pf.anchors/coulson")?;
+
+    // Rewrite pf.conf with coulson anchors at correct positions
+    // pf requires order: options, normalization, queueing, translation (rdr), filtering (anchor)
+    if !pf_conf_ok {
+        // Strip any existing coulson lines first
+        let cleaned: Vec<&str> = existing_pf_conf
+            .lines()
+            .filter(|l| !l.contains("coulson"))
+            .collect();
+
+        let mut new_conf = String::new();
+        let mut rdr_inserted = false;
+        for line in &cleaned {
+            // Insert rdr-anchor before the first filtering anchor line
+            if !rdr_inserted && line.starts_with("anchor ") {
+                new_conf.push_str(&anchor_ref);
+                new_conf.push('\n');
+                rdr_inserted = true;
+            }
+            new_conf.push_str(line);
+            new_conf.push('\n');
+        }
+        if !rdr_inserted {
+            new_conf.push_str(&anchor_ref);
+            new_conf.push('\n');
+        }
+        // load anchor goes at the end
+        new_conf.push_str(&anchor_load);
+        new_conf.push('\n');
+
+        std::fs::write(pf_conf_path, &new_conf).context("failed to write /etc/pf.conf")?;
+    }
+
+    // Reload pf
+    let status = std::process::Command::new("pfctl")
+        .args(["-f", "/etc/pf.conf"])
+        .status()
+        .context("failed to reload pf")?;
+
+    if status.success() {
+        println!("{}", "Port forwarding enabled successfully!".green().bold());
+        println!("  80  -> 127.0.0.1:{http_port}");
+        if let Some(port) = https_port {
+            println!("  443 -> 127.0.0.1:{port}");
+        }
+    } else {
+        bail!("Failed to reload pf rules. You can manually reload: pfctl -f /etc/pf.conf");
     }
 
     Ok(())
