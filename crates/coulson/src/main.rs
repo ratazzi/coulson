@@ -867,17 +867,14 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
     }
 
     // TLS certificate setup
-    let tls_config = if cfg.listen_https.is_some() {
+    let tls_config = if let Some(https_addr) = cfg.listen_https {
         match certs::CertManager::ensure(&cfg.certs_dir, &cfg.domain_suffix) {
-            Ok(cm) => {
-                let https_addr = cfg.listen_https.unwrap();
-                Some(proxy::TlsConfig {
-                    bind: https_addr.to_string(),
-                    cert_path: cm.cert_path().to_string(),
-                    key_path: cm.key_path().to_string(),
-                    ca_path: cm.ca_path().to_string(),
-                })
-            }
+            Ok(cm) => Some(proxy::TlsConfig {
+                bind: https_addr.to_string(),
+                cert_path: cm.cert_path().to_string(),
+                key_path: cm.key_path().to_string(),
+                ca_path: cm.ca_path().to_string(),
+            }),
             Err(err) => {
                 error!(error = %err, "failed to initialize TLS certificates, HTTPS disabled");
                 None
@@ -2217,7 +2214,7 @@ fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json:
         .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))
 }
 
-fn run_trust(cfg: CoulsonConfig, pf: bool) -> anyhow::Result<()> {
+fn run_trust(cfg: CoulsonConfig, #[allow(unused)] pf: bool) -> anyhow::Result<()> {
     let ca_path = cfg.certs_dir.join("ca.crt");
 
     if !ca_path.exists() {

@@ -570,13 +570,13 @@ pub async fn app_set_tunnel_mode(
                     .and_then(|t| tunnel::decode_tunnel_token(t).ok());
 
                 // Reconnect using saved creds (if no new token and domain didn't change)
-                if !named_domain_changed
-                    && decoded_token.is_none()
-                    && app.app_tunnel_creds.is_some()
+                if let Some(tunnel_creds) = app
+                    .app_tunnel_creds
+                    .as_ref()
+                    .filter(|_| !named_domain_changed && decoded_token.is_none())
                 {
-                    let creds: tunnel::TunnelCredentials =
-                        serde_json::from_str(app.app_tunnel_creds.as_ref().unwrap())
-                            .map_err(|e| ServiceError::Internal(e.to_string()))?;
+                    let creds: tunnel::TunnelCredentials = serde_json::from_str(tunnel_creds)
+                        .map_err(|e| ServiceError::Internal(e.to_string()))?;
                     let tid = creds.tunnel_id.clone();
                     match tunnel::start_app_named_tunnel(
                         state.app_tunnels.clone(),
