@@ -120,10 +120,14 @@ jobs:
           VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
           mkdir -p build
+          DMG_STAGE="$(mktemp -d)"
+          cp -R "$APP" "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
           hdiutil create -volname "Coulson" \
-            -srcfolder "$APP" \
+            -srcfolder "$DMG_STAGE" \
             -ov -format UDZO \
             "build/Coulson-${VERSION}.dmg"
+          rm -rf "$DMG_STAGE"
 
       - name: Notarize DMG
         if: env.NOTARIZE_APPLE_ID != ''
@@ -164,6 +168,18 @@ jobs:
           echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
           "$GENERATE_APPCAST" --ed-key-file "$KEY_FILE" --download-url-prefix "https://coulson.hola.ac/" build/
           rm -f "$KEY_FILE"
+
+          RELEASE_URL="https://coulson.hola.ac/releases/nightly/"
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          ns = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
+          ET.register_namespace('sparkle', ns)
+          tree = ET.parse('build/appcast.xml')
+          for item in tree.findall('.//item'):
+              el = ET.SubElement(item, f'{{{ns}}}releaseNotesLink')
+              el.text = '${RELEASE_URL}'
+          tree.write('build/appcast.xml', xml_declaration=True, encoding='unicode')
+          "
           cat build/appcast.xml
 
       - name: Upload daemon artifact

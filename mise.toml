@@ -52,10 +52,14 @@ if [[ "$CREATE_DMG" == "true" ]]; then
     mkdir -p build
     rm -f "$DMG_PATH"
     echo "==> Creating DMG..."
+    DMG_STAGE="$(mktemp -d)"
+    cp -R "$APP" "$DMG_STAGE/"
+    ln -s /Applications "$DMG_STAGE/Applications"
     hdiutil create -volname "Coulson" \
-        -srcfolder "$APP" \
+        -srcfolder "$DMG_STAGE" \
         -ov -format UDZO \
         "$DMG_PATH"
+    rm -rf "$DMG_STAGE"
     echo "==> DMG: $DMG_PATH"
 fi
 
