@@ -131,17 +131,6 @@ enum MenuBuilder {
         let sub = NSMenu()
         let box = AppRecordBox(app)
 
-        // Enable / Disable
-        let toggle = NSMenuItem(
-            title: app.enabled ? "Disable" : "Enable",
-            action: #selector(AppDelegate.toggleApp(_:)), keyEquivalent: "")
-        toggle.image = NSImage(
-            systemSymbolName: app.enabled ? "stop.fill" : "play.fill",
-            accessibilityDescription: nil)
-        toggle.representedObject = box
-        toggle.target = target
-        sub.addItem(toggle)
-
         // Open in Browser
         let browser = NSMenuItem(
             title: "Open in Browser",
@@ -217,6 +206,17 @@ enum MenuBuilder {
         }
 
         sub.addItem(.separator())
+
+        // Enable / Disable
+        let toggle = NSMenuItem(
+            title: app.enabled ? "Disable" : "Enable",
+            action: #selector(AppDelegate.toggleApp(_:)), keyEquivalent: "")
+        toggle.image = NSImage(
+            systemSymbolName: app.enabled ? "stop.fill" : "play.fill",
+            accessibilityDescription: nil)
+        toggle.representedObject = box
+        toggle.target = target
+        sub.addItem(toggle)
 
         // Delete
         let delete = NSMenuItem(
