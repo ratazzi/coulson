@@ -98,21 +98,21 @@ final class DaemonManager: ObservableObject {
         }
     }
 
-    /// Start the daemon via launchctl kickstart.
+    /// Start the daemon: re-enable and kickstart.
     func start() throws {
+        _ = try? runLaunchctl(["enable", serviceTarget])
         try runLaunchctl(["kickstart", "-p", serviceTarget])
     }
 
-    /// Stop the daemon gracefully via SIGTERM.
+    /// Stop the daemon: disable to prevent auto-restart, then send SIGTERM.
     func stop() throws {
-        try runLaunchctl(["kill", "SIGTERM", serviceTarget])
+        try runLaunchctl(["disable", serviceTarget])
+        _ = try? runLaunchctl(["kill", "SIGTERM", serviceTarget])
     }
 
-    /// Restart the daemon (stop + start).
+    /// Restart the daemon (kill + kickstart, re-enable first).
     func restart() throws {
-        _ = try? runLaunchctl(["kill", "SIGTERM", serviceTarget])
-        // Brief delay for graceful shutdown
-        Thread.sleep(forTimeInterval: 0.5)
+        _ = try? runLaunchctl(["enable", serviceTarget])
         try runLaunchctl(["kickstart", "-kp", serviceTarget])
     }
 
