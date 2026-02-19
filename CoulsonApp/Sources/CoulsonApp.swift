@@ -81,16 +81,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         self.updater = updater
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let iconURL = Bundle.appResources.url(forResource: "MenuBarIcon", withExtension: "png"),
-           let icon2xURL = Bundle.appResources.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
-           let rep1x = NSImageRep(contentsOf: iconURL),
-           let rep2x = NSImageRep(contentsOf: icon2xURL)
-        {
-            let image = NSImage(size: NSSize(width: 18, height: 18))
-            rep1x.size = NSSize(width: 18, height: 18)
-            rep2x.size = NSSize(width: 18, height: 18)
-            image.addRepresentation(rep1x)
-            image.addRepresentation(rep2x)
+        if let image = Self.loadMenuBarIcon() {
             image.isTemplate = true
             statusItem?.button?.image = image
         } else {
@@ -117,6 +108,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 await vm.refreshAll()
             }
         }
+    }
+}
+
+// MARK: - Menu Bar Icon
+
+extension AppDelegate {
+    /// Loads the menu bar icon from bundle resources.
+    /// Xcode/Tuist builds produce a merged tiff; SPM `swift run` keeps separate PNGs.
+    static func loadMenuBarIcon() -> NSImage? {
+        let bundle = Bundle.appResources
+        let size = NSSize(width: 18, height: 18)
+
+        // Xcode build: COMBINE_HIDPI_IMAGES merges 1x+2x into a single tiff
+        if let url = bundle.url(forResource: "MenuBarIcon", withExtension: "tiff"),
+           let image = NSImage(contentsOf: url)
+        {
+            image.size = size
+            return image
+        }
+
+        // SPM build: separate PNG files
+        if let url1x = bundle.url(forResource: "MenuBarIcon", withExtension: "png"),
+           let url2x = bundle.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+           let rep1x = NSImageRep(contentsOf: url1x),
+           let rep2x = NSImageRep(contentsOf: url2x)
+        {
+            let image = NSImage(size: size)
+            rep1x.size = size
+            rep2x.size = size
+            image.addRepresentation(rep1x)
+            image.addRepresentation(rep2x)
+            return image
+        }
+
+        return nil
     }
 }
 

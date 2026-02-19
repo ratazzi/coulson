@@ -12,7 +12,7 @@ final class DaemonManager: ObservableObject {
 
     /// Whether we're running as a signed .app bundle (production) vs `swift run` (dev).
     static var isProductionApp: Bool {
-        Bundle.main.bundleIdentifier == "com.coulson.app"
+        Bundle.main.bundleIdentifier == "ac.hola.coulson"
     }
 
     private var serviceTarget: String {

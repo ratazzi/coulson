@@ -9,7 +9,7 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>
-    <string>com.coulson.app</string>
+    <string>ac.hola.coulson</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
@@ -42,8 +42,8 @@
         </dict>
     </array>
     <key>SUFeedURL</key>
-    <string>https://coulson.dev/appcast.xml</string>
+    <string>https://coulson.hola.ac/appcast.xml</string>
     <key>SUPublicEDKey</key>
-    <string>__SPARKLE_ED_KEY__</string>
+    <string>PjUKuY0BMBoamFyfAYOGYPvRk2JVWa3uYsaZyR7ivnQ=</string>
 </dict>
 </plist>

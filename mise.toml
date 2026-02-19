@@ -1,0 +1,72 @@
+[tasks.build-app]
+description = "Build Coulson.app (Rust + Swift via Tuist)"
+run = '''
+set -euo pipefail
+
+VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+BUILD_NUMBER="${BUILD_NUMBER:-$(date +%Y%m%d%H%M)}"
+SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+CREATE_DMG="${CREATE_DMG:-false}"
+
+echo "==> Building Coulson.app v${VERSION} (build ${BUILD_NUMBER})"
+
+# Step 1: Build Rust daemon
+echo "==> Building Rust daemon..."
+NATIVE_ARCH="$(uname -m)"
+HAS_X86=$(rustup target list --installed 2>/dev/null | grep -c x86_64-apple-darwin || true)
+
+if [[ "$NATIVE_ARCH" == "arm64" && "$HAS_X86" -ge 1 ]]; then
+    echo "    Building universal binary (arm64 + x86_64)..."
+    cargo build --release -p coulson --target aarch64-apple-darwin
+    cargo build --release -p coulson --target x86_64-apple-darwin
+    mkdir -p target/release
+    lipo -create \
+        target/aarch64-apple-darwin/release/coulson \
+        target/x86_64-apple-darwin/release/coulson \
+        -output target/release/coulson
+fi
+cargo build --release -p coulson
+
+# Step 2: Build Swift app via Tuist
+echo "==> Building Swift app via Tuist..."
+cd CoulsonApp
+tuist generate --no-open
+xcodebuild build \
+    -workspace Coulson.xcworkspace \
+    -scheme CoulsonApp \
+    -configuration Release \
+    -derivedDataPath build/DerivedData \
+    MARKETING_VERSION="$VERSION" \
+    CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+    ${SIGN_IDENTITY:+CODE_SIGN_IDENTITY="$SIGN_IDENTITY"} \
+    ${SIGN_IDENTITY:+OTHER_CODE_SIGN_FLAGS="--options runtime"}
+cd ..
+
+APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+
+echo "==> Built: $APP"
+
+# Step 3: Create DMG (optional)
+if [[ "$CREATE_DMG" == "true" ]]; then
+    DMG_PATH="build/Coulson-${VERSION}.dmg"
+    mkdir -p build
+    rm -f "$DMG_PATH"
+    echo "==> Creating DMG..."
+    hdiutil create -volname "Coulson" \
+        -srcfolder "$APP" \
+        -ov -format UDZO \
+        "$DMG_PATH"
+    echo "==> DMG: $DMG_PATH"
+fi
+
+echo "==> Done!"
+'''
+
+[tasks.notarize-log]
+description = "Fetch notarization log by submission ID"
+run = 'xcrun notarytool log "$@" --apple-id "$NOTARIZE_APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$NOTARIZE_PASSWORD"'
+raw = true
+
+[tasks.appcast]
+description = "Generate Sparkle appcast.xml from DMGs in build/"
+run = 'CoulsonApp/.build/artifacts/sparkle/Sparkle/bin/generate_appcast build/'

@@ -1,0 +1,242 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: "0 16 * * *" # 00:00 CST (UTC+8)
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check for recent commits
+        id: check
+        run: |
+          # Manual trigger or push: always build
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Scheduled trigger: check for commits in the last 24 hours
+          RECENT_COMMITS=$(git log --since="24 hours ago" --oneline | wc -l)
+          if [ "$RECENT_COMMITS" -gt 0 ]; then
+            echo "Found $RECENT_COMMITS commit(s) in the last 24 hours"
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "No commits in the last 24 hours, skipping build"
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+
+  build:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: brew install capnp cmake
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build Rust daemon
+        run: cargo build --release -p coulson
+
+      - name: Install Tuist
+        run: brew install tuist
+
+      - name: Build Swift app
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          BUILD_NUMBER="${{ github.run_number }}"
+          cd CoulsonApp
+          tuist generate --no-open
+          xcodebuild build \
+            -workspace Coulson.xcworkspace \
+            -scheme CoulsonApp \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+
+      - name: Import signing certificate
+        if: env.P12_BASE64 != ''
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$P12_BASE64" | base64 -d > cert.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm cert.p12
+
+      - name: Sign app
+        if: env.SIGN_IDENTITY != ''
+        env:
+          SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+        run: |
+          APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+
+          # Sign all Mach-O binaries inside-out
+          find "$APP" -type f -perm +111 | while read -r bin; do
+            if file "$bin" | grep -q "Mach-O"; then
+              echo "Signing: $bin"
+              codesign --force --options runtime --timestamp \
+                --sign "$SIGN_IDENTITY" "$bin"
+            fi
+          done
+
+          # Sign .xpc bundles, .app bundles, and frameworks
+          find "$APP" \( -name "*.xpc" -o -name "*.app" -o -name "*.framework" \) -not -path "$APP" | sort -r | while read -r bundle; do
+            echo "Signing bundle: $bundle"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$bundle"
+          done
+
+          # Sign the app bundle itself
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+
+          codesign -vv --deep --strict "$APP"
+
+      - name: Create DMG
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+          mkdir -p build
+          hdiutil create -volname "Coulson" \
+            -srcfolder "$APP" \
+            -ov -format UDZO \
+            "build/Coulson-${VERSION}.dmg"
+
+      - name: Notarize DMG
+        if: env.NOTARIZE_APPLE_ID != ''
+        env:
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG="$(ls build/Coulson-*.dmg)"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$NOTARIZE_APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$NOTARIZE_PASSWORD" \
+            --wait \
+            --output-format json | tee notarize-result.json
+
+          STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" < notarize-result.json)
+          SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" < notarize-result.json)
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$NOTARIZE_APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$NOTARIZE_PASSWORD"
+            exit 1
+          fi
+
+          xcrun stapler staple "$DMG"
+
+      - name: Generate appcast.xml
+        if: env.SPARKLE_PRIVATE_KEY != ''
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          GENERATE_APPCAST="$(find CoulsonApp/build/DerivedData -name generate_appcast -type f | head -1)"
+          KEY_FILE="$(mktemp)"
+          echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          "$GENERATE_APPCAST" --ed-key-file "$KEY_FILE" --download-url-prefix "https://coulson.hola.ac/" build/
+          rm -f "$KEY_FILE"
+          cat build/appcast.xml
+
+      - name: Upload daemon artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coulson-macos-arm64
+          path: target/release/coulson
+          retention-days: 30
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Coulson-app-dmg
+          path: build/Coulson-*.dmg
+          retention-days: 30
+
+      - name: Upload appcast
+        if: hashFiles('build/appcast.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: appcast
+          path: build/appcast.xml
+          retention-days: 30
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Delete old nightly release
+        uses: dev-drprasad/delete-tag-and-release@v1.0
+        with:
+          tag_name: nightly
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          delete_release: true
+        continue-on-error: true
+
+      - name: Create or Update Nightly Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: nightly
+          name: Nightly Build (${{ steps.date.outputs.date }})
+          body: |
+            Nightly Development Build
+
+            This is an automated nightly build from the latest `master` branch.
+
+            **Build Date:** ${{ steps.date.outputs.date }}
+            **Commit:** ${{ github.sha }}
+
+            Warning: These are unstable development builds and may contain bugs.
+            For stable releases, please use the [latest official release](https://github.com/${{ github.repository }}/releases/latest).
+
+            ## Downloads
+            - `Coulson-*.dmg` - macOS app (Apple Silicon)
+            - `coulson-macos-arm64` - CLI daemon only
+            - `appcast.xml` - Sparkle update feed
+          files: |
+            artifacts/Coulson-app-dmg/Coulson-*.dmg
+            artifacts/coulson-macos-arm64/coulson
+            artifacts/appcast/appcast.xml
+          draft: false
+          prerelease: true

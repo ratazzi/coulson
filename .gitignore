@@ -7,6 +7,14 @@ CoulsonApp/.build/
 CoulsonApp/.swiftpm/
 CoulsonApp/Package.resolved
 
+# Tuist generated (regenerate with `tuist generate`)
+CoulsonApp/*.xcodeproj
+CoulsonApp/*.xcworkspace
+CoulsonApp/Derived/
+
+# Xcode build artifacts
+CoulsonApp/build/
+
 # Xcode user files
 **/*.xcuserstate
 **/xcuserdata/
