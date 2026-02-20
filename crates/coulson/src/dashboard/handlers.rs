@@ -462,7 +462,7 @@ pub async fn action_restart_process(
         } = &app.target
         {
             let mut pm = state.shared.process_manager.lock().await;
-            pm.kill_process(app_id);
+            pm.kill_process(app_id).await;
             let _ = pm
                 .ensure_running(app_id, name, std::path::Path::new(root), kind)
                 .await;

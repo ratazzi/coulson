@@ -978,7 +978,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
         loop {
             sleep(Duration::from_secs(30)).await;
             let mut pm = reaper_pm.lock().await;
-            let reaped = pm.reap_idle();
+            let reaped = pm.reap_idle().await;
             if reaped > 0 {
                 info!(reaped, "reaped idle managed processes");
             }
@@ -991,7 +991,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
 
     {
         let mut pm = state.process_manager.lock().await;
-        pm.shutdown_all();
+        pm.shutdown_all().await;
     }
     tunnel::shutdown_all(&state.tunnels);
     tunnel::shutdown_all_app_tunnels(&state.app_tunnels);

@@ -469,7 +469,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 }
             };
             let mut pm = state.process_manager.lock().await;
-            pm.kill_process(params.app_id);
+            pm.kill_process(params.app_id).await;
             match pm
                 .ensure_running(params.app_id, &name, std::path::Path::new(&root), &kind)
                 .await

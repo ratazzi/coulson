@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use tokio::process::{Child, Command};
-use tracing::info;
+use tracing::{info, warn};
 
 use provider::{ManagedApp, ProcessSpec};
 
@@ -182,6 +182,10 @@ impl ProcessManager {
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
+        // SAFETY: process_group(0) places the child in a new process group (PGID = child PID).
+        // This lets us kill the entire tree (including grandchildren from dev servers).
+        cmd.process_group(0);
+
         let child = cmd
             .current_dir(&spec.working_dir)
             .kill_on_drop(true)
@@ -235,7 +239,7 @@ impl ProcessManager {
                     // Still not ready — check startup timeout
                     const STARTUP_TIMEOUT_SECS: u64 = 30;
                     if proc.started_at.elapsed() > Duration::from_secs(STARTUP_TIMEOUT_SECS) {
-                        let _ = proc.child.start_kill();
+                        kill_process_group(&mut proc.child).await;
                         let removed = self.processes.remove(&app_id).unwrap();
                         cleanup_listen_target(&removed.listen_target);
                         anyhow::bail!(
@@ -298,6 +302,8 @@ impl ProcessManager {
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
+        cmd.process_group(0);
+
         let child = cmd
             .current_dir(&spec.working_dir)
             .kill_on_drop(true)
@@ -323,10 +329,10 @@ impl ProcessManager {
     }
 
     /// Kill a specific managed process. Returns true if it was found and killed.
-    pub fn kill_process(&mut self, app_id: i64) -> bool {
+    pub async fn kill_process(&mut self, app_id: i64) -> bool {
         if let Some(mut proc) = self.processes.remove(&app_id) {
             info!(app_id, "killing managed process");
-            let _ = proc.child.start_kill();
+            kill_process_group(&mut proc.child).await;
             cleanup_listen_target(&proc.listen_target);
             true
         } else {
@@ -341,7 +347,7 @@ impl ProcessManager {
     }
 
     /// Kill processes idle longer than the configured timeout. Returns count reaped.
-    pub fn reap_idle(&mut self) -> usize {
+    pub async fn reap_idle(&mut self) -> usize {
         let now = Instant::now();
         let timeout = self.idle_timeout;
         let mut to_remove = Vec::new();
@@ -359,7 +365,7 @@ impl ProcessManager {
                     listen = %listen_target_display(&proc.listen_target),
                     "reaping idle managed process"
                 );
-                let _ = proc.child.start_kill();
+                kill_process_group(&mut proc.child).await;
                 cleanup_listen_target(&proc.listen_target);
             }
         }
@@ -368,14 +374,14 @@ impl ProcessManager {
     }
 
     /// Kill all managed processes (called on daemon shutdown).
-    pub fn shutdown_all(&mut self) {
+    pub async fn shutdown_all(&mut self) {
         for (app_id, mut proc) in self.processes.drain() {
             info!(
                 app_id,
                 listen = %listen_target_display(&proc.listen_target),
                 "shutting down managed process"
             );
-            let _ = proc.child.start_kill();
+            kill_process_group(&mut proc.child).await;
             cleanup_listen_target(&proc.listen_target);
         }
     }
@@ -423,5 +429,53 @@ fn listen_target_display(target: &ListenTarget) -> String {
     match target {
         ListenTarget::Uds(path) => path.to_string_lossy().to_string(),
         ListenTarget::Tcp { host, port } => format!("{host}:{port}"),
+    }
+}
+
+/// Kill an entire process group: SIGTERM first, then SIGKILL after a grace period.
+///
+/// Dev-mode processes (e.g. `bun run dev`, `npm run dev`) typically spawn child
+/// processes. Using `process_group(0)` when spawning places the entire tree in a
+/// new process group whose PGID equals the child PID. This function sends signals
+/// to the negative PGID, reaching all descendants.
+async fn kill_process_group(child: &mut Child) {
+    let Some(pid) = child.id() else {
+        // Already exited.
+        return;
+    };
+    let pgid = pid as i32;
+
+    // SIGTERM the whole group for graceful shutdown.
+    let ret = unsafe { libc::kill(-pgid, libc::SIGTERM) };
+    if ret != 0 {
+        // Process (group) may already be gone — fall back to direct kill.
+        let _ = child.start_kill();
+        return;
+    }
+
+    // Give a short grace period, then SIGKILL if still alive.
+    const GRACE_MS: u64 = 500;
+    tokio::time::sleep(Duration::from_millis(GRACE_MS)).await;
+
+    match child.try_wait() {
+        Ok(None) => {
+            // Still running — force kill the group.
+            let ret = unsafe { libc::kill(-pgid, libc::SIGKILL) };
+            if ret != 0 {
+                warn!(pid, "SIGKILL to process group failed, trying direct kill");
+                let _ = child.start_kill();
+            }
+        }
+        Ok(Some(_)) => {
+            // Leader exited but grandchildren may remain in the process group.
+            // PGID stays valid while any member is alive; if all exited,
+            // kill() harmlessly returns ESRCH.
+            unsafe { libc::kill(-pgid, libc::SIGKILL) };
+        }
+        Err(e) => {
+            // Cannot determine process state — skip group signal to avoid
+            // potential misfire on a recycled PGID.
+            warn!(pid, error = %e, "failed to check process status, skipping group kill");
+        }
     }
 }
