@@ -54,3 +54,8 @@ axum = { version = "0.8", features = ["tokio"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tower = { version = "0.5", features = ["util"] }
 percent-encoding = "2"
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
