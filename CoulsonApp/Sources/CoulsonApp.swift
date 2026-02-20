@@ -37,7 +37,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
-        NSApplication.shared.setActivationPolicy(.regular)
+        if !DaemonManager.isProductionApp {
+            NSApplication.shared.setActivationPolicy(.regular)
+        }
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -46,7 +48,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         {
             NSApplication.shared.applicationIconImage = icon
         }
-        NSApplication.shared.activate(ignoringOtherApps: true)
+        if !DaemonManager.isProductionApp {
+            NSApplication.shared.activate(ignoringOtherApps: true)
+        }
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {

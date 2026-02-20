@@ -17,7 +17,7 @@ let project = Project(
                 "CFBundleIconFile": "AppIcon",
                 "CFBundleShortVersionString": "$(MARKETING_VERSION)",
                 "CFBundleVersion": "$(CURRENT_PROJECT_VERSION)",
-                "LSUIElement": false,
+                "LSUIElement": true,
                 "NSHighResolutionCapable": true,
                 "CFBundleDocumentTypes": .array([
                     .dictionary([
