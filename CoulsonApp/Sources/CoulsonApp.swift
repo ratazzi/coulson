@@ -367,6 +367,27 @@ extension AppDelegate {
         }
     }
 
+    @objc func installCLI() {
+        guard let vm else { return }
+        Task { @MainActor in
+            do {
+                try vm.daemonManager.installCLI()
+                vm.objectWillChange.send()
+                let alert = NSAlert()
+                alert.messageText = "CLI Installed"
+                alert.informativeText = "You can now use the \"coulson\" command in your terminal."
+                alert.alertStyle = .informational
+                alert.runModal()
+            } catch {
+                let alert = NSAlert()
+                alert.messageText = "CLI Install Failed"
+                alert.informativeText = error.localizedDescription
+                alert.alertStyle = .warning
+                alert.runModal()
+            }
+        }
+    }
+
     @objc func openSettings() {
         NSApplication.shared.activate(ignoringOtherApps: true)
         for window in NSApplication.shared.windows where window.title.contains("Coulson") {

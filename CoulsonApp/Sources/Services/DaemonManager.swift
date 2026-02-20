@@ -206,9 +206,117 @@ final class DaemonManager: ObservableObject {
         return output
     }
 
+    // MARK: - CLI Install
+
+    private static let cliLinkPath = "/usr/local/bin/coulson"
+
+    /// Resolve the coulson binary path: bundle resource first, then cargo build output for dev mode.
+    private var cliTargetPath: String? {
+        if let path = daemonBinaryPath { return path }
+        let fm = FileManager.default
+        let cwd = fm.currentDirectoryPath
+        for candidate in ["target/release/coulson", "target/debug/coulson"] {
+            let path = (cwd as NSString).appendingPathComponent(candidate)
+            if fm.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    /// Whether the CLI symlink exists and points to the current binary.
+    var isCliInstalled: Bool {
+        guard let binaryPath = cliTargetPath else { return false }
+        let linkURL = URL(fileURLWithPath: Self.cliLinkPath)
+        // Check the symlink exists (not just that the resolved target exists)
+        let attrs = try? FileManager.default.attributesOfItem(atPath: Self.cliLinkPath)
+        guard attrs?[.type] as? FileAttributeType == .typeSymbolicLink else { return false }
+        // resolvingSymlinksInPath follows the link and resolves to a canonical absolute path
+        let resolved = linkURL.resolvingSymlinksInPath().path
+        let expected = URL(fileURLWithPath: binaryPath).resolvingSymlinksInPath().path
+        return resolved == expected
+    }
+
+    /// Check if an existing file at the CLI link path is safe to overwrite (symlink, not a regular file).
+    private func validateExistingCliPath() throws {
+        let linkPath = Self.cliLinkPath
+        let fm = FileManager.default
+
+        // attributesOfItem uses lstat — works for dangling symlinks unlike fileExists
+        guard let attrs = try? fm.attributesOfItem(atPath: linkPath) else { return }
+        let fileType = attrs[.type] as? FileAttributeType
+        if fileType == .typeSymbolicLink { return }
+
+        throw DaemonError.cliInstallFailed(
+            "\(linkPath) already exists and is not a symlink. Please remove it manually.")
+    }
+
+    /// Install CLI by creating a symlink at /usr/local/bin/coulson.
+    /// Uses AppleScript for administrator privileges if needed.
+    func installCLI() throws {
+        guard let binaryPath = cliTargetPath else {
+            throw DaemonError.noBinary
+        }
+
+        let linkPath = Self.cliLinkPath
+        let fm = FileManager.default
+
+        try validateExistingCliPath()
+
+        // Try without privilege escalation first
+        if fm.isWritableFile(atPath: "/usr/local/bin") {
+            try? fm.removeItem(atPath: linkPath)
+            try fm.createSymbolicLink(atPath: linkPath, withDestinationPath: binaryPath)
+            return
+        }
+
+        // Use AppleScript to escalate privileges
+        let escaped = binaryPath.replacingOccurrences(of: "'", with: "'\\''")
+        let script = "do shell script \"ln -sf '\(escaped)' '\(linkPath)'\" with administrator privileges"
+        guard let appleScript = NSAppleScript(source: script) else {
+            throw DaemonError.cliInstallFailed("Failed to create AppleScript")
+        }
+        var error: NSDictionary?
+        appleScript.executeAndReturnError(&error)
+        if let error {
+            let msg = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+            throw DaemonError.cliInstallFailed(msg)
+        }
+    }
+
+    /// Uninstall CLI by removing the symlink at /usr/local/bin/coulson.
+    func uninstallCLI() throws {
+        let linkPath = Self.cliLinkPath
+        let fm = FileManager.default
+
+        // attributesOfItem uses lstat — works for dangling symlinks unlike fileExists
+        guard let attrs = try? fm.attributesOfItem(atPath: linkPath) else { return }
+        let fileType = attrs[.type] as? FileAttributeType
+        guard fileType == .typeSymbolicLink else {
+            throw DaemonError.cliInstallFailed(
+                "\(linkPath) is not a symlink. Please remove it manually.")
+        }
+
+        // Try without privilege escalation first
+        if fm.isWritableFile(atPath: "/usr/local/bin") {
+            try fm.removeItem(atPath: linkPath)
+            return
+        }
+
+        let script = "do shell script \"rm -f '\(linkPath)'\" with administrator privileges"
+        guard let appleScript = NSAppleScript(source: script) else {
+            throw DaemonError.cliInstallFailed("Failed to create AppleScript")
+        }
+        var error: NSDictionary?
+        appleScript.executeAndReturnError(&error)
+        if let error {
+            let msg = error[NSAppleScript.errorMessage] as? String ?? "Unknown error"
+            throw DaemonError.cliInstallFailed(msg)
+        }
+    }
+
     enum DaemonError: Error, LocalizedError {
         case noBinary
         case launchctlFailed(args: String, status: Int32, output: String)
+        case cliInstallFailed(String)
 
         var errorDescription: String? {
             switch self {
@@ -216,6 +324,8 @@ final class DaemonManager: ObservableObject {
                 return "Daemon binary not found in app bundle"
             case .launchctlFailed(let args, let status, let output):
                 return "launchctl \(args) failed (\(status)): \(output)"
+            case .cliInstallFailed(let msg):
+                return "CLI install failed: \(msg)"
             }
         }
     }

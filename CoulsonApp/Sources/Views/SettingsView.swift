@@ -32,6 +32,21 @@ struct SettingsView: View {
                 if let version = vm.daemonManager.daemonVersion {
                     LabeledContent("Daemon Version", value: version)
                 }
+
+                LabeledContent("Command Line") {
+                    Button(vm.daemonManager.isCliInstalled ? "Uninstall CLI" : "Install CLI") {
+                        do {
+                            if vm.daemonManager.isCliInstalled {
+                                try vm.daemonManager.uninstallCLI()
+                            } else {
+                                try vm.daemonManager.installCLI()
+                            }
+                            vm.objectWillChange.send()
+                        } catch {
+                            vm.errorMessage = error.localizedDescription
+                        }
+                    }
+                }
             } header: {
                 Text("General")
             } footer: {

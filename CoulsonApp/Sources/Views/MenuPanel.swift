@@ -77,6 +77,19 @@ enum MenuBuilder {
             menu.addItem(.separator())
         }
 
+        // Install CLI (only show when not installed)
+        if !vm.daemonManager.isCliInstalled {
+            let cli = NSMenuItem(
+                title: "Install Command Line Tool...",
+                action: #selector(AppDelegate.installCLI),
+                keyEquivalent: "")
+            cli.image = NSImage(
+                systemSymbolName: "terminal", accessibilityDescription: nil)
+            cli.target = target
+            menu.addItem(cli)
+            menu.addItem(.separator())
+        }
+
         // Apps
         let apps = vm.sortedApps
         if apps.isEmpty {
