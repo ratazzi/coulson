@@ -4,7 +4,7 @@ use anyhow::bail;
 use serde_json::Value;
 use tracing::warn;
 
-use super::provider::{DetectedApp, ManagedApp, ProcessProvider, ProcessSpec};
+use super::provider::{DetectedApp, ListenTarget, ManagedApp, ProcessProvider, ProcessSpec};
 
 pub struct AsgiProvider;
 
@@ -70,7 +70,7 @@ impl ProcessProvider for AsgiProvider {
             args,
             env,
             working_dir: app.root.clone(),
-            socket_path,
+            listen_target: ListenTarget::Uds(socket_path),
         })
     }
 }

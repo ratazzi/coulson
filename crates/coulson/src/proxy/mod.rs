@@ -16,7 +16,7 @@ use serde::Serialize;
 use tera::{Context, Tera};
 
 use crate::domain::BackendTarget;
-use crate::process::{ProcessManagerHandle, StartStatus};
+use crate::process::{ListenTarget, ProcessManagerHandle, StartStatus};
 use crate::store::CapturedRequest;
 use crate::{RouteRule, SharedState};
 
@@ -251,9 +251,9 @@ impl ProxyHttp for BridgeProxy {
                                 })?
                         };
                         match status {
-                            StartStatus::Ready(socket_path) => {
+                            StartStatus::Ready(listen_target) => {
                                 pm_mark_active(&self.process_manager, *app_id).await;
-                                BackendTarget::UnixSocket { path: socket_path }
+                                listen_target_to_backend(listen_target)
                             }
                             StartStatus::Starting => {
                                 write_loading_page(session, name).await?;
@@ -348,9 +348,9 @@ impl ProxyHttp for BridgeProxy {
                     .map_err(|e| Error::explain(ErrorType::ConnectError, format!("{e}")))?
             };
             match status {
-                StartStatus::Ready(socket_path) => {
+                StartStatus::Ready(listen_target) => {
                     pm_mark_active(&self.process_manager, *app_id).await;
-                    BackendTarget::UnixSocket { path: socket_path }
+                    listen_target_to_backend(listen_target)
                 }
                 StartStatus::Starting => {
                     write_loading_page(session, name).await?;
@@ -1122,6 +1122,15 @@ fn should_rewrite_for_spa(path: &str) -> bool {
 // ---------------------------------------------------------------------------
 // Process manager helper
 // ---------------------------------------------------------------------------
+
+fn listen_target_to_backend(target: ListenTarget) -> BackendTarget {
+    match target {
+        ListenTarget::Uds(path) => BackendTarget::UnixSocket {
+            path: path.to_string_lossy().to_string(),
+        },
+        ListenTarget::Tcp { host, port } => BackendTarget::Tcp { host, port },
+    }
+}
 
 async fn pm_mark_active(pm: &ProcessManagerHandle, app_id: i64) {
     let mut pm = pm.lock().await;

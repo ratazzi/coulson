@@ -1050,9 +1050,8 @@ fn kind_str_to_app_kind(kind: &str) -> AppKind {
     match kind {
         "asgi" => AppKind::Asgi,
         "rack" => AppKind::Rack,
+        "node" => AppKind::Node,
         "docker" => AppKind::Container,
-        // Node and other future kinds default to Static for now
-        // until AppKind is extended.
         _ => AppKind::Static,
     }
 }
@@ -1062,6 +1061,7 @@ fn app_kind_to_str(kind: AppKind) -> &'static str {
     match kind {
         AppKind::Asgi => "asgi",
         AppKind::Rack => "rack",
+        AppKind::Node => "node",
         AppKind::Container => "container",
         AppKind::Static => "static",
     }

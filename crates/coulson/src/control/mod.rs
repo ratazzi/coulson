@@ -474,7 +474,17 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 .ensure_running(params.app_id, &name, std::path::Path::new(&root), &kind)
                 .await
             {
-                Ok(socket_path) => Ok(json!({ "restarted": true, "socket_path": socket_path })),
+                Ok(listen_target) => {
+                    let listen_json = match listen_target {
+                        crate::process::ListenTarget::Uds(path) => {
+                            json!({ "type": "uds", "path": path.to_string_lossy() })
+                        }
+                        crate::process::ListenTarget::Tcp { host, port } => {
+                            json!({ "type": "tcp", "host": host, "port": port })
+                        }
+                    };
+                    Ok(json!({ "restarted": true, "listen": listen_json }))
+                }
                 Err(e) => return internal_error(req.request_id, e.to_string()),
             }
         }

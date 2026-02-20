@@ -15,6 +15,7 @@ pub enum AppKind {
     Static,
     Rack,
     Asgi,
+    Node,
     Container,
 }
 

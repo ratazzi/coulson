@@ -273,6 +273,7 @@ impl AppRepository {
         let kind_enum = match kind {
             "asgi" => AppKind::Asgi,
             "rack" => AppKind::Rack,
+            "node" => AppKind::Node,
             "container" => AppKind::Container,
             _ => AppKind::Static,
         };
@@ -1105,6 +1106,7 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         "static" => AppKind::Static,
         "rack" => AppKind::Rack,
         "asgi" => AppKind::Asgi,
+        "node" => AppKind::Node,
         "container" => AppKind::Container,
         _ => AppKind::Static,
     };

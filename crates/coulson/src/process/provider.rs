@@ -15,13 +15,22 @@ pub struct DetectedApp {
     pub meta: Value,
 }
 
+/// How a managed process listens for connections.
+#[derive(Debug, Clone)]
+pub enum ListenTarget {
+    /// Unix domain socket (ASGI, Rack, etc.).
+    Uds(PathBuf),
+    /// TCP port (Node.js dev servers, etc.).
+    Tcp { host: String, port: u16 },
+}
+
 /// Full specification for starting a managed process, resolved by a provider.
 pub struct ProcessSpec {
     pub command: PathBuf,
     pub args: Vec<String>,
     pub env: HashMap<String, String>,
     pub working_dir: PathBuf,
-    pub socket_path: PathBuf,
+    pub listen_target: ListenTarget,
 }
 
 /// Context passed to a provider when resolving how to start an app.
@@ -183,6 +192,37 @@ pub async fn wait_for_uds_ready(path: &Path, timeout: Duration) -> Result<()> {
     }
 }
 
+/// Poll a TCP address until it accepts connections, or timeout.
+pub async fn wait_for_tcp_ready(host: &str, port: u16, timeout: Duration) -> Result<()> {
+    let addr = format!("{host}:{port}");
+    let start = std::time::Instant::now();
+    loop {
+        match tokio::net::TcpStream::connect(&addr).await {
+            Ok(stream) => {
+                drop(stream);
+                debug!(%addr, "managed process TCP health check passed");
+                return Ok(());
+            }
+            Err(_) => {
+                if start.elapsed() > timeout {
+                    anyhow::bail!(
+                        "managed process at {addr} failed to become ready within {timeout:?}"
+                    );
+                }
+                const TCP_POLL_INTERVAL_MS: u64 = 100;
+                tokio::time::sleep(Duration::from_millis(TCP_POLL_INTERVAL_MS)).await;
+            }
+        }
+    }
+}
+
+/// Allocate a free TCP port by binding to port 0 and reading the assigned port.
+pub fn allocate_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    Ok(port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,7 +251,7 @@ mod tests {
             }
         }
         fn resolve(&self, _app: &ManagedApp) -> Result<ProcessSpec> {
-            anyhow::bail!("dummy provider cannot resolve")
+            anyhow::bail!("dummy provider cannot resolve");
         }
     }
 

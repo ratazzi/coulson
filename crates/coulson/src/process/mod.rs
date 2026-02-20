@@ -5,7 +5,7 @@ mod docker;
 mod node;
 mod rack;
 
-pub use provider::ProviderRegistry;
+pub use provider::{ListenTarget, ProviderRegistry};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,12 +35,10 @@ pub fn new_process_manager(
 /// Create the default provider registry with all built-in providers.
 ///
 /// Registration order determines auto-detection priority.
-/// Only register providers whose resolve() is implemented.
-/// Rack, Node, Docker are detected but not yet runnable — keep them
-/// out of the registry so they don't preempt static `public/` fallback.
 pub fn default_registry() -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(asgi::AsgiProvider);
+    reg.register(node::NodeProvider);
     reg
 }
 
@@ -53,7 +51,7 @@ pub struct ProcessManager {
 
 struct ManagedProcess {
     child: Child,
-    socket_path: PathBuf,
+    listen_target: ListenTarget,
     started_at: Instant,
     last_active: Instant,
     #[allow(dead_code)]
@@ -62,9 +60,9 @@ struct ManagedProcess {
 }
 
 pub enum StartStatus {
-    /// Process is running and UDS is connectable.
-    Ready(String),
-    /// Process has been spawned but UDS is not yet ready.
+    /// Process is running and ready to accept connections.
+    Ready(ListenTarget),
+    /// Process has been spawned but is not yet ready.
     Starting,
 }
 
@@ -73,7 +71,7 @@ pub struct ProcessInfo {
     pub app_id: i64,
     pub pid: u32,
     pub kind: String,
-    pub socket_path: String,
+    pub listen_address: String,
     pub uptime_secs: u64,
     pub idle_secs: u64,
     pub alive: bool,
@@ -103,7 +101,7 @@ impl ProcessManager {
                     app_id: *app_id,
                     pid: proc.child.id().unwrap_or(0),
                     kind: proc.kind.clone(),
-                    socket_path: proc.socket_path.to_string_lossy().to_string(),
+                    listen_address: listen_target_display(&proc.listen_target),
                     uptime_secs: now.duration_since(proc.started_at).as_secs(),
                     idle_secs: now.duration_since(proc.last_active).as_secs(),
                     alive,
@@ -112,7 +110,7 @@ impl ProcessManager {
             .collect()
     }
 
-    /// Returns the UDS path for the managed app, starting the process if needed.
+    /// Returns the listen target for the managed app, starting the process if needed.
     ///
     /// The `kind` parameter selects the provider (e.g. "asgi", "rack", "node").
     pub async fn ensure_running(
@@ -121,18 +119,18 @@ impl ProcessManager {
         name: &str,
         root: &Path,
         kind: &str,
-    ) -> anyhow::Result<String> {
+    ) -> anyhow::Result<ListenTarget> {
         // Check if already running and alive
         if let Some(proc) = self.processes.get_mut(&app_id) {
             match proc.child.try_wait() {
                 Ok(None) => {
                     proc.last_active = Instant::now();
-                    return Ok(proc.socket_path.to_string_lossy().to_string());
+                    return Ok(proc.listen_target.clone());
                 }
                 _ => {
                     info!(app_id, "managed process exited, will restart");
                     let removed = self.processes.remove(&app_id).unwrap();
-                    cleanup_socket(&removed.socket_path);
+                    cleanup_listen_target(&removed.listen_target);
                 }
             }
         }
@@ -163,14 +161,14 @@ impl ProcessManager {
         info!(
             app_id,
             kind,
-            socket = %spec.socket_path.display(),
+            listen = %listen_target_display(&spec.listen_target),
             command = %spec.command.display(),
             root = %root.display(),
             "starting managed process via {} provider",
             prov.display_name()
         );
 
-        cleanup_socket(&spec.socket_path);
+        cleanup_listen_target(&spec.listen_target);
 
         let log_path = sockets_dir.join(format!("{name}.log"));
         let log_file = std::fs::File::create(&log_path)
@@ -192,20 +190,15 @@ impl ProcessManager {
             .spawn()
             .with_context(|| format!("failed to spawn {} for {app_id}", spec.command.display()))?;
 
-        const UDS_READY_TIMEOUT_SECS: u64 = 30;
-        provider::wait_for_uds_ready(
-            &spec.socket_path,
-            Duration::from_secs(UDS_READY_TIMEOUT_SECS),
-        )
-        .await?;
+        const READY_TIMEOUT_SECS: u64 = 30;
+        wait_for_ready(&spec.listen_target, Duration::from_secs(READY_TIMEOUT_SECS)).await?;
 
-        let path_str = spec.socket_path.to_string_lossy().to_string();
         let now = Instant::now();
         self.processes.insert(
             app_id,
             ManagedProcess {
                 child,
-                socket_path: spec.socket_path,
+                listen_target: spec.listen_target.clone(),
                 started_at: now,
                 last_active: now,
                 kind: kind.to_string(),
@@ -213,10 +206,10 @@ impl ProcessManager {
             },
         );
 
-        Ok(path_str)
+        Ok(spec.listen_target)
     }
 
-    /// Non-blocking variant: spawns the process if needed but does NOT wait for UDS readiness.
+    /// Non-blocking variant: spawns the process if needed but does NOT wait for readiness.
     /// Returns `StartStatus::Ready` if the process is running and connectable,
     /// or `StartStatus::Starting` if the process has been spawned but isn't ready yet.
     pub async fn ensure_started(
@@ -231,24 +224,20 @@ impl ProcessManager {
                 Ok(None) => {
                     if proc.ready {
                         proc.last_active = Instant::now();
-                        return Ok(StartStatus::Ready(
-                            proc.socket_path.to_string_lossy().to_string(),
-                        ));
+                        return Ok(StartStatus::Ready(proc.listen_target.clone()));
                     }
-                    // Not yet marked ready — probe the UDS
-                    if quick_uds_check(&proc.socket_path).await {
+                    // Not yet marked ready — probe
+                    if quick_ready_check(&proc.listen_target).await {
                         proc.ready = true;
                         proc.last_active = Instant::now();
-                        return Ok(StartStatus::Ready(
-                            proc.socket_path.to_string_lossy().to_string(),
-                        ));
+                        return Ok(StartStatus::Ready(proc.listen_target.clone()));
                     }
                     // Still not ready — check startup timeout
                     const STARTUP_TIMEOUT_SECS: u64 = 30;
                     if proc.started_at.elapsed() > Duration::from_secs(STARTUP_TIMEOUT_SECS) {
                         let _ = proc.child.start_kill();
                         let removed = self.processes.remove(&app_id).unwrap();
-                        cleanup_socket(&removed.socket_path);
+                        cleanup_listen_target(&removed.listen_target);
                         anyhow::bail!(
                             "managed process for {name} (app_id={app_id}) failed to become ready within {STARTUP_TIMEOUT_SECS}s"
                         );
@@ -258,12 +247,12 @@ impl ProcessManager {
                 _ => {
                     info!(app_id, "managed process exited, will restart");
                     let removed = self.processes.remove(&app_id).unwrap();
-                    cleanup_socket(&removed.socket_path);
+                    cleanup_listen_target(&removed.listen_target);
                 }
             }
         }
 
-        // Spawn a new process (same as ensure_running but skip wait_for_uds_ready)
+        // Spawn a new process (same as ensure_running but skip readiness wait)
         let prov = self
             .registry
             .get(kind)
@@ -288,14 +277,14 @@ impl ProcessManager {
         info!(
             app_id,
             kind,
-            socket = %spec.socket_path.display(),
+            listen = %listen_target_display(&spec.listen_target),
             command = %spec.command.display(),
             root = %root.display(),
             "starting managed process via {} provider (non-blocking)",
             prov.display_name()
         );
 
-        cleanup_socket(&spec.socket_path);
+        cleanup_listen_target(&spec.listen_target);
 
         let log_path = sockets_dir.join(format!("{name}.log"));
         let log_file = std::fs::File::create(&log_path)
@@ -322,7 +311,7 @@ impl ProcessManager {
             app_id,
             ManagedProcess {
                 child,
-                socket_path: spec.socket_path,
+                listen_target: spec.listen_target,
                 started_at: now,
                 last_active: now,
                 kind: kind.to_string(),
@@ -338,7 +327,7 @@ impl ProcessManager {
         if let Some(mut proc) = self.processes.remove(&app_id) {
             info!(app_id, "killing managed process");
             let _ = proc.child.start_kill();
-            cleanup_socket(&proc.socket_path);
+            cleanup_listen_target(&proc.listen_target);
             true
         } else {
             false
@@ -367,11 +356,11 @@ impl ProcessManager {
             if let Some(mut proc) = self.processes.remove(app_id) {
                 info!(
                     app_id,
-                    socket = %proc.socket_path.display(),
+                    listen = %listen_target_display(&proc.listen_target),
                     "reaping idle managed process"
                 );
                 let _ = proc.child.start_kill();
-                cleanup_socket(&proc.socket_path);
+                cleanup_listen_target(&proc.listen_target);
             }
         }
 
@@ -383,26 +372,56 @@ impl ProcessManager {
         for (app_id, mut proc) in self.processes.drain() {
             info!(
                 app_id,
-                socket = %proc.socket_path.display(),
+                listen = %listen_target_display(&proc.listen_target),
                 "shutting down managed process"
             );
             let _ = proc.child.start_kill();
-            cleanup_socket(&proc.socket_path);
+            cleanup_listen_target(&proc.listen_target);
         }
     }
 }
 
-fn cleanup_socket(path: &Path) {
-    let _ = std::fs::remove_file(path);
+/// Clean up resources associated with a listen target.
+/// Only UDS targets have socket files to remove.
+fn cleanup_listen_target(target: &ListenTarget) {
+    if let ListenTarget::Uds(path) = target {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
-/// Single-shot UDS probe with a short timeout.
-async fn quick_uds_check(path: &Path) -> bool {
+/// Wait for a listen target to become ready (UDS or TCP).
+async fn wait_for_ready(target: &ListenTarget, timeout: Duration) -> anyhow::Result<()> {
+    match target {
+        ListenTarget::Uds(path) => provider::wait_for_uds_ready(path, timeout).await,
+        ListenTarget::Tcp { host, port } => {
+            provider::wait_for_tcp_ready(host, *port, timeout).await
+        }
+    }
+}
+
+/// Single-shot readiness probe with a short timeout.
+async fn quick_ready_check(target: &ListenTarget) -> bool {
     const PROBE_TIMEOUT_MS: u64 = 200;
-    tokio::time::timeout(
-        Duration::from_millis(PROBE_TIMEOUT_MS),
-        tokio::net::UnixStream::connect(path),
-    )
-    .await
-    .is_ok_and(|r| r.is_ok())
+    let timeout = Duration::from_millis(PROBE_TIMEOUT_MS);
+    match target {
+        ListenTarget::Uds(path) => {
+            tokio::time::timeout(timeout, tokio::net::UnixStream::connect(path))
+                .await
+                .is_ok_and(|r| r.is_ok())
+        }
+        ListenTarget::Tcp { host, port } => {
+            let addr = format!("{host}:{port}");
+            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&addr))
+                .await
+                .is_ok_and(|r| r.is_ok())
+        }
+    }
+}
+
+/// Human-readable display of a listen target.
+fn listen_target_display(target: &ListenTarget) -> String {
+    match target {
+        ListenTarget::Uds(path) => path.to_string_lossy().to_string(),
+        ListenTarget::Tcp { host, port } => format!("{host}:{port}"),
+    }
 }
