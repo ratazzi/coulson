@@ -224,6 +224,29 @@ pub async fn sse_app_detail(
         .into_response()
 }
 
+pub async fn action_toggle_lan_access(
+    State(state): State<DashboardState>,
+    Path(id): Path<String>,
+) -> Response {
+    if let Ok(app) = service::app_get_by_name(&state.shared, &id) {
+        let _ = service::app_update_settings(
+            &state.shared,
+            app.id.0,
+            &service::UpdateSettingsParams {
+                cors_enabled: None,
+                force_https: None,
+                basic_auth_user: None,
+                basic_auth_pass: None,
+                spa_rewrite: None,
+                listen_port: None,
+                timeout_ms: None,
+                lan_access: Some(!app.lan_access),
+            },
+        );
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
 pub async fn action_scan(State(state): State<DashboardState>) -> Response {
     let stats = service::apps_scan(&state.shared);
 
@@ -391,6 +414,7 @@ pub async fn action_toggle_cors(
                 spa_rewrite: None,
                 listen_port: None,
                 timeout_ms: None,
+                lan_access: None,
             },
         );
     }
@@ -413,6 +437,7 @@ pub async fn action_toggle_https(
                 spa_rewrite: None,
                 listen_port: None,
                 timeout_ms: None,
+                lan_access: None,
             },
         );
     }
@@ -435,6 +460,7 @@ pub async fn action_toggle_spa(
                 spa_rewrite: Some(!app.spa_rewrite),
                 listen_port: None,
                 timeout_ms: None,
+                lan_access: None,
             },
         );
     }
@@ -658,6 +684,7 @@ pub async fn action_update_settings(
             spa_rewrite: None,
             listen_port,
             timeout_ms,
+            lan_access: None,
         },
     ) {
         Ok(_) => Redirect::to(&format!("/apps/{id}")).into_response(),
@@ -864,6 +891,7 @@ pub async fn action_set_basic_auth(
                 spa_rewrite: None,
                 listen_port: None,
                 timeout_ms: None,
+                lan_access: None,
             },
         );
     }

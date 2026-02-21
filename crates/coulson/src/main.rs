@@ -70,6 +70,7 @@ pub struct RouteRule {
     pub static_root: Option<String>,
     pub app_id: Option<i64>,
     pub inspect_enabled: bool,
+    pub lan_access: bool,
 }
 
 #[derive(Clone)]
@@ -122,6 +123,7 @@ impl SharedState {
             let rule = RouteRule {
                 app_id: Some(app.id.0),
                 inspect_enabled: app.inspect_enabled,
+                lan_access: app.lan_access,
                 target: app.target,
                 path_prefix: app.path_prefix,
                 timeout_ms: app.timeout_ms,
@@ -352,6 +354,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
     let registry = Arc::new(process::default_registry());
     let process_manager =
         process::new_process_manager(idle_timeout, Arc::clone(&registry), cfg.runtime_dir.clone());
+
     Ok(SharedState {
         store,
         routes: Arc::new(RwLock::new(HashMap::new())),
@@ -569,21 +572,25 @@ fn run_doctor(cfg: CoulsonConfig, check_pf: bool) -> anyhow::Result<()> {
         Err(_) => print_check(true, "no scan warnings file (OK if first run)"),
     }
 
-    // 7. LAN access
-    if cfg.lan_access {
+    // 7. LAN access (per-app)
+    if cfg.listen_http.ip().is_unspecified() {
         print_check(
             true,
-            &format!("LAN access enabled, proxy on {}", cfg.listen_http),
+            &format!(
+                "proxy on {} (per-app LAN access available)",
+                cfg.listen_http
+            ),
         );
-        if cfg.listen_http.ip().is_loopback() {
-            print_warn("proxy binds to loopback but LAN access is on — LAN clients cannot connect");
-            issues += 1;
-        }
+    } else if cfg.listen_http.ip().is_loopback() {
+        print_check(
+            true,
+            &format!(
+                "proxy on {} (loopback only, per-app LAN access requires 0.0.0.0)",
+                cfg.listen_http
+            ),
+        );
     } else {
-        print_check(
-            true,
-            &format!("LAN access disabled (loopback only, {})", cfg.listen_http),
-        );
+        print_check(true, &format!("proxy on {}", cfg.listen_http));
     }
 
     // 8. TLS certificates

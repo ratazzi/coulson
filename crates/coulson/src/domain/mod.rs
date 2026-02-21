@@ -166,6 +166,7 @@ pub struct AppSpec {
     pub app_tunnel_dns_id: Option<String>,
     pub app_tunnel_creds: Option<String>,
     pub inspect_enabled: bool,
+    pub lan_access: bool,
     pub fs_entry: Option<String>,
     pub enabled: bool,
     pub created_at: OffsetDateTime,

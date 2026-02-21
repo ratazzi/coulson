@@ -141,6 +141,10 @@ pub fn templates() -> &'static Tera {
                     "partials/request_row.html",
                     include_str!("templates/partials/request_row.html"),
                 ),
+                (
+                    "partials/lan_toggle.html",
+                    include_str!("templates/partials/lan_toggle.html"),
+                ),
             ])
             .expect("template parse error");
             tera.autoescape_on(vec![".html"]);
@@ -175,6 +179,7 @@ pub struct AppView {
     pub timeout_ms: Option<u64>,
     pub listen_port: Option<u16>,
     pub inspect_enabled: bool,
+    pub lan_access: bool,
     pub app_tunnel_token_hint: bool,
 }
 
@@ -220,6 +225,7 @@ impl AppView {
             timeout_ms: app.timeout_ms,
             listen_port: app.listen_port,
             inspect_enabled: app.inspect_enabled,
+            lan_access: app.lan_access,
             app_tunnel_token_hint: app.app_tunnel_creds.is_some(),
         }
     }

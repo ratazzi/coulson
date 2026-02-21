@@ -33,6 +33,16 @@
     </form>
   </div>
   <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
+  <div class="flex items-center justify-between px-5 py-3">
+    <span class="text-sm text-zinc-500 dark:text-zinc-400">LAN Access</span>
+    <form method="post" action="/apps/{{ app.name }}/toggle-lan">
+      <button type="submit" class="inline-flex items-center gap-1.5 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100">
+        <span class="h-2 w-2 rounded-full {% if app.lan_access %}bg-emerald-500{% else %}bg-zinc-300 dark:bg-zinc-600{% endif %}"></span>
+        {% if app.lan_access %}On{% else %}Off{% endif %}
+      </button>
+    </form>
+  </div>
+  <div class="border-t border-zinc-100 dark:border-zinc-800"></div>
   <div class="px-5 py-3">
     <div class="flex items-center justify-between">
       <span class="text-sm text-zinc-500 dark:text-zinc-400">Basic Auth</span>

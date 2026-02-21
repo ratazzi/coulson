@@ -120,6 +120,7 @@ impl AppRepository {
               app_tunnel_creds TEXT,
               share_auth INTEGER NOT NULL DEFAULT 0,
               inspect_enabled INTEGER NOT NULL DEFAULT 0,
+              lan_access INTEGER NOT NULL DEFAULT 0,
               fs_entry TEXT,
               UNIQUE(domain, path_prefix)
             );
@@ -171,6 +172,7 @@ impl AppRepository {
             "ALTER TABLE apps ADD COLUMN app_tunnel_creds TEXT",
             "ALTER TABLE apps ADD COLUMN share_auth INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE apps ADD COLUMN inspect_enabled INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE apps ADD COLUMN lan_access INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE apps ADD COLUMN fs_entry TEXT",
         ] {
             add_column_if_missing(&conn, sql)?;
@@ -253,6 +255,7 @@ impl AppRepository {
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
             inspect_enabled: false,
+            lan_access: false,
             fs_entry: None,
             enabled: true,
             created_at: now,
@@ -322,6 +325,7 @@ impl AppRepository {
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
             inspect_enabled: false,
+            lan_access: false,
             fs_entry: None,
             enabled: true,
             created_at: now,
@@ -379,6 +383,7 @@ impl AppRepository {
             app_tunnel_dns_id: None,
             app_tunnel_creds: None,
             inspect_enabled: false,
+            lan_access: false,
             fs_entry: None,
             enabled: true,
             created_at: now,
@@ -660,6 +665,7 @@ impl AppRepository {
         spa_rewrite: Option<bool>,
         listen_port: Option<Option<u16>>,
         timeout_ms: Option<Option<u64>>,
+        lan_access: Option<bool>,
     ) -> anyhow::Result<bool> {
         let now = OffsetDateTime::now_utc().unix_timestamp();
         let conn = self.conn.lock();
@@ -701,6 +707,11 @@ impl AppRepository {
         if let Some(v) = timeout_ms {
             sets.push(format!("timeout_ms = ?{idx}"));
             values.push(Box::new(v.map(|t| t as i64)));
+            idx += 1;
+        }
+        if let Some(v) = lan_access {
+            sets.push(format!("lan_access = ?{idx}"));
+            values.push(Box::new(if v { 1i64 } else { 0 }));
             idx += 1;
         }
 
@@ -1061,7 +1072,7 @@ impl AppRepository {
     }
 }
 
-const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,force_https,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled,fs_entry";
+const COLS: &str = "id,name,kind,domain,path_prefix,target_type,target_value,timeout_ms,enabled,created_at,updated_at,cors_enabled,force_https,basic_auth_user,basic_auth_pass,spa_rewrite,listen_port,tunnel_url,tunnel_mode,app_tunnel_id,app_tunnel_domain,app_tunnel_dns_id,app_tunnel_creds,inspect_enabled,lan_access,fs_entry";
 
 fn backend_target_from_db(
     id: i64,
@@ -1156,7 +1167,8 @@ fn row_to_app(row: &rusqlite::Row<'_>, suffix: &str) -> rusqlite::Result<AppSpec
         app_tunnel_dns_id: row.get::<_, Option<String>>(21).unwrap_or(None),
         app_tunnel_creds: row.get::<_, Option<String>>(22).unwrap_or(None),
         inspect_enabled: row.get::<_, i64>(23).unwrap_or(0) == 1,
-        fs_entry: row.get::<_, Option<String>>(24).unwrap_or(None),
+        lan_access: row.get::<_, i64>(24).unwrap_or(0) == 1,
+        fs_entry: row.get::<_, Option<String>>(25).unwrap_or(None),
     })
 }
 

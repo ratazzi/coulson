@@ -115,6 +115,7 @@ struct UpdateSettingsParams {
     basic_auth_pass: Option<Option<String>>,
     spa_rewrite: Option<bool>,
     listen_port: Option<Option<u16>>,
+    lan_access: Option<bool>,
     tunnel_mode: Option<TunnelMode>,
     app_tunnel_domain: Option<String>,
     app_tunnel_token: Option<String>,
@@ -261,6 +262,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             "http_port": state.listen_http.port(),
             "https_port": state.listen_https.map(|a| a.port()),
             "runtime_dir": state.runtime_dir.to_string_lossy(),
+            "lan_access": state.lan_access,
         })),
         "app.list" => service::app_list(state)
             .map(|apps| json!({ "apps": apps }))
@@ -384,6 +386,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     spa_rewrite: params.spa_rewrite,
                     listen_port: params.listen_port,
                     timeout_ms: None,
+                    lan_access: params.lan_access,
                 },
             ) {
                 return render_err(req.request_id, ControlError::from(e));

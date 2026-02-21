@@ -58,6 +58,10 @@ pub fn router(state: DashboardState) -> Router {
             "/settings/default-app",
             post(handlers::action_set_default_app),
         )
+        .route(
+            "/apps/{id}/toggle-lan",
+            post(handlers::action_toggle_lan_access),
+        )
         .route("/scan", post(handlers::action_scan))
         .route("/apps/{id}/toggle", post(handlers::action_toggle))
         .route("/apps/{id}/delete", post(handlers::action_delete))

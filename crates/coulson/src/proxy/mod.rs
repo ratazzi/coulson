@@ -195,6 +195,10 @@ impl ProxyHttp for BridgeProxy {
 
         // Dashboard dedicated domain: dashboard.{suffix}
         if crate::dashboard::is_dashboard_host(&host, &self.shared.domain_suffix) {
+            if !is_loopback_client(session) {
+                write_error_page(session, 403, "lan_access_denied").await?;
+                return Ok(true);
+            }
             crate::dashboard::bridge(session, self.dashboard_router.clone()).await?;
             return Ok(true);
         }
@@ -214,6 +218,11 @@ impl ProxyHttp for BridgeProxy {
                     select_route(routes.get(app_domain.as_str()), &req_path)
                 };
                 if let Some(route) = route {
+                    // Per-app LAN access gate (same as normal routing)
+                    if !route.lan_access && !is_loopback_client(session) {
+                        write_error_page(session, 403, "lan_access_denied").await?;
+                        return Ok(true);
+                    }
                     // Run the same pipeline as normal routing below
                     if mw_auth(session, &route).await? == Flow::Done {
                         return Ok(true);
@@ -294,6 +303,10 @@ impl ProxyHttp for BridgeProxy {
                 }
                 // default_app route not found → fall through to dashboard
             }
+            if !is_loopback_client(session) {
+                write_error_page(session, 403, "lan_access_denied").await?;
+                return Ok(true);
+            }
             crate::dashboard::bridge(session, self.dashboard_router.clone()).await?;
             return Ok(true);
         }
@@ -309,6 +322,12 @@ impl ProxyHttp for BridgeProxy {
             write_error_page(session, 404, "route_not_found").await?;
             return Ok(true);
         };
+
+        // Per-app LAN access gate: reject non-loopback clients when disabled
+        if !route.lan_access && !is_loopback_client(session) {
+            write_error_page(session, 403, "lan_access_denied").await?;
+            return Ok(true);
+        }
 
         // --- Middleware pipeline ---
         if mw_auth(session, &route).await? == Flow::Done {
@@ -588,10 +607,13 @@ fn run_proxy_blocking(
         },
     );
     service.add_tcp(bind);
-    // Also listen on IPv6 loopback so mDNS-resolved AAAA connections work
+    // Also listen on IPv6 so mDNS-resolved AAAA connections work
     if let Ok(addr) = bind.parse::<std::net::SocketAddr>() {
         if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
             let v6_bind = format!("[::1]:{}", addr.port());
+            service.add_tcp(&v6_bind);
+        } else if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED {
+            let v6_bind = format!("[::]:{}", addr.port());
             service.add_tcp(&v6_bind);
         }
     }
@@ -603,8 +625,14 @@ fn run_proxy_blocking(
         tls_settings.enable_h2();
         service.add_tls_with_settings(&tls.bind, None, tls_settings);
         if let Ok(addr) = tls.bind.parse::<std::net::SocketAddr>() {
-            if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
-                let v6_bind = format!("[::1]:{}", addr.port());
+            let v6_bind = if addr.ip() == std::net::Ipv4Addr::LOCALHOST {
+                Some(format!("[::1]:{}", addr.port()))
+            } else if addr.ip() == std::net::Ipv4Addr::UNSPECIFIED {
+                Some(format!("[::]:{}", addr.port()))
+            } else {
+                None
+            };
+            if let Some(v6_bind) = v6_bind {
                 let mut v6_settings = pingora::listeners::tls::TlsSettings::intermediate(
                     &tls.cert_path,
                     &tls.key_path,
@@ -1178,6 +1206,11 @@ async fn write_error_page(session: &mut Session, status: u16, message: &str) -> 
             "The upstream server is not reachable.",
             "Check that your app is running and listening on the configured port.",
         ),
+        (403, "lan_access_denied") => (
+            "Forbidden",
+            "LAN access is not enabled for this app.",
+            "Enable LAN access for this app in the dashboard or via the <code>app.update</code> API.",
+        ),
         (400, "missing_host") => (
             "Bad Request",
             "The request is missing a Host header.",
@@ -1227,6 +1260,14 @@ async fn write_error_page(session: &mut Session, status: u16, message: &str) -> 
         .write_response_body(Some(Bytes::from(body)), true)
         .await?;
     Ok(())
+}
+
+fn is_loopback_client(session: &Session) -> bool {
+    session
+        .client_addr()
+        .and_then(|a| a.as_inet())
+        .map(|inet| inet.ip().is_loopback())
+        .unwrap_or(false)
 }
 
 fn extract_host(raw: Option<&str>) -> Option<String> {
@@ -1416,6 +1457,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         let out = resolve_target(&routes, "www.myapp.coulson.local", "coulson.local", "/")
@@ -1450,6 +1492,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         let out = resolve_target(
@@ -1490,6 +1533,7 @@ mod tests {
                     static_root: None,
                     app_id: None,
                     inspect_enabled: false,
+                    lan_access: false,
                 },
                 RouteRule {
                     target: BackendTarget::Tcp {
@@ -1507,6 +1551,7 @@ mod tests {
                     static_root: None,
                     app_id: None,
                     inspect_enabled: false,
+                    lan_access: false,
                 },
             ],
         );
@@ -1544,6 +1589,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
@@ -1575,6 +1621,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         routes.insert(
@@ -1595,6 +1642,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         let out = resolve_target(&routes, "api.myapp.coulson.local", "coulson.local", "/")
@@ -1626,6 +1674,7 @@ mod tests {
                 static_root: None,
                 app_id: None,
                 inspect_enabled: false,
+                lan_access: false,
             }],
         );
         assert!(resolve_target(&routes, "myapp.coulson.local", "coulson.local", "/").is_none());
@@ -1703,6 +1752,7 @@ mod tests {
             static_root: None,
             app_id: None,
             inspect_enabled: false,
+            lan_access: false,
         }
     }
 

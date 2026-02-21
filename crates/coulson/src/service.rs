@@ -113,6 +113,7 @@ pub struct UpdateSettingsParams {
     pub spa_rewrite: Option<bool>,
     pub listen_port: Option<Option<u16>>,
     pub timeout_ms: Option<Option<u64>>,
+    pub lan_access: Option<bool>,
 }
 
 pub fn app_update_settings(
@@ -129,6 +130,7 @@ pub fn app_update_settings(
         params.spa_rewrite,
         params.listen_port,
         params.timeout_ms,
+        params.lan_access,
     ) {
         Ok(true) => {
             state

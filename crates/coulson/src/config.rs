@@ -227,9 +227,11 @@ impl CoulsonConfig {
             cfg.listen_https = Some(SocketAddr::from((cfg.listen_http.ip(), port)));
         }
 
-        // When LAN access enabled and listen address not explicitly set, bind to all interfaces
+        // Always bind 0.0.0.0 (unless listen address explicitly set) so LAN toggle
+        // can take effect at runtime without rebinding the port. Access control is
+        // enforced at the proxy layer via peer IP filtering.
         let explicit_listen_any = explicit_listen.is_some() || file.listen_http.is_some();
-        if cfg.lan_access && !explicit_listen_any {
+        if !explicit_listen_any {
             let port = cfg.listen_http.port();
             cfg.listen_http = SocketAddr::from(([0, 0, 0, 0], port));
             if let Some(ref mut https) = cfg.listen_https {
