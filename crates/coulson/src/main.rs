@@ -199,7 +199,7 @@ enum Commands {
         /// Port override (for directory project mode)
         #[arg(long)]
         port: Option<u16>,
-        /// Also start a tunnel (not yet implemented)
+        /// Also start a quick tunnel after adding
         #[arg(long)]
         tunnel: bool,
     },
@@ -1168,7 +1168,7 @@ fn run_add(
 ) -> anyhow::Result<()> {
     match (name.as_deref(), target.as_deref()) {
         // Manual proxy mode: coulson add <name> <target>
-        (Some(n), Some(t)) => run_add_manual(&cfg, n, t),
+        (Some(n), Some(t)) => run_add_manual(&cfg, n, t, tunnel),
         // Directory project mode: coulson add [--port P]
         (None, None) => run_add_directory(&cfg, port, tunnel),
         // name only without target: treat as directory mode with --name override
@@ -1282,6 +1282,9 @@ fn run_add_directory_inner(
             )
             .cyan()
         );
+        if tunnel {
+            start_tunnel_after_add(cfg, name)?;
+        }
         return Ok(());
     }
 
@@ -1354,13 +1357,66 @@ fn run_add_directory_inner(
     }
 
     if tunnel {
-        println!("  {}", "Note: --tunnel is not yet implemented".yellow());
+        start_tunnel_after_add(cfg, name)?;
     }
 
     Ok(())
 }
 
-fn run_add_manual(cfg: &CoulsonConfig, name: &str, target: &str) -> anyhow::Result<()> {
+fn start_tunnel_after_add(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
+    let client = RpcClient::new(&cfg.control_socket);
+
+    // Trigger a scan so the daemon picks up the newly added app
+    if let Err(e) = client.call("apps.scan", serde_json::json!({})) {
+        eprintln!(
+            "  {}",
+            format!("Warning: could not trigger scan: {e}").yellow()
+        );
+        eprintln!(
+            "  {}",
+            "Start the daemon first, then run: coulson tunnel start".dimmed()
+        );
+        return Ok(());
+    }
+
+    // Resolve app_id
+    let (bare_name, app_id) = match resolve_app_id(&client, cfg, Some(name.to_string())) {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!(
+                "  {}",
+                "Warning: app not found in daemon after scan. Start the daemon first, then run: coulson tunnel start"
+                    .yellow()
+            );
+            return Ok(());
+        }
+    };
+
+    // Start quick tunnel
+    let app_id_num: i64 = app_id
+        .parse()
+        .with_context(|| format!("invalid app_id: {app_id}"))?;
+    let result = client.call(
+        "app.update",
+        serde_json::json!({ "app_id": app_id_num, "tunnel_mode": "quick" }),
+    )?;
+
+    let url = result
+        .get("tunnel_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    println!("  {} tunnel started for {bare_name}", "~".green().bold(),);
+    println!("  {}", url.cyan());
+
+    Ok(())
+}
+
+fn run_add_manual(
+    cfg: &CoulsonConfig,
+    name: &str,
+    target: &str,
+    tunnel: bool,
+) -> anyhow::Result<()> {
     let domain = if name.contains('.') {
         name.to_string()
     } else {
@@ -1403,6 +1459,11 @@ fn run_add_manual(cfg: &CoulsonConfig, name: &str, target: &str) -> anyhow::Resu
         "  {}",
         format!("http://{domain}:{}", cfg.listen_http.port()).cyan()
     );
+
+    if tunnel {
+        start_tunnel_after_add(cfg, name)?;
+    }
+
     Ok(())
 }
 
