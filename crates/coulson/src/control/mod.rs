@@ -262,7 +262,6 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             "http_port": state.listen_http.port(),
             "https_port": state.listen_https.map(|a| a.port()),
             "runtime_dir": state.runtime_dir.to_string_lossy(),
-            "lan_access": state.lan_access,
         })),
         "app.list" => service::app_list(state)
             .map(|apps| json!({ "apps": apps }))
