@@ -1,0 +1,219 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+    branches:
+      - release
+  workflow_dispatch:
+
+jobs:
+  build-app:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact: Coulson-macos-arm64
+            arch: arm64
+          - runner: macos-latest
+            target: x86_64-apple-darwin
+            artifact: Coulson-macos-x86_64
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: brew install capnp cmake
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build Rust daemon
+        run: cargo build --release -p coulson --target ${{ matrix.target }}
+
+      - name: Install Tuist
+        run: brew install tuist
+
+      - name: Build Swift app
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          BUILD_NUMBER="${{ github.run_number }}"
+          cd CoulsonApp
+          tuist generate --no-open
+          xcodebuild build \
+            -workspace Coulson.xcworkspace \
+            -scheme CoulsonApp \
+            -configuration Release \
+            -derivedDataPath build/DerivedData \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            ARCHS="${{ matrix.target == 'x86_64-apple-darwin' && 'x86_64' || 'arm64' }}"
+
+      - name: Embed Rust daemon into app bundle
+        run: |
+          APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+          mkdir -p "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/coulson "$APP/Contents/Resources/coulson"
+          chmod +x "$APP/Contents/Resources/coulson"
+          echo "=== Contents/MacOS ===" && ls -la "$APP/Contents/MacOS/"
+          echo "=== Contents/Resources ===" && ls -la "$APP/Contents/Resources/"
+
+      - name: Import signing certificate
+        if: env.P12_BASE64 != ''
+        env:
+          P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+          P12_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          echo "$P12_BASE64" | base64 -d > cert.p12
+          security create-keychain -p "" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "" build.keychain
+          security import cert.p12 -k build.keychain -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+          rm cert.p12
+
+      - name: Sign app
+        if: env.SIGN_IDENTITY != ''
+        env:
+          SIGN_IDENTITY: ${{ secrets.DEVELOPER_ID_IDENTITY }}
+        run: |
+          APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+
+          # Sign all Mach-O binaries inside-out
+          find "$APP" -type f -perm +111 | while read -r bin; do
+            if file "$bin" | grep -q "Mach-O"; then
+              echo "Signing: $bin"
+              codesign --force --options runtime --timestamp \
+                --sign "$SIGN_IDENTITY" "$bin"
+            fi
+          done
+
+          # Sign .xpc bundles, .app bundles, and frameworks
+          find "$APP" \( -name "*.xpc" -o -name "*.app" -o -name "*.framework" \) -not -path "$APP" | sort -r | while read -r bundle; do
+            echo "Signing bundle: $bundle"
+            codesign --force --options runtime --timestamp \
+              --sign "$SIGN_IDENTITY" "$bundle"
+          done
+
+          # Sign the app bundle itself
+          codesign --force --options runtime --timestamp \
+            --sign "$SIGN_IDENTITY" "$APP"
+
+          codesign -vv --deep --strict "$APP"
+
+      - name: Create DMG
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
+          mkdir -p build
+          DMG_STAGE="$(mktemp -d)"
+          cp -R "$APP" "$DMG_STAGE/"
+          ln -s /Applications "$DMG_STAGE/Applications"
+          hdiutil create -volname "Coulson" \
+            -srcfolder "$DMG_STAGE" \
+            -ov -format UDZO \
+            "build/Coulson-${VERSION}-${{ matrix.arch }}.dmg"
+          rm -rf "$DMG_STAGE"
+
+      - name: Notarize DMG
+        if: env.NOTARIZE_APPLE_ID != ''
+        env:
+          NOTARIZE_APPLE_ID: ${{ secrets.NOTARIZE_APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          DMG="$(ls build/Coulson-*.dmg)"
+          xcrun notarytool submit "$DMG" \
+            --apple-id "$NOTARIZE_APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$NOTARIZE_PASSWORD" \
+            --wait \
+            --output-format json | tee notarize-result.json
+
+          STATUS=$(python3 -c "import json,sys; print(json.load(sys.stdin)['status'])" < notarize-result.json)
+          SUBMISSION_ID=$(python3 -c "import json,sys; print(json.load(sys.stdin)['id'])" < notarize-result.json)
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "::error::Notarization failed with status: $STATUS"
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --apple-id "$NOTARIZE_APPLE_ID" \
+              --team-id "$APPLE_TEAM_ID" \
+              --password "$NOTARIZE_PASSWORD"
+            exit 1
+          fi
+
+          xcrun stapler staple "$DMG"
+
+      - name: Generate appcast.xml
+        if: env.SPARKLE_PRIVATE_KEY != '' && matrix.target == 'aarch64-apple-darwin'
+        env:
+          SPARKLE_PRIVATE_KEY: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+          GENERATE_APPCAST="$(find CoulsonApp/build/DerivedData -name generate_appcast -type f | head -1)"
+          KEY_FILE="$(mktemp)"
+          echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
+          "$GENERATE_APPCAST" --ed-key-file "$KEY_FILE" --download-url-prefix "https://coulson.hola.ac/" build/
+          rm -f "$KEY_FILE"
+
+          RELEASE_URL="https://coulson.hola.ac/releases/${GITHUB_REF_NAME}/"
+          python3 -c "
+          import xml.etree.ElementTree as ET
+          ns = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
+          ET.register_namespace('sparkle', ns)
+          tree = ET.parse('build/appcast.xml')
+          for item in tree.findall('.//item'):
+              el = ET.SubElement(item, f'{{{ns}}}releaseNotesLink')
+              el.text = '${RELEASE_URL}'
+          tree.write('build/appcast.xml', xml_declaration=True, encoding='unicode')
+          "
+          cat build/appcast.xml
+
+      - name: Upload app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: build/Coulson-*.dmg
+
+      - name: Upload appcast
+        if: matrix.target == 'aarch64-apple-darwin' && hashFiles('build/appcast.xml') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: appcast
+          path: build/appcast.xml
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-app]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display structure of downloaded files
+        run: ls -R artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            artifacts/Coulson-macos-arm64/Coulson-*.dmg
+            artifacts/Coulson-macos-x86_64/Coulson-*.dmg
+            artifacts/appcast/appcast.xml
+          draft: true
+          prerelease: false
+          generate_release_notes: true
