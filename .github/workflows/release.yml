@@ -62,7 +62,11 @@ jobs:
       - name: Embed Rust daemon into app bundle
         run: |
           APP="CoulsonApp/build/DerivedData/Build/Products/Release/Coulson.app"
-          cp target/${{ matrix.target }}/release/coulson "$APP/Contents/MacOS/coulson"
+          mkdir -p "$APP/Contents/Resources"
+          cp target/${{ matrix.target }}/release/coulson "$APP/Contents/Resources/coulson"
+          chmod +x "$APP/Contents/Resources/coulson"
+          echo "=== Contents/MacOS ===" && ls -la "$APP/Contents/MacOS/"
+          echo "=== Contents/Resources ===" && ls -la "$APP/Contents/Resources/"
 
       - name: Import signing certificate
         if: env.P12_BASE64 != ''
