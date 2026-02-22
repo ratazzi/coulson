@@ -11,8 +11,11 @@ use tracing::{debug, error, info, warn};
 use crate::SharedState;
 
 const SERVICE_TYPE: &str = "_coulson._tcp.local.";
-/// macOS updates this file on every network change (interface up/down, WiFi switch, etc.)
+/// Network config file watched for changes (interface up/down, WiFi switch, etc.)
+#[cfg(target_os = "macos")]
 const RESOLV_CONF: &str = "/var/run/resolv.conf";
+#[cfg(not(target_os = "macos"))]
+const RESOLV_CONF: &str = "/etc/resolv.conf";
 /// Fallback: poll local IP every N seconds when resolv.conf watching is unavailable
 const IP_POLL_INTERVAL_SECS: u64 = 5;
 
@@ -54,7 +57,7 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
                 }
             }
             _ = net_rx.recv() => {
-                info!("network change detected (resolv.conf), re-registering mdns records");
+                info!("network change detected, re-registering mdns records");
                 reregister_all(&mdns, &state, &mut registered);
                 // Also update last_local_ip to stay in sync
                 last_local_ip = detect_local_ip();
@@ -87,10 +90,18 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Interface name prefixes to skip (VPN, tunnel, virtual bridge, container).
+const SKIP_IF_PREFIXES: &[&str] = &[
+    "utun", "tun", "tap", "ppp", // VPN/tunnel
+    "bridge", "awdl", "llw", // macOS virtual
+    "docker", "br-", "veth", // Docker/container
+    "virbr", "wg", // libvirt, WireGuard
+];
+
 fn detect_local_ip() -> Option<IpAddr> {
-    // Use getifaddrs to find a non-loopback, non-tunnel IPv4 address.
-    // This avoids returning VPN/tunnel IPs (utun*, tun*, ppp*) which
-    // don't support mDNS multicast.
+    // Use getifaddrs to find a non-loopback, non-virtual IPv4 address.
+    // Filters by both flags (IFF_POINTOPOINT) and interface name prefixes
+    // to exclude VPN/tunnel/container interfaces that don't support mDNS multicast.
     unsafe {
         let mut ifaddrs: *mut libc::ifaddrs = std::ptr::null_mut();
         if libc::getifaddrs(&mut ifaddrs) != 0 {
@@ -103,11 +114,18 @@ fn detect_local_ip() -> Option<IpAddr> {
             let ifa = &*cursor;
             let flags = ifa.ifa_flags;
 
-            // Skip down, loopback, and point-to-point (VPN/tunnel) interfaces
+            // Skip down, loopback, and point-to-point interfaces
             if (flags & libc::IFF_UP as u32) == 0
                 || (flags & libc::IFF_LOOPBACK as u32) != 0
                 || (flags & libc::IFF_POINTOPOINT as u32) != 0
             {
+                cursor = ifa.ifa_next;
+                continue;
+            }
+
+            // Skip known virtual/VPN interface prefixes
+            let name = std::ffi::CStr::from_ptr(ifa.ifa_name).to_string_lossy();
+            if SKIP_IF_PREFIXES.iter().any(|p| name.starts_with(p)) {
                 cursor = ifa.ifa_next;
                 continue;
             }
