@@ -719,8 +719,16 @@ fn check_keychain_ca(ca_path: &std::path::Path, issues: &mut u32) {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn check_keychain_ca(_ca_path: &std::path::Path, _issues: &mut u32) {
-    // Keychain check is macOS-only
+fn check_keychain_ca(ca_path: &std::path::Path, issues: &mut u32) {
+    if let Some((installed, _)) = linux_ca_installed(ca_path) {
+        if installed {
+            print_check(true, "CA cert installed in system trust store");
+        } else {
+            print_check(false, "CA cert not installed in system trust store");
+            print_warn("run: sudo coulson trust");
+            *issues += 1;
+        }
+    }
 }
 
 fn dns_resolves_to_localhost(host: &str) -> Option<bool> {
@@ -2376,8 +2384,56 @@ fn run_trust(cfg: CoulsonConfig, #[allow(unused)] pf: bool) -> anyhow::Result<()
     #[cfg(not(target_os = "macos"))]
     {
         println!("CA certificate: {}", ca_path.display());
-        println!("To trust this CA certificate, import it into your system trust store:");
-        println!("  {}", ca_path.display());
+
+        match linux_ca_installed(&ca_path) {
+            Some((true, _)) => {
+                println!(
+                    "{}",
+                    "CA certificate already installed in system trust store."
+                        .green()
+                        .bold()
+                );
+                return Ok(());
+            }
+            Some((false, dest)) => {
+                // Require root
+                let is_root = std::process::Command::new("id")
+                    .arg("-u")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+                    .unwrap_or(false);
+                if !is_root {
+                    bail!("This command requires root privileges. Run: sudo coulson trust");
+                }
+
+                std::fs::copy(&ca_path, &dest)
+                    .with_context(|| format!("failed to copy CA cert to {}", dest.display()))?;
+
+                // Detect and run the appropriate update command
+                let update_cmd = if which_exists("update-ca-certificates") {
+                    "update-ca-certificates"
+                } else {
+                    "update-ca-trust"
+                };
+                let status = std::process::Command::new(update_cmd)
+                    .status()
+                    .with_context(|| format!("failed to run {update_cmd}"))?;
+
+                if status.success() {
+                    println!("{}", "CA certificate trusted successfully!".green().bold());
+                    println!(
+                        "HTTPS connections to *.{} will now be trusted.",
+                        cfg.domain_suffix
+                    );
+                } else {
+                    eprintln!("{}", format!("Failed to run {update_cmd}.").red());
+                }
+            }
+            None => {
+                println!("To trust this CA certificate, import it into your system trust store:");
+                println!("  {}", ca_path.display());
+            }
+        }
     }
 
     Ok(())
@@ -2405,6 +2461,44 @@ fn is_ca_trusted(ca_path: &std::path::Path) -> bool {
         }
         _ => false,
     }
+}
+
+/// Check if Coulson CA cert is installed in system trust store on Linux.
+/// Returns `Some((is_installed, dest_path))` if a known trust store is found, `None` otherwise.
+#[cfg(not(target_os = "macos"))]
+fn linux_ca_installed(ca_path: &std::path::Path) -> Option<(bool, std::path::PathBuf)> {
+    // Debian/Ubuntu: /usr/local/share/ca-certificates/
+    let debian = std::path::Path::new("/usr/local/share/ca-certificates");
+    // RHEL/Fedora: /etc/pki/ca-trust/source/anchors/
+    let redhat = std::path::Path::new("/etc/pki/ca-trust/source/anchors");
+
+    let dest_dir = if debian.is_dir() {
+        debian
+    } else if redhat.is_dir() {
+        redhat
+    } else {
+        return None;
+    };
+
+    let dest = dest_dir.join("coulson-dev-ca.crt");
+    if !dest.is_file() {
+        return Some((false, dest));
+    }
+
+    let disk = std::fs::read_to_string(ca_path).unwrap_or_default();
+    let installed = std::fs::read_to_string(&dest).unwrap_or_default();
+    Some((disk.trim() == installed.trim(), dest))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn which_exists(cmd: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(cmd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "macos")]
