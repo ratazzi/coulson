@@ -21,7 +21,6 @@ struct CoulsonAppMain: App {
                     appDelegate.setupStatusBar(vm: vm, updater: updater)
                     if DaemonManager.isProductionApp {
                         updater.start()
-                        await vm.daemonManager.ensureRunning()
                     }
                 }
         }
@@ -103,6 +102,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let dropView = StatusBarDropView(frame: button.bounds, vm: vm)
             dropView.autoresizingMask = [.width, .height]
             button.addSubview(dropView)
+        }
+
+        // Ensure daemon is running (install LaunchAgent if needed)
+        if DaemonManager.isProductionApp {
+            Task {
+                await vm.daemonManager.ensureRunning()
+            }
         }
 
         refreshTask = Task {
