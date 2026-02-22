@@ -1,0 +1,42 @@
+# Coulson configuration file
+# Place at ~/.config/coulson/config.toml
+# All fields are optional. Priority: defaults < this file < environment variables.
+
+# HTTP listen port or address (default: 8080, accepts bare port or ip:port)
+# listen_http = "8080"
+
+# HTTPS listen port or address (set to "off" to disable, default: HTTP port + 363)
+# listen_https = "8443"
+
+# Domain suffix for routing (e.g. myapp.<suffix>)
+# domain_suffix = "coulson.local"
+
+# App configuration directory (falls back to ~/.pow if it exists)
+# apps_root = "~/.coulson"
+
+# Filesystem watcher for apps_root changes
+# watch_fs = true
+
+# Idle timeout before reaping managed (ASGI/Node) processes
+# idle_timeout_secs = 900
+
+# Create symlink directory for apps
+# link_dir = false
+
+# Max requests to keep in the inspector buffer
+# inspect_max_requests = 200
+
+# TLS certificate directory
+# certs_dir = "~/.config/coulson/certs"
+
+# Runtime directory for sockets and logs
+# runtime_dir = "/tmp/coulson"
+
+# Unix domain socket for control plane
+# control_socket = "/tmp/coulson/coulson.sock"
+
+# SQLite database path
+# sqlite_path = "~/.local/state/coulson/state.db"
+
+# Scan warnings JSON path
+# scan_warnings_path = "~/.local/state/coulson/scan_warnings.json"
