@@ -21,7 +21,6 @@ struct CoulsonAppMain: App {
                     appDelegate.setupStatusBar(vm: vm, updater: updater)
                     if DaemonManager.isProductionApp {
                         updater.start()
-                        await vm.daemonManager.ensureRunning()
                     }
                 }
         }
@@ -103,6 +102,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let dropView = StatusBarDropView(frame: button.bounds, vm: vm)
             dropView.autoresizingMask = [.width, .height]
             button.addSubview(dropView)
+        }
+
+        // Ensure daemon is running (install LaunchAgent if needed)
+        if DaemonManager.isProductionApp {
+            Task {
+                await vm.daemonManager.ensureRunning()
+            }
         }
 
         refreshTask = Task {
@@ -308,7 +314,16 @@ extension AppDelegate {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app
         Task { @MainActor in
-            await vm?.updateApp(app: app, params: ["tunnel_exposed": !app.tunnelExposed])
+            let mode: String = app.tunnelExposed ? "none" : "global"
+            await vm?.updateApp(app: app, params: ["tunnel_mode": mode])
+        }
+    }
+
+    @objc func toggleLanAccess(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        let app = box.app
+        Task { @MainActor in
+            await vm?.updateApp(app: app, params: ["lan_access": !app.lanAccess])
         }
     }
 

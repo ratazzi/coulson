@@ -1,4 +1,7 @@
 import Foundation
+import os.log
+
+private let logger = Logger(subsystem: "ac.hola.coulson", category: "DaemonManager")
 
 /// Manages the Coulson daemon lifecycle via launchd LaunchAgent.
 /// Only active in production mode (when running as a .app bundle).
@@ -120,27 +123,36 @@ final class DaemonManager: ObservableObject {
     func ensureRunning() async {
         guard Self.isProductionApp else { return }
 
+        guard let binary = daemonBinaryPath else {
+            logger.error("daemon binary not found in app bundle")
+            return
+        }
+        logger.info("daemon binary: \(binary)")
+
         await checkStatus()
 
         if !isDaemonRunning {
             do {
                 try install()
-                // Wait a moment for daemon to start
+                logger.info("daemon LaunchAgent installed, waiting for startup")
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 await checkStatus()
+                logger.info("daemon running: \(self.isDaemonRunning)")
             } catch {
-                // Installation failed; user can retry via UI
+                logger.error("failed to install daemon: \(error.localizedDescription)")
             }
         } else if !isVersionMatched {
-            // Daemon running but version mismatch — restart with new binary
+            logger.info("daemon version mismatch (running: \(self.daemonVersion ?? "?"), bundled: \(self.bundledVersion ?? "?")), restarting")
             do {
-                try install() // Re-install plist with potentially updated binary path
+                try install()
                 try restart()
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 await checkStatus()
             } catch {
-                // Restart failed
+                logger.error("failed to restart daemon: \(error.localizedDescription)")
             }
+        } else {
+            logger.info("daemon already running (v\(self.daemonVersion ?? "?"))")
         }
     }
 
