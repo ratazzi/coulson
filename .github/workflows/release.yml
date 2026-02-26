@@ -163,7 +163,7 @@ jobs:
           GENERATE_APPCAST="$(find CoulsonApp/build/DerivedData -name generate_appcast -type f | head -1)"
           KEY_FILE="$(mktemp)"
           echo "$SPARKLE_PRIVATE_KEY" > "$KEY_FILE"
-          "$GENERATE_APPCAST" --ed-key-file "$KEY_FILE" --download-url-prefix "https://coulson.hola.ac/" build/
+          "$GENERATE_APPCAST" --ed-key-file "$KEY_FILE" --download-url-prefix "https://coulson.hola.ac/stable/" build/
           rm -f "$KEY_FILE"
 
           RELEASE_URL="https://coulson.hola.ac/releases/${GITHUB_REF_NAME}/"
@@ -217,3 +217,31 @@ jobs:
           draft: true
           prerelease: false
           generate_release_notes: true
+
+      - name: Resolve DMG filenames
+        if: hashFiles('artifacts/appcast/appcast.xml') != ''
+        id: dmg
+        run: |
+          echo "arm64=$(basename artifacts/Coulson-macos-arm64/Coulson-*.dmg)" >> $GITHUB_OUTPUT
+          echo "x86_64=$(basename artifacts/Coulson-macos-x86_64/Coulson-*.dmg)" >> $GITHUB_OUTPUT
+
+      - name: Upload arm64 DMG to R2
+        if: hashFiles('artifacts/appcast/appcast.xml') != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: r2 object put coulson/stable/${{ steps.dmg.outputs.arm64 }} --file artifacts/Coulson-macos-arm64/${{ steps.dmg.outputs.arm64 }} --content-type application/octet-stream
+
+      - name: Upload x86_64 DMG to R2
+        if: hashFiles('artifacts/appcast/appcast.xml') != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: r2 object put coulson/stable/${{ steps.dmg.outputs.x86_64 }} --file artifacts/Coulson-macos-x86_64/${{ steps.dmg.outputs.x86_64 }} --content-type application/octet-stream
+
+      - name: Upload appcast to R2
+        if: hashFiles('artifacts/appcast/appcast.xml') != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          command: r2 object put coulson/stable/appcast.xml --file artifacts/appcast/appcast.xml --content-type application/xml
