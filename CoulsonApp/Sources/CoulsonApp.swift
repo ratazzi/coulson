@@ -314,7 +314,16 @@ extension AppDelegate {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app
         Task { @MainActor in
-            await vm?.updateApp(app: app, params: ["tunnel_exposed": !app.tunnelExposed])
+            let mode: String = app.tunnelExposed ? "none" : "global"
+            await vm?.updateApp(app: app, params: ["tunnel_mode": mode])
+        }
+    }
+
+    @objc func toggleLanAccess(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        let app = box.app
+        Task { @MainActor in
+            await vm?.updateApp(app: app, params: ["lan_access": !app.lanAccess])
         }
     }
 

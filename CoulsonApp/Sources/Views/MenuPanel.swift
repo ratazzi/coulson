@@ -203,6 +203,19 @@ enum MenuBuilder {
             }
         }
 
+        // LAN Access
+        sub.addItem(.separator())
+
+        let lan = NSMenuItem(
+            title: app.lanAccess ? "Disable LAN Access" : "Enable LAN Access",
+            action: #selector(AppDelegate.toggleLanAccess(_:)), keyEquivalent: "")
+        lan.image = NSImage(
+            systemSymbolName: app.lanAccess ? "wifi.slash" : "wifi",
+            accessibilityDescription: nil)
+        lan.representedObject = box
+        lan.target = target
+        sub.addItem(lan)
+
         // Logs (only when log file exists)
         let logPath = (vm.runtimeDir as NSString).appendingPathComponent("managed/\(app.name).log")
         if FileManager.default.fileExists(atPath: logPath) {
