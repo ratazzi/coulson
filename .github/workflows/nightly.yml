@@ -266,14 +266,12 @@ jobs:
         if: hashFiles('artifacts/appcast/appcast.xml') != ''
         uses: cloudflare/wrangler-action@v3
         with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: r2 object put coulson/nightly/${{ steps.dmg.outputs.name }} --file artifacts/Coulson-app-dmg/${{ steps.dmg.outputs.name }} --content-type application/octet-stream
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
 
       - name: Upload appcast to R2
         if: hashFiles('artifacts/appcast/appcast.xml') != ''
         uses: cloudflare/wrangler-action@v3
         with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           command: r2 object put coulson/nightly/appcast.xml --file artifacts/appcast/appcast.xml --content-type application/xml
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
