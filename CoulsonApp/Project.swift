@@ -27,7 +27,7 @@ let project = Project(
                         "LSHandlerRank": .string("Alternate"),
                     ]),
                 ]),
-                "SUFeedURL": "https://coulson.hola.ac/appcast.xml",
+                "SUFeedURL": "https://coulson.hola.ac/stable/appcast.xml",
                 "SUPublicEDKey": "PjUKuY0BMBoamFyfAYOGYPvRk2JVWa3uYsaZyR7ivnQ=",
             ]),
             sources: ["Sources/**/*.swift"],

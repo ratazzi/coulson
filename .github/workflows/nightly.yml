@@ -63,6 +63,7 @@ jobs:
           VERSION="$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')"
           BUILD_NUMBER="${{ github.run_number }}"
           cd CoulsonApp
+          sed -i '' 's|coulson.hola.ac/stable/appcast.xml|coulson.hola.ac/nightly/appcast.xml|' Project.swift
           tuist generate --no-open
           xcodebuild build \
             -workspace Coulson.xcworkspace \
