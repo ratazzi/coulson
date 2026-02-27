@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import SwiftUI
 
 @MainActor
@@ -19,6 +20,9 @@ final class CoulsonViewModel: ObservableObject {
     @Published var runtimeDir: String
     let daemonManager: DaemonManager
     private var autoRefreshTask: Task<Void, Never>?
+    private let pathMonitor = NWPathMonitor()
+    private let monitorQueue = DispatchQueue(label: "coulson.network-monitor")
+    private var networkDebounceTask: Task<Void, Never>?
 
     /// XDG-aware runtime directory fallback (before ping response is available).
     static var defaultRuntimeDir: String {
@@ -51,6 +55,33 @@ final class CoulsonViewModel: ObservableObject {
         }
         self.runtimeDir = defaultRuntime
         self.daemonManager = DaemonManager(client: client)
+        startNetworkMonitor()
+    }
+
+    /// Watch for network path changes on physical interfaces (Wi-Fi, Ethernet)
+    /// and notify the daemon so it can re-register mDNS records with the correct IP.
+    private func startNetworkMonitor() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            let hasPhysical = path.availableInterfaces.contains {
+                $0.type == .wifi || $0.type == .wiredEthernet
+            }
+            guard hasPhysical else { return }
+            Task { @MainActor in
+                self.scheduleNetworkNotify()
+            }
+        }
+        pathMonitor.start(queue: monitorQueue)
+    }
+
+    /// Debounce rapid NWPathMonitor callbacks into a single RPC call.
+    private func scheduleNetworkNotify() {
+        networkDebounceTask?.cancel()
+        networkDebounceTask = Task {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, isHealthy else { return }
+            _ = try? client.request(method: "network.changed", params: [:])
+        }
     }
 
     func tunnelURL(for app: AppRecord) -> String? {

@@ -27,6 +27,7 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
     mdns.disable_interface(IfKind::IPv6)?;
 
     let mut route_rx = state.route_tx.subscribe();
+    let mut network_rx = state.network_change_tx.subscribe();
 
     // Primary: watch /var/run/resolv.conf for network changes
     let (net_tx, mut net_rx) = mpsc::channel::<()>(1);
@@ -57,10 +58,16 @@ pub async fn run_mdns_responder(state: SharedState) -> anyhow::Result<()> {
                 }
             }
             _ = net_rx.recv() => {
-                info!("network change detected, re-registering mdns records");
+                info!("network change detected (resolv.conf), re-registering mdns records");
                 reregister_all(&mdns, &state, &mut registered);
-                // Also update last_local_ip to stay in sync
                 last_local_ip = detect_local_ip();
+            }
+            result = network_rx.recv() => {
+                if let Ok(()) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) = result {
+                    info!("network change detected (RPC), re-registering mdns records");
+                    reregister_all(&mdns, &state, &mut registered);
+                    last_local_ip = detect_local_ip();
+                }
             }
             _ = ip_poll_timer.tick(), if !has_watcher => {
                 let current_ip = detect_local_ip();

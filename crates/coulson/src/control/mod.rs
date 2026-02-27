@@ -448,6 +448,10 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             Ok(_) => Ok(json!({ "reloaded": true })),
             Err(e) => return internal_error(req.request_id, e.to_string()),
         },
+        "network.changed" => {
+            let _ = state.network_change_tx.send(());
+            Ok(json!({ "notified": true }))
+        }
         "apps.scan" => service::apps_scan(state)
             .map(|stats| json!({ "scan": stats }))
             .map_err(ControlError::from),

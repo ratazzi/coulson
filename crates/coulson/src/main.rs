@@ -95,6 +95,7 @@ pub struct SharedState {
     pub share_signer: Arc<ShareSigner>,
     pub inspect_max_requests: usize,
     pub inspect_tx: broadcast::Sender<InspectEvent>,
+    pub network_change_tx: broadcast::Sender<()>,
     pub certs_dir: std::path::PathBuf,
     pub runtime_dir: std::path::PathBuf,
 }
@@ -349,6 +350,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
 
     let share_signer = Arc::new(ShareSigner::load_or_generate(&store)?);
     let (inspect_tx, _) = broadcast::channel(256);
+    let (network_change_tx, _) = broadcast::channel(4);
     let idle_timeout = Duration::from_secs(cfg.idle_timeout_secs);
     let registry = Arc::new(process::default_registry());
     let process_manager =
@@ -375,6 +377,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         share_signer,
         inspect_max_requests: cfg.inspect_max_requests,
         inspect_tx,
+        network_change_tx,
         certs_dir: cfg.certs_dir.clone(),
         runtime_dir: cfg.runtime_dir.clone(),
     })
