@@ -418,7 +418,7 @@ fn run_ls(cfg: CoulsonConfig, managed: Option<bool>, domain: Option<String>) -> 
             AppRow {
                 name: app.name.bold().to_string(),
                 domain: app.domain.0.cyan().to_string(),
-                kind: format!("{:?}", app.kind).to_lowercase(),
+                kind: dashboard::render::effective_kind_label(app.kind, &app.target).to_string(),
                 target: app.target.to_url_base().dimmed().to_string(),
                 status,
             }
@@ -1713,7 +1713,12 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
                 .cloned()
                 .unwrap_or_else(|| (app_id.to_string(), String::new()));
             let pid = p.get("pid").and_then(|v| v.as_u64()).unwrap_or(0);
-            let kind = p.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let kind_raw = p.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let kind = match kind_raw {
+                "asgi" => "ASGI",
+                "node" => "Node",
+                other => other,
+            };
             let uptime_secs = p.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);
             let idle_secs = p.get("idle_secs").and_then(|v| v.as_u64()).unwrap_or(0);
             let alive = p.get("alive").and_then(|v| v.as_bool()).unwrap_or(false);

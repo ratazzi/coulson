@@ -37,10 +37,13 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     }
 
     var kindLabel: String {
-        switch target.type {
-        case "tcp": return "proxy"
-        case "unix_socket": return "unix socket"
-        case "static_dir": return "static"
+        switch kind {
+        case "static":
+            return (target.type == "tcp" || target.type == "unix_socket") ? "Proxy" : "Static"
+        case "rack": return "Rack"
+        case "asgi": return "ASGI"
+        case "node": return "Node"
+        case "container": return "Container"
         default: return kind
         }
     }
@@ -48,11 +51,14 @@ struct AppRecord: Decodable, Identifiable, Hashable {
     var targetLabel: String {
         switch target.type {
         case "tcp":
-            return "\(target.host ?? "127.0.0.1"):\(target.port ?? 0)"
+            return "http://\(target.host ?? "127.0.0.1"):\(target.port ?? 0)"
         case "unix_socket":
-            return target.path ?? "unix socket"
+            return "unix://"
         case "static_dir":
-            return target.root ?? "static dir"
+            return "static"
+        case "managed":
+            let k = target.kind ?? kind
+            return "managed:\(k)"
         default:
             return target.type
         }
@@ -87,6 +93,8 @@ struct Target: Decodable, Hashable {
     let port: Int?
     let path: String?
     let root: String?
+    let kind: String?
+    let name: String?
 }
 
 struct AppListResponse: Decodable {

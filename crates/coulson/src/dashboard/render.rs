@@ -714,16 +714,10 @@ pub fn html_response(status: StatusCode, body: String) -> Response {
 
 pub fn format_target(target: &BackendTarget) -> String {
     match target {
-        BackendTarget::Tcp { host, port } => format!("{host}:{port}"),
-        BackendTarget::UnixSocket { path } => {
-            format!("unix:{}", path.rsplit('/').next().unwrap_or(path))
-        }
-        BackendTarget::StaticDir { root } => {
-            format!("dir:{}", root.rsplit('/').next().unwrap_or(root))
-        }
-        BackendTarget::Managed { root, .. } => {
-            format!("managed:{}", root.rsplit('/').next().unwrap_or(root))
-        }
+        BackendTarget::Tcp { host, port } => format!("http://{host}:{port}"),
+        BackendTarget::UnixSocket { .. } => "unix://".to_string(),
+        BackendTarget::StaticDir { .. } => "static".to_string(),
+        BackendTarget::Managed { kind, .. } => format!("managed:{kind}"),
     }
 }
 
@@ -825,19 +819,19 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 5006
             }),
-            "127.0.0.1:5006"
+            "http://127.0.0.1:5006"
         );
         assert_eq!(
             format_target(&BackendTarget::UnixSocket {
                 path: "/tmp/app.sock".into()
             }),
-            "unix:app.sock"
+            "unix://"
         );
         assert_eq!(
             format_target(&BackendTarget::StaticDir {
                 root: "/var/www/public".into()
             }),
-            "dir:public"
+            "static"
         );
         assert_eq!(
             format_target(&BackendTarget::Managed {
@@ -846,7 +840,7 @@ mod tests {
                 kind: "asgi".into(),
                 name: "myapp".into(),
             }),
-            "managed:myapp"
+            "managed:asgi"
         );
     }
 
