@@ -1266,8 +1266,17 @@ fn is_loopback_client(session: &Session) -> bool {
     session
         .client_addr()
         .and_then(|a| a.as_inet())
-        .map(|inet| inet.ip().is_loopback())
+        .map(|inet| is_local_ip(inet.ip()))
         .unwrap_or(false)
+}
+
+/// Check if an IP is local (loopback or belongs to a local interface).
+fn is_local_ip(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() {
+        return true;
+    }
+    // If we can bind to the IP, it belongs to this machine
+    std::net::TcpListener::bind(std::net::SocketAddr::new(ip, 0)).is_ok()
 }
 
 fn extract_host(raw: Option<&str>) -> Option<String> {
