@@ -170,7 +170,7 @@ impl SharedState {
 #[command(name = "coulson", about = "Local development gateway")]
 struct Cli {
     #[command(subcommand)]
-    command: Option<Commands>,
+    command: Commands,
 }
 
 #[derive(Subcommand)]
@@ -1130,7 +1130,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = CoulsonConfig::load().context("failed to load config")?;
 
     let cli = Cli::parse();
-    match cli.command.unwrap_or(Commands::Serve) {
+    match cli.command {
         Commands::Serve => run_serve(cfg).await,
         Commands::Scan => run_scan_once(cfg),
         Commands::Ls {
