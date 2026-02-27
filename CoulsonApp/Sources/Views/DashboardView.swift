@@ -43,7 +43,14 @@ struct DashboardView: View {
         }
         .task { await vm.startAutoRefresh() }
         .onDisappear { vm.stopAutoRefresh() }
-        .onReceive(NotificationCenter.default.publisher(for: .openSettings)) { _ in
+        .onAppear { consumePendingDestination() }
+        .onChange(of: vm.pendingDestination) { _ in consumePendingDestination() }
+    }
+
+    private func consumePendingDestination() {
+        guard let dest = vm.pendingDestination else { return }
+        vm.pendingDestination = nil
+        if dest == "settings" {
             path.append(DashboardDestination.settings)
         }
     }

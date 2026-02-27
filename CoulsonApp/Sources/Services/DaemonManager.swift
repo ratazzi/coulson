@@ -18,16 +18,16 @@ final class DaemonManager: ObservableObject {
         Bundle.main.bundleIdentifier == "ac.hola.coulson"
     }
 
-    private var serviceTarget: String {
+    private nonisolated var serviceTarget: String {
         "gui/\(getuid())/\(serviceLabel)"
     }
 
-    private var plistPath: String {
+    private nonisolated var plistPath: String {
         NSHomeDirectory() + "/Library/LaunchAgents/\(serviceLabel).plist"
     }
 
     /// Path to the daemon binary embedded in the app bundle.
-    var daemonBinaryPath: String? {
+    nonisolated var daemonBinaryPath: String? {
         Bundle.main.url(forResource: "coulson", withExtension: nil)?.path
     }
 
@@ -69,7 +69,7 @@ final class DaemonManager: ObservableObject {
     // MARK: - LaunchAgent Lifecycle
 
     /// Install the LaunchAgent plist and bootstrap it with launchd.
-    func install() throws {
+    nonisolated func install() throws {
         guard let binary = daemonBinaryPath else {
             throw DaemonError.noBinary
         }
@@ -102,19 +102,19 @@ final class DaemonManager: ObservableObject {
     }
 
     /// Start the daemon: re-enable and kickstart.
-    func start() throws {
+    nonisolated func start() throws {
         _ = try? runLaunchctl(["enable", serviceTarget])
         try runLaunchctl(["kickstart", "-p", serviceTarget])
     }
 
     /// Stop the daemon: disable to prevent auto-restart, then send SIGTERM.
-    func stop() throws {
+    nonisolated func stop() throws {
         try runLaunchctl(["disable", serviceTarget])
         _ = try? runLaunchctl(["kill", "SIGTERM", serviceTarget])
     }
 
     /// Restart the daemon (kill + kickstart, re-enable first).
-    func restart() throws {
+    nonisolated func restart() throws {
         _ = try? runLaunchctl(["enable", serviceTarget])
         try runLaunchctl(["kickstart", "-kp", serviceTarget])
     }
@@ -158,7 +158,7 @@ final class DaemonManager: ObservableObject {
 
     // MARK: - Private
 
-    private func buildPlist(daemonPath: String) -> String {
+    private nonisolated func buildPlist(daemonPath: String) -> String {
         let rtDir = CoulsonViewModel.defaultRuntimeDir
         return """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -198,7 +198,7 @@ final class DaemonManager: ObservableObject {
     }
 
     @discardableResult
-    private func runLaunchctl(_ arguments: [String]) throws -> String {
+    private nonisolated func runLaunchctl(_ arguments: [String]) throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/launchctl")
         process.arguments = arguments

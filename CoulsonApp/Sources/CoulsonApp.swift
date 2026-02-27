@@ -2,10 +2,6 @@ import AppKit
 import Sparkle
 import SwiftUI
 
-extension Notification.Name {
-    static let openSettings = Notification.Name("com.coulson.openSettings")
-}
-
 @main
 struct CoulsonAppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -34,6 +30,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private(set) var vm: CoulsonViewModel?
     private(set) var updater: UpdaterController?
     private var refreshTask: Task<Void, Never>?
+    private var windowInterceptor: WindowCloseInterceptor?
+    private weak var mainWindow: NSWindow?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DaemonManager.isProductionApp {
@@ -66,10 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 case .created:
                     break
                 case .detectionFailed:
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    for window in NSApplication.shared.windows where window.title.contains("Coulson") {
-                        window.makeKeyAndOrderFront(nil)
-                    }
+                    self.showMainWindow()
                 case .error:
                     break
                 }
@@ -118,6 +113,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 await vm.refreshAll()
             }
         }
+
+        // Intercept window close to hide instead of destroy
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            // Find the SwiftUI-managed content window (not status bar or panels)
+            guard let window = NSApp.windows.first(where: {
+                $0.level == .normal && $0.className.contains("AppKitWindow")
+            }) ?? NSApp.windows.first(where: {
+                $0.level == .normal && $0.contentView != nil && !$0.title.isEmpty
+            }) else { return }
+            self?.mainWindow = window
+            let interceptor = WindowCloseInterceptor()
+            window.delegate = interceptor
+            self?.windowInterceptor = interceptor
+        }
     }
 }
 
@@ -153,6 +162,17 @@ extension AppDelegate {
         }
 
         return nil
+    }
+}
+
+// MARK: - WindowCloseInterceptor
+
+/// Intercepts window close to hide instead of destroy, so the SwiftUI window
+/// can be re-shown from the menu bar without recreating.
+class WindowCloseInterceptor: NSObject, NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        sender.orderOut(nil)
+        return false
     }
 }
 
@@ -207,11 +227,7 @@ class StatusBarDropView: NSView {
                 case .created:
                     break // app list refreshes automatically
                 case .detectionFailed:
-                    // Open main window and navigate to AddAppView
-                    NSApplication.shared.activate(ignoringOtherApps: true)
-                    for window in NSApplication.shared.windows where window.title.contains("Coulson") {
-                        window.makeKeyAndOrderFront(nil)
-                    }
+                    (NSApp.delegate as? AppDelegate)?.showMainWindow()
                 case .error:
                     break // errorMessage already set by vm
                 }
@@ -240,10 +256,7 @@ extension AppDelegate: NSMenuDelegate {
 
 extension AppDelegate {
     @objc func openDashboard() {
-        NSApplication.shared.activate(ignoringOtherApps: true)
-        for window in NSApplication.shared.windows where window.title.contains("Coulson") {
-            window.makeKeyAndOrderFront(nil)
-        }
+        self.showMainWindow()
     }
 
     @objc func openWebDashboard() {
@@ -345,39 +358,42 @@ extension AppDelegate {
 
     @objc func startDaemon() {
         guard let vm else { return }
-        Task { @MainActor in
+        let dm = vm.daemonManager
+        Task {
             do {
-                try vm.daemonManager.install()
+                try await Task.detached { try dm.install() }.value
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 await vm.refreshHealth()
             } catch {
-                vm.errorMessage = error.localizedDescription
+                await MainActor.run { vm.errorMessage = error.localizedDescription }
             }
         }
     }
 
     @objc func stopDaemon() {
         guard let vm else { return }
-        Task { @MainActor in
+        let dm = vm.daemonManager
+        Task {
             do {
-                try vm.daemonManager.stop()
+                try await Task.detached { try dm.stop() }.value
                 try? await Task.sleep(nanoseconds: 500_000_000)
                 await vm.refreshHealth()
             } catch {
-                vm.errorMessage = error.localizedDescription
+                await MainActor.run { vm.errorMessage = error.localizedDescription }
             }
         }
     }
 
     @objc func restartDaemon() {
         guard let vm else { return }
-        Task { @MainActor in
+        let dm = vm.daemonManager
+        Task {
             do {
-                try vm.daemonManager.restart()
+                try await Task.detached { try dm.restart() }.value
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 await vm.refreshHealth()
             } catch {
-                vm.errorMessage = error.localizedDescription
+                await MainActor.run { vm.errorMessage = error.localizedDescription }
             }
         }
     }
@@ -404,12 +420,18 @@ extension AppDelegate {
     }
 
     @objc func openSettings() {
+        Task { @MainActor in
+            vm?.pendingDestination = "settings"
+        }
+        self.showMainWindow()
+    }
+
+    /// Show the main window (it's never destroyed, only hidden on close).
+    func showMainWindow() {
         NSApplication.shared.activate(ignoringOtherApps: true)
-        for window in NSApplication.shared.windows where window.title.contains("Coulson") {
+        if let window = mainWindow {
             window.makeKeyAndOrderFront(nil)
         }
-        // Post notification so DashboardView can navigate to settings
-        NotificationCenter.default.post(name: .openSettings, object: nil)
     }
 
     @objc func checkForUpdates() {

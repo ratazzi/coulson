@@ -12,6 +12,7 @@ final class CoulsonViewModel: ObservableObject {
     @Published var globalTunnelConfigured = false
     @Published var globalTunnelCnameTarget: String?
     @Published var errorMessage: String?
+    @Published var pendingDestination: String?
 
     let client: UDSControlClient
     let domainSuffix: String
@@ -25,7 +26,7 @@ final class CoulsonViewModel: ObservableObject {
     private var networkDebounceTask: Task<Void, Never>?
 
     /// XDG-aware runtime directory fallback (before ping response is available).
-    static var defaultRuntimeDir: String {
+    nonisolated static var defaultRuntimeDir: String {
         let base = ProcessInfo.processInfo.environment["XDG_RUNTIME_DIR"]
             ?? ProcessInfo.processInfo.environment["TMPDIR"]
             ?? "/tmp"
