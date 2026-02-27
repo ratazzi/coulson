@@ -61,7 +61,7 @@ impl Default for CoulsonConfig {
         };
         let runtime_dir = xdg_runtime_dir().join("coulson");
         let state_dir = xdg_state_home().join("coulson");
-        let listen_http: SocketAddr = "0.0.0.0:8080".parse().expect("default listen addr");
+        let listen_http: SocketAddr = "0.0.0.0:18080".parse().expect("default listen addr");
         Self {
             listen_https: Some(SocketAddr::from(([0, 0, 0, 0], listen_http.port() + 363))),
             listen_http,
