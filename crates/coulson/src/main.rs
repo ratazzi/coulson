@@ -1512,6 +1512,14 @@ fn run_rm_by_name(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()> {
         .strip_suffix(&format!(".{}", cfg.domain_suffix))
         .unwrap_or(name);
 
+    eprint!("Remove {bare_name}? [y/N] ");
+    let mut answer = String::new();
+    std::io::stdin().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        println!("Cancelled.");
+        return Ok(());
+    }
+
     let mut removed_db = false;
 
     // Check apps_root for file/symlink
