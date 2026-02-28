@@ -43,6 +43,7 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         case "rack": return "Rack"
         case "asgi": return "ASGI"
         case "node": return "Node"
+        case "procfile": return "Procfile"
         case "container": return "Container"
         default: return kind
         }

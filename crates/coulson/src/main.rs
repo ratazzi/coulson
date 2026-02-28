@@ -1717,6 +1717,7 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
             let kind = match kind_raw {
                 "asgi" => "ASGI",
                 "node" => "Node",
+                "procfile" => "Procfile",
                 other => other,
             };
             let uptime_secs = p.get("uptime_secs").and_then(|v| v.as_u64()).unwrap_or(0);

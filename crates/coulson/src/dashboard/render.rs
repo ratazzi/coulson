@@ -589,7 +589,7 @@ pub fn stats_context(apps: &[AppSpec]) -> Context {
     let disabled = total - enabled;
     let managed = apps
         .iter()
-        .filter(|a| matches!(a.kind, AppKind::Asgi | AppKind::Node))
+        .filter(|a| matches!(a.kind, AppKind::Asgi | AppKind::Node | AppKind::Procfile))
         .count();
     let mut ctx = Context::new();
     ctx.insert("total", &total);
@@ -735,6 +735,7 @@ pub fn effective_kind_label(kind: AppKind, target: &BackendTarget) -> &'static s
         AppKind::Rack => "Rack",
         AppKind::Asgi => "ASGI",
         AppKind::Node => "Node",
+        AppKind::Procfile => "Procfile",
         AppKind::Container => "Container",
     }
 }

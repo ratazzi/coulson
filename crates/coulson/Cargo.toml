@@ -51,6 +51,7 @@ axum.workspace = true
 tokio-stream.workspace = true
 tower.workspace = true
 percent-encoding.workspace = true
+procfile.workspace = true
 libc.workspace = true
 
 [features]

@@ -3,6 +3,7 @@ pub mod provider;
 mod asgi;
 mod docker;
 mod node;
+mod procfile;
 mod rack;
 
 pub use provider::{ListenTarget, ProviderRegistry};
@@ -39,6 +40,7 @@ pub fn default_registry() -> ProviderRegistry {
     let mut reg = ProviderRegistry::new();
     reg.register(asgi::AsgiProvider);
     reg.register(node::NodeProvider);
+    reg.register(procfile::ProcfileProvider);
     reg
 }
 

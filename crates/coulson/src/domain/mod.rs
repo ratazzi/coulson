@@ -16,6 +16,7 @@ pub enum AppKind {
     Rack,
     Asgi,
     Node,
+    Procfile,
     Container,
 }
 

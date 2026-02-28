@@ -1051,6 +1051,7 @@ fn kind_str_to_app_kind(kind: &str) -> AppKind {
         "asgi" => AppKind::Asgi,
         "rack" => AppKind::Rack,
         "node" => AppKind::Node,
+        "procfile" => AppKind::Procfile,
         "docker" => AppKind::Container,
         _ => AppKind::Static,
     }
@@ -1062,6 +1063,7 @@ fn app_kind_to_str(kind: AppKind) -> &'static str {
         AppKind::Asgi => "asgi",
         AppKind::Rack => "rack",
         AppKind::Node => "node",
+        AppKind::Procfile => "procfile",
         AppKind::Container => "container",
         AppKind::Static => "static",
     }
