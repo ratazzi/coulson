@@ -193,13 +193,13 @@ enum Commands {
     /// Add an app
     #[command(alias = "recruit")]
     Add {
-        /// App name or domain (for manual proxy mode)
+        /// App name, domain, or bare port
         name: Option<String>,
-        /// Target: port, host:port, or /path/to/socket (for manual proxy mode)
+        /// Target: port, host:port, or /path/to/socket
         target: Option<String>,
-        /// Port override (for directory project mode)
+        /// Link to app directory (creates symlink for CWD association)
         #[arg(long)]
-        port: Option<u16>,
+        link: Option<std::path::PathBuf>,
         /// Also start a quick tunnel after adding
         #[arg(long)]
         tunnel: bool,
@@ -1164,9 +1164,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Add {
             name,
             target,
-            port,
+            link,
             tunnel,
-        } => run_add(cfg, name, target, port, tunnel),
+        } => run_add(cfg, name, target, link, tunnel),
         Commands::Rm { name } => run_rm(cfg, name),
         Commands::Doctor { pf } => run_doctor(cfg, pf),
         Commands::Share { name, expires } => run_share(cfg, name, expires),
@@ -1183,40 +1183,63 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-fn run_add(
-    cfg: CoulsonConfig,
-    name: Option<String>,
-    target: Option<String>,
-    port: Option<u16>,
-    tunnel: bool,
-) -> anyhow::Result<()> {
-    match (name.as_deref(), target.as_deref()) {
-        // Manual proxy mode: coulson add <name> <target>
-        (Some(n), Some(t)) => run_add_manual(&cfg, n, t, tunnel),
-        // Directory project mode: coulson add [--port P]
-        (None, None) => run_add_directory(&cfg, port, tunnel),
-        // name only without target: treat as directory mode with --name override
-        (Some(n), None) => run_add_directory_with_name(&cfg, n, port, tunnel),
+#[derive(Debug, PartialEq)]
+enum AddMode<'a> {
+    /// coulson add <name> <target> [--link dir]
+    Manual { name: &'a str, target: &'a str },
+    /// coulson add <port> — bare port, infer name from cwd
+    BarePort(u16),
+    /// coulson add — auto-detect cwd
+    AutoDetect,
+    /// coulson add <name> — custom name, auto-detect cwd
+    Named { name: &'a str },
+}
+
+fn classify_add<'a>(name: Option<&'a str>, target: Option<&'a str>) -> anyhow::Result<AddMode<'a>> {
+    match (name, target) {
+        (Some(n), Some(t)) => Ok(AddMode::Manual { name: n, target: t }),
+        (Some(n), None) if n.parse::<u16>().is_ok() => Ok(AddMode::BarePort(n.parse()?)),
+        (None, None) => Ok(AddMode::AutoDetect),
+        (Some(n), None) => Ok(AddMode::Named { name: n }),
         (None, Some(_)) => bail!("target requires a name: coulson add <name> <target>"),
     }
 }
 
-fn run_add_directory(cfg: &CoulsonConfig, port: Option<u16>, tunnel: bool) -> anyhow::Result<()> {
+fn run_add(
+    cfg: CoulsonConfig,
+    name: Option<String>,
+    target: Option<String>,
+    link: Option<std::path::PathBuf>,
+    tunnel: bool,
+) -> anyhow::Result<()> {
+    match classify_add(name.as_deref(), target.as_deref())? {
+        AddMode::Manual { name: n, target: t } => run_add_manual(&cfg, n, t, link, tunnel),
+        AddMode::BarePort(port) => {
+            let cwd = std::env::current_dir().context("failed to get current directory")?;
+            let dir_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app");
+            let name = scanner::sanitize_name(dir_name);
+            run_add_directory_inner(&cfg, &name, &cwd, Some(port), tunnel)
+        }
+        AddMode::AutoDetect => run_add_directory(&cfg, tunnel),
+        AddMode::Named { name: n } => run_add_directory_with_name(&cfg, n, tunnel),
+    }
+}
+
+fn run_add_directory(cfg: &CoulsonConfig, tunnel: bool) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let dir_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or("app");
     let name = scanner::sanitize_name(dir_name);
-    run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
+    run_add_directory_inner(cfg, &name, &cwd, None, tunnel)
 }
 
 fn run_add_directory_with_name(
     cfg: &CoulsonConfig,
     name: &str,
-    port: Option<u16>,
     tunnel: bool,
 ) -> anyhow::Result<()> {
     let cwd = std::env::current_dir().context("failed to get current directory")?;
     let name = scanner::sanitize_name(name);
-    run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
+    run_add_directory_inner(cfg, &name, &cwd, None, tunnel)
 }
 
 /// Query the running daemon for its HTTP port, falling back to config default.
@@ -1275,7 +1298,7 @@ fn run_add_directory_inner(
         }
     }
 
-    // --port mode
+    // Explicit port mode
     if let Some(p) = port {
         std::fs::create_dir_all(&cfg.apps_root)?;
 
@@ -1311,7 +1334,7 @@ fn run_add_directory_inner(
         }
 
         println!(
-            "{} {name}.{} -> 127.0.0.1:{p}",
+            "  {} {name}.{} -> 127.0.0.1:{p}",
             "+".green().bold(),
             cfg.domain_suffix
         );
@@ -1359,7 +1382,7 @@ fn run_add_directory_inner(
             cwd.display()
         );
         println!(
-            "{} {name}.{} ({}) -> {}",
+            "  {} {name}.{} ({}) -> {}",
             "+".green().bold(),
             cfg.domain_suffix,
             detected.kind,
@@ -1392,7 +1415,7 @@ fn run_add_directory_inner(
             cwd.display()
         );
         println!(
-            "{} {name}.{} -> {}",
+            "  {} {name}.{} -> {}",
             "+".green().bold(),
             cfg.domain_suffix,
             cwd.display()
@@ -1408,7 +1431,7 @@ fn run_add_directory_inner(
         );
         println!(
             "  {}",
-            "Tip: use --port to specify a target port, or add coulson.json/coulson.routes".dimmed()
+            "Tip: use `coulson add <port>` to specify a target port, or add coulson.json/coulson.routes".dimmed()
         );
     }
 
@@ -1471,6 +1494,93 @@ fn run_add_manual(
     cfg: &CoulsonConfig,
     name: &str,
     target: &str,
+    link: Option<std::path::PathBuf>,
+    tunnel: bool,
+) -> anyhow::Result<()> {
+    // Unix socket targets use RPC (powfile format doesn't support socket paths)
+    if target.starts_with('/') {
+        if link.is_some() {
+            bail!("--link is not supported with unix socket targets");
+        }
+        return run_add_manual_rpc(cfg, name, target, tunnel);
+    }
+
+    // Validate TCP target format
+    let display = if target.parse::<u16>().is_ok() {
+        format!("127.0.0.1:{target}")
+    } else if target.contains(':') {
+        let (_, port_str) = target.rsplit_once(':').unwrap();
+        port_str
+            .parse::<u16>()
+            .with_context(|| format!("invalid port in target: {target}"))?;
+        target.to_string()
+    } else {
+        bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
+    };
+
+    std::fs::create_dir_all(&cfg.apps_root)?;
+    let link_path = cfg.apps_root.join(name);
+    if link_path.exists() || link_path.symlink_metadata().is_ok() {
+        bail!("{} already exists", link_path.display());
+    }
+
+    if let Some(dir) = link {
+        // --link mode: write .coulson in app dir, symlink from apps_root
+        let dir = dir
+            .canonicalize()
+            .with_context(|| format!("invalid --link path: {}", dir.display()))?;
+        let dotfile = dir.join(".coulson");
+        if dotfile.exists() {
+            bail!("{} already exists", dotfile.display());
+        }
+        std::fs::write(&dotfile, format!("{target}\n"))?;
+        println!("  {} {}", "+".green().bold(), dotfile.display());
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&dotfile, &link_path).with_context(|| {
+            format!(
+                "failed to create symlink {} -> {}",
+                link_path.display(),
+                dotfile.display()
+            )
+        })?;
+        println!(
+            "  {} {} -> {}",
+            "+".green().bold(),
+            link_path.display(),
+            dotfile.display()
+        );
+    } else {
+        // No --link: write powfile directly in apps_root
+        std::fs::write(&link_path, format!("{target}\n"))?;
+        println!("  {} {}", "+".green().bold(), link_path.display());
+    }
+
+    let domain = if name.contains('.') {
+        name.to_string()
+    } else {
+        format!("{name}.{}", cfg.domain_suffix)
+    };
+    println!("  {} {domain} -> {display}", "+".green().bold());
+    println!(
+        "  {}",
+        format!("http://{domain}:{}", daemon_http_port(cfg)).cyan()
+    );
+
+    // Notify daemon to pick up the new app
+    let _ = RpcClient::new(&cfg.control_socket).call("apps.scan", serde_json::json!({}));
+
+    if tunnel {
+        start_tunnel_after_add(cfg, name)?;
+    }
+
+    Ok(())
+}
+
+/// Unix socket targets bypass powfile and use RPC directly.
+fn run_add_manual_rpc(
+    cfg: &CoulsonConfig,
+    name: &str,
+    target: &str,
     tunnel: bool,
 ) -> anyhow::Result<()> {
     let domain = if name.contains('.') {
@@ -1478,49 +1588,25 @@ fn run_add_manual(
     } else {
         format!("{name}.{}", cfg.domain_suffix)
     };
-
     let client = RpcClient::new(&cfg.control_socket);
-
-    let (target_type, target_value, display) = if target.starts_with('/') {
-        ("unix_socket", target.to_string(), format!("unix:{target}"))
-    } else if let Ok(port) = target.parse::<u16>() {
-        (
-            "tcp",
-            format!("127.0.0.1:{port}"),
-            format!("127.0.0.1:{port}"),
-        )
-    } else if target.contains(':') {
-        // Validate host:port
-        let (_, port_str) = target.rsplit_once(':').unwrap();
-        port_str
-            .parse::<u16>()
-            .with_context(|| format!("invalid port in target: {target}"))?;
-        ("tcp", target.to_string(), target.to_string())
-    } else {
-        bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
-    };
-
     let result = client.call(
         "app.create",
         serde_json::json!({
             "name": name,
             "domain": domain,
-            "target_type": target_type,
-            "target_value": target_value,
+            "target_type": "unix_socket",
+            "target_value": target,
         }),
     )?;
     let http_port = result
         .get("http_port")
         .and_then(|v| v.as_u64())
         .unwrap_or(cfg.listen_http.port() as u64);
-    println!("{} {domain} -> {display}", "+".green().bold());
-
+    println!("  {} {domain} -> unix:{target}", "+".green().bold());
     println!("  {}", format!("http://{domain}:{http_port}").cyan());
-
     if tunnel {
         start_tunnel_after_add(cfg, name)?;
     }
-
     Ok(())
 }
 
@@ -2674,4 +2760,81 @@ fn setup_pf_forwarding(cfg: &CoulsonConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod add_tests {
+    use super::*;
+
+    #[test]
+    fn auto_detect_no_args() {
+        let mode = classify_add(None, None).unwrap();
+        assert_eq!(mode, AddMode::AutoDetect);
+    }
+
+    #[test]
+    fn named_with_string() {
+        let mode = classify_add(Some("myapp"), None).unwrap();
+        assert_eq!(mode, AddMode::Named { name: "myapp" });
+    }
+
+    #[test]
+    fn bare_port_number() {
+        let mode = classify_add(Some("3001"), None).unwrap();
+        assert_eq!(mode, AddMode::BarePort(3001));
+    }
+
+    #[test]
+    fn manual_name_and_port() {
+        let mode = classify_add(Some("myapp"), Some("3001")).unwrap();
+        assert_eq!(
+            mode,
+            AddMode::Manual {
+                name: "myapp",
+                target: "3001"
+            }
+        );
+    }
+
+    #[test]
+    fn manual_name_and_host_port() {
+        let mode = classify_add(Some("myapp"), Some("192.168.1.5:3001")).unwrap();
+        assert_eq!(
+            mode,
+            AddMode::Manual {
+                name: "myapp",
+                target: "192.168.1.5:3001"
+            }
+        );
+    }
+
+    #[test]
+    fn manual_name_and_socket() {
+        let mode = classify_add(Some("myapp"), Some("/tmp/app.sock")).unwrap();
+        assert_eq!(
+            mode,
+            AddMode::Manual {
+                name: "myapp",
+                target: "/tmp/app.sock"
+            }
+        );
+    }
+
+    #[test]
+    fn target_without_name_is_error() {
+        assert!(classify_add(None, Some("3001")).is_err());
+    }
+
+    #[test]
+    fn port_zero_is_name_not_port() {
+        // port 0 parses as u16 but is unusual; still treated as bare port
+        let mode = classify_add(Some("0"), None).unwrap();
+        assert_eq!(mode, AddMode::BarePort(0));
+    }
+
+    #[test]
+    fn large_number_beyond_u16_is_name() {
+        let mode = classify_add(Some("99999"), None).unwrap();
+        assert_eq!(mode, AddMode::Named { name: "99999" });
+    }
 }
