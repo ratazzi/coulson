@@ -1211,6 +1211,16 @@ fn run_add_directory_with_name(
     run_add_directory_inner(cfg, &name, &cwd, port, tunnel)
 }
 
+/// Query the running daemon for its HTTP port, falling back to config default.
+fn daemon_http_port(cfg: &CoulsonConfig) -> u16 {
+    RpcClient::new(&cfg.control_socket)
+        .call("health.ping", serde_json::json!({}))
+        .ok()
+        .and_then(|v| v.get("http_port")?.as_u64())
+        .map(|p| p as u16)
+        .unwrap_or_else(|| cfg.listen_http.port())
+}
+
 fn run_add_directory_inner(
     cfg: &CoulsonConfig,
     name: &str,
@@ -1294,7 +1304,7 @@ fn run_add_directory_inner(
             format!(
                 "http://{name}.{}:{}",
                 cfg.domain_suffix,
-                cfg.listen_http.port()
+                daemon_http_port(cfg)
             )
             .cyan()
         );
@@ -1336,7 +1346,7 @@ fn run_add_directory_inner(
             format!(
                 "http://{name}.{}:{}",
                 cfg.domain_suffix,
-                cfg.listen_http.port()
+                daemon_http_port(cfg)
             )
             .cyan()
         );
@@ -1362,7 +1372,7 @@ fn run_add_directory_inner(
             format!(
                 "http://{name}.{}:{}",
                 cfg.domain_suffix,
-                cfg.listen_http.port()
+                daemon_http_port(cfg)
             )
             .cyan()
         );
@@ -1457,7 +1467,7 @@ fn run_add_manual(
         bail!("invalid target: {target}. Expected: port, host:port, or /path/to/socket");
     };
 
-    client.call(
+    let result = client.call(
         "app.create",
         serde_json::json!({
             "name": name,
@@ -1466,12 +1476,13 @@ fn run_add_manual(
             "target_value": target_value,
         }),
     )?;
+    let http_port = result
+        .get("http_port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(cfg.listen_http.port() as u64);
     println!("{} {domain} -> {display}", "+".green().bold());
 
-    println!(
-        "  {}",
-        format!("http://{domain}:{}", cfg.listen_http.port()).cyan()
-    );
+    println!("  {}", format!("http://{domain}:{http_port}").cyan());
 
     if tunnel {
         start_tunnel_after_add(cfg, name)?;

@@ -361,13 +361,13 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
         | "app.create_unix_socket" => {
             let params: service::CreateAppParams = parse_params!(req);
             service::app_create(state, &params)
-                .map(|app| json!({ "app": app }))
+                .map(|app| json!({ "app": app, "http_port": state.listen_http.port() }))
                 .map_err(ControlError::from)
         }
         "app.create_from_folder" => {
             let params: CreateFromFolderParams = parse_params!(req);
             service::app_create_from_folder(state, &params.path)
-                .map(|app| json!({ "app": app }))
+                .map(|app| json!({ "app": app, "http_port": state.listen_http.port() }))
                 .map_err(ControlError::from)
         }
         "app.update" => {
