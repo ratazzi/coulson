@@ -40,10 +40,17 @@ final class CoulsonViewModel: ObservableObject {
         return (base as NSString).appendingPathComponent("coulson/certs")
     }
 
+    /// XDG-aware state directory fallback (matches Rust default for socket).
+    static var defaultStateDir: String {
+        let base = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+            ?? (NSHomeDirectory() + "/.local/state")
+        return (base as NSString).appendingPathComponent("coulson")
+    }
+
     init() {
         let defaultRuntime = Self.defaultRuntimeDir
         let socket = ProcessInfo.processInfo.environment["COULSON_CONTROL_SOCKET"]
-            ?? (defaultRuntime as NSString).appendingPathComponent("coulson.sock")
+            ?? (Self.defaultStateDir as NSString).appendingPathComponent("coulson.sock")
         self.client = UDSControlClient(socketPath: socket)
         self.domainSuffix = ProcessInfo.processInfo.environment["COULSON_DOMAIN_SUFFIX"]
             ?? "coulson.local"

@@ -65,7 +65,7 @@ impl Default for CoulsonConfig {
         Self {
             listen_https: Some(SocketAddr::from(([0, 0, 0, 0], listen_http.port() + 363))),
             listen_http,
-            control_socket: runtime_dir.join("coulson.sock"),
+            control_socket: state_dir.join("coulson.sock"),
             sqlite_path: state_dir.join("state.db"),
             scan_warnings_path: state_dir.join("scan_warnings.json"),
             domain_suffix: "coulson.local".to_string(),
@@ -122,9 +122,6 @@ impl CoulsonConfig {
         }
         if let Some(ref v) = file.runtime_dir {
             cfg.runtime_dir = expand_tilde(v);
-            if file.control_socket.is_none() {
-                cfg.control_socket = cfg.runtime_dir.join("coulson.sock");
-            }
         }
 
         // Layer 3: Environment variables (highest priority)
@@ -176,10 +173,6 @@ impl CoulsonConfig {
         }
         if let Ok(path) = env::var("COULSON_RUNTIME_DIR") {
             cfg.runtime_dir = PathBuf::from(&path);
-            // Also update control_socket if not explicitly set via ENV or TOML
-            if env::var("COULSON_CONTROL_SOCKET").is_err() && file.control_socket.is_none() {
-                cfg.control_socket = cfg.runtime_dir.join("coulson.sock");
-            }
         }
 
         // HTTPS listener: env > toml > default
