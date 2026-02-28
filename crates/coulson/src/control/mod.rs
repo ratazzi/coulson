@@ -103,7 +103,7 @@ struct AppTunnelSetupParams {
     app_id: i64,
     domain: String,
     #[serde(default)]
-    auto_dns: bool,
+    token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -883,8 +883,8 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 params.app_id,
                 TunnelMode::Named,
                 Some(&params.domain),
-                None,
-                params.auto_dns,
+                params.token.as_deref(),
+                false,
             )
             .await
             {

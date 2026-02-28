@@ -318,18 +318,18 @@ enum TunnelCommands {
         #[arg(long)]
         api_token: String,
     },
-    /// Create a per-app custom named tunnel via CF API
+    /// Connect a per-app named tunnel using a Cloudflare tunnel token
     AppSetup {
         /// App name or domain
         name: String,
         /// Tunnel domain
         #[arg(long)]
         domain: String,
-        /// Auto-create DNS CNAME record
+        /// Cloudflare tunnel token (from dashboard or `cloudflared tunnel token`)
         #[arg(long)]
-        auto_dns: bool,
+        token: Option<String>,
     },
-    /// Delete a per-app custom named tunnel via CF API
+    /// Disconnect a per-app named tunnel
     AppTeardown {
         /// App name or domain
         name: String,
@@ -2242,17 +2242,17 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
         TunnelCommands::AppSetup {
             name,
             domain,
-            auto_dns,
+            token,
         } => {
             let (bare_name, app_id) = resolve_app_id(&client, &cfg, Some(name))?;
-            let result = client.call(
-                "tunnel.app_setup",
-                serde_json::json!({
-                    "app_id": app_id,
-                    "domain": domain,
-                    "auto_dns": auto_dns,
-                }),
-            )?;
+            let mut params = serde_json::json!({
+                "app_id": app_id,
+                "domain": domain,
+            });
+            if let Some(t) = &token {
+                params["token"] = serde_json::json!(t);
+            }
+            let result = client.call("tunnel.app_setup", params)?;
             let tunnel_id = result
                 .get("tunnel_id")
                 .and_then(|v| v.as_str())
