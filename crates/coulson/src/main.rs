@@ -1133,8 +1133,16 @@ fn build_watcher(
 async fn main() -> anyhow::Result<()> {
     runtime::init_tracing();
     let cfg = CoulsonConfig::load().context("failed to load config")?;
-
     let cli = Cli::parse();
+
+    #[cfg(debug_assertions)]
+    if !matches!(cli.command, Commands::Serve) {
+        tracing::info!("debug build config:");
+        tracing::info!("  control_socket = {}", cfg.control_socket.display());
+        tracing::info!("  apps_root      = {}", cfg.apps_root.display());
+        tracing::info!("  listen_http    = {}", cfg.listen_http);
+    }
+
     match cli.command {
         Commands::Serve => run_serve(cfg).await,
         Commands::Scan => run_scan_once(cfg),
