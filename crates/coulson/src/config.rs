@@ -5,6 +5,13 @@ use std::path::PathBuf;
 use anyhow::Context;
 use serde::Deserialize;
 
+/// Directory name component used in all default paths.
+/// Debug builds use "coulson-dev" for isolation from release installs.
+#[cfg(debug_assertions)]
+const DIR_NAME: &str = "coulson-dev";
+#[cfg(not(debug_assertions))]
+const DIR_NAME: &str = "coulson";
+
 fn xdg_state_home() -> PathBuf {
     env::var("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -53,14 +60,22 @@ pub struct CoulsonConfig {
 impl Default for CoulsonConfig {
     fn default() -> Self {
         let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        let pow_root = PathBuf::from(format!("{home}/.pow"));
-        let apps_root = if pow_root.exists() {
-            pow_root
-        } else {
-            PathBuf::from(format!("{home}/.coulson"))
+
+        // Release builds fall back to ~/.pow if it exists; debug builds skip this.
+        #[cfg(not(debug_assertions))]
+        let apps_root = {
+            let pow_root = PathBuf::from(format!("{home}/.pow"));
+            if pow_root.exists() {
+                pow_root
+            } else {
+                PathBuf::from(format!("{home}/.{DIR_NAME}"))
+            }
         };
-        let runtime_dir = xdg_runtime_dir().join("coulson");
-        let state_dir = xdg_state_home().join("coulson");
+        #[cfg(debug_assertions)]
+        let apps_root = PathBuf::from(format!("{home}/.{DIR_NAME}"));
+
+        let runtime_dir = xdg_runtime_dir().join(DIR_NAME);
+        let state_dir = xdg_state_home().join(DIR_NAME);
         let listen_http: SocketAddr = "0.0.0.0:18080".parse().expect("default listen addr");
         Self {
             listen_https: Some(SocketAddr::from(([0, 0, 0, 0], listen_http.port() + 363))),
@@ -74,7 +89,7 @@ impl Default for CoulsonConfig {
             idle_timeout_secs: 900,
             link_dir: false,
             inspect_max_requests: 200,
-            certs_dir: xdg_config_home().join("coulson/certs"),
+            certs_dir: xdg_config_home().join(format!("{DIR_NAME}/certs")),
             runtime_dir,
         }
     }
@@ -264,7 +279,7 @@ struct ConfigFile {
 
 impl ConfigFile {
     fn load() -> Self {
-        let path = xdg_config_home().join("coulson/config.toml");
+        let path = xdg_config_home().join(format!("{DIR_NAME}/config.toml"));
         let Ok(content) = std::fs::read_to_string(&path) else {
             return Self::default();
         };
