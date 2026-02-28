@@ -1409,12 +1409,9 @@ fn start_tunnel_after_add(cfg: &CoulsonConfig, name: &str) -> anyhow::Result<()>
     };
 
     // Start quick tunnel
-    let app_id_num: i64 = app_id
-        .parse()
-        .with_context(|| format!("invalid app_id: {app_id}"))?;
     let result = client.call(
         "app.update",
-        serde_json::json!({ "app_id": app_id_num, "tunnel_mode": "quick" }),
+        serde_json::json!({ "app_id": app_id, "tunnel_mode": "quick" }),
     )?;
 
     let url = result
@@ -1624,7 +1621,7 @@ fn resolve_app_id(
     client: &RpcClient,
     cfg: &CoulsonConfig,
     name: Option<String>,
-) -> anyhow::Result<(String, String)> {
+) -> anyhow::Result<(String, i64)> {
     let bare_name = resolve_app_name(cfg, name.as_deref())?;
     let domain_match = format!("{bare_name}.{}", cfg.domain_suffix);
 
@@ -1639,10 +1636,7 @@ fn resolve_app_id(
                     || a.get("domain").and_then(|d| d.as_str()) == Some(&bare_name)
             })
         })
-        .and_then(|a| {
-            a.get("id")
-                .map(|i| i.to_string().trim_matches('"').to_string())
-        })
+        .and_then(|a| a.get("id")?.as_i64())
         .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
 
     Ok((bare_name, app_id))
@@ -1796,7 +1790,7 @@ fn run_logs(
                     a.name == bare_name || a.domain.0 == domain_match || a.domain.0 == bare_name
                 })
                 .ok_or_else(|| anyhow::anyhow!("app not found: {bare_name}"))?;
-            (bare_name, app.id.0.to_string())
+            (bare_name, app.id.0)
         }
     };
 
@@ -2113,7 +2107,7 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
                     // 1. has saved per-app tunnel creds → named (reconnect)
                     // 2. global named tunnel is connected → global (expose via it)
                     // 3. otherwise → quick
-                    let app_info = find_app_json(&client, &app_id)?;
+                    let app_info = find_app_json(&client, app_id)?;
                     let has_creds = app_info
                         .get("app_tunnel_creds")
                         .and_then(|v| v.as_str())
@@ -2284,19 +2278,14 @@ fn run_tunnel(cfg: CoulsonConfig, action: TunnelCommands) -> anyhow::Result<()> 
 }
 
 /// Look up an app by ID from the RPC app.list result.
-fn find_app_json(client: &RpcClient, app_id: &str) -> anyhow::Result<serde_json::Value> {
+fn find_app_json(client: &RpcClient, app_id: i64) -> anyhow::Result<serde_json::Value> {
     let result = client.call("app.list", serde_json::json!({}))?;
     result
         .get("apps")
         .and_then(|v| v.as_array())
         .and_then(|apps| {
             apps.iter()
-                .find(|a| {
-                    a.get("id")
-                        .map(|v| v.to_string().trim_matches('"').to_string())
-                        .as_deref()
-                        == Some(app_id)
-                })
+                .find(|a| a.get("id").and_then(|v| v.as_i64()) == Some(app_id))
                 .cloned()
         })
         .ok_or_else(|| anyhow::anyhow!("app not found: {app_id}"))
