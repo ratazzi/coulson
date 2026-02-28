@@ -1282,6 +1282,7 @@ fn run_add_directory_inner(
         if cfg.link_dir {
             // Legacy mode: write powfile directly in apps_root
             std::fs::write(&link_path, format!("{p}\n"))?;
+            println!("  {} {}", "+".green().bold(), link_path.display());
         } else {
             // Default mode: write .coulson in CWD, symlink from apps_root
             let dotfile = cwd.join(".coulson");
@@ -1292,6 +1293,7 @@ fn run_add_directory_inner(
                 );
             }
             std::fs::write(&dotfile, format!("{p}\n"))?;
+            println!("  {} {}", "+".green().bold(), dotfile.display());
             #[cfg(unix)]
             std::os::unix::fs::symlink(&dotfile, &link_path).with_context(|| {
                 format!(
@@ -1300,6 +1302,12 @@ fn run_add_directory_inner(
                     dotfile.display()
                 )
             })?;
+            println!(
+                "  {} {} -> {}",
+                "+".green().bold(),
+                link_path.display(),
+                dotfile.display()
+            );
         }
 
         println!(
@@ -1316,6 +1324,8 @@ fn run_add_directory_inner(
             )
             .cyan()
         );
+        // Notify daemon to pick up the new app immediately
+        let _ = RpcClient::new(&cfg.control_socket).call("apps.scan", serde_json::json!({}));
         if tunnel {
             start_tunnel_after_add(cfg, name)?;
         }
@@ -1342,6 +1352,12 @@ fn run_add_directory_inner(
                 cwd.display()
             )
         })?;
+        println!(
+            "  {} {} -> {}",
+            "+".green().bold(),
+            link_path.display(),
+            cwd.display()
+        );
         println!(
             "{} {name}.{} ({}) -> {}",
             "+".green().bold(),
@@ -1370,6 +1386,12 @@ fn run_add_directory_inner(
             )
         })?;
         println!(
+            "  {} {} -> {}",
+            "+".green().bold(),
+            link_path.display(),
+            cwd.display()
+        );
+        println!(
             "{} {name}.{} -> {}",
             "+".green().bold(),
             cfg.domain_suffix,
@@ -1389,6 +1411,9 @@ fn run_add_directory_inner(
             "Tip: use --port to specify a target port, or add coulson.json/coulson.routes".dimmed()
         );
     }
+
+    // Notify daemon to pick up the new app immediately
+    let _ = RpcClient::new(&cfg.control_socket).call("apps.scan", serde_json::json!({}));
 
     if tunnel {
         start_tunnel_after_add(cfg, name)?;
