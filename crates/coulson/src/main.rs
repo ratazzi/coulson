@@ -751,6 +751,11 @@ fn dns_resolves_to_localhost(host: &str) -> Option<bool> {
 }
 
 async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
+    // Only the daemon should clean up a stale control socket.
+    if cfg.control_socket.exists() {
+        std::fs::remove_file(&cfg.control_socket)?;
+    }
+
     let state = build_state(&cfg)?;
 
     let startup_scan = scanner::sync_from_apps_root(&state)?;

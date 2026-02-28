@@ -21,15 +21,6 @@ pub fn ensure_runtime_paths(cfg: &CoulsonConfig) -> anyhow::Result<()> {
         })?;
     }
 
-    if cfg.control_socket.exists() {
-        fs::remove_file(&cfg.control_socket).with_context(|| {
-            format!(
-                "failed to remove stale control socket: {}",
-                cfg.control_socket.display()
-            )
-        })?;
-    }
-
     if let Some(parent) = cfg.sqlite_path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create sqlite dir: {}", parent.display()))?;
