@@ -110,6 +110,15 @@ struct AppIdParams {
 }
 
 #[derive(Debug, Deserialize)]
+struct ProcessActionParams {
+    app_id: i64,
+    /// Restart only this process type (`web` or a Procfile companion type).
+    /// Only honored by `process.restart`.
+    #[serde(default)]
+    process_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct NamedTunnelSetupParams {
     #[serde(default)]
     api_token: Option<String>,
@@ -532,7 +541,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             }
         }
         "process.start" | "process.stop" | "process.restart" => {
-            let params: AppIdParams = parse_params!(req);
+            let params: ProcessActionParams = parse_params!(req);
             let app = find_app!(state, req, params.app_id);
             let (root, kind, name) = match &app.target {
                 crate::domain::BackendTarget::Managed {
@@ -545,6 +554,22 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     );
                 }
             };
+            if let Some(ptype) = &params.process_type {
+                if req.method != "process.restart" {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(
+                            "process_type is only supported for process.restart".to_string(),
+                        ),
+                    );
+                }
+                if !crate::process::is_valid_process_type(ptype) {
+                    return render_err(
+                        req.request_id,
+                        ControlError::InvalidParams(format!("invalid process type '{ptype}'")),
+                    );
+                }
+            }
             if req.method == "process.stop" {
                 let mut pm = state.process_manager.lock().await;
                 let killed = pm.kill_process(params.app_id).await;
@@ -556,9 +581,38 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                     Ok(v) => v,
                     Err(e) => return internal_error(req.request_id, e.to_string()),
                 };
+            let mut pm = state.process_manager.lock().await;
+            if let Some(ptype) = &params.process_type {
+                return match pm
+                    .restart_process_type(
+                        params.app_id,
+                        &name,
+                        std::path::Path::new(&root),
+                        &kind,
+                        ptype,
+                        env_url_env,
+                    )
+                    .await
+                {
+                    Ok(listen_target) => {
+                        let listen_json = match &listen_target {
+                            crate::process::ListenTarget::Uds(path) => {
+                                json!({ "type": "uds", "path": path.to_string_lossy() })
+                            }
+                            crate::process::ListenTarget::Tcp { host, port } => {
+                                json!({ "type": "tcp", "host": host, "port": port })
+                            }
+                        };
+                        ok_response(
+                            req.request_id,
+                            json!({ "restarted": true, "listen": listen_json }),
+                        )
+                    }
+                    Err(e) => internal_error(req.request_id, e.to_string()),
+                };
+            }
             // start and restart both ensure the process is running;
             // restart kills first.
-            let mut pm = state.process_manager.lock().await;
             if req.method == "process.restart" {
                 pm.kill_process(params.app_id).await;
             }
