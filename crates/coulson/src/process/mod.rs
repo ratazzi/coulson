@@ -95,6 +95,9 @@ struct ManagedProcess {
 struct CompanionProcess {
     process_type: String,
     handle: ProcessHandle,
+    /// Companion's own spawn time — it can be restarted independently of the
+    /// primary, so its uptime is not the group's.
+    started_at: Instant,
 }
 
 struct ProcessGroup {
@@ -388,7 +391,7 @@ impl ProcessManager {
                     kind: proc.kind.clone(),
                     process_type: companion.process_type.clone(),
                     listen_address: String::new(),
-                    uptime_secs: now.duration_since(proc.started_at).as_secs(),
+                    uptime_secs: now.duration_since(companion.started_at).as_secs(),
                     idle_secs: now.duration_since(proc.last_active).as_secs(),
                     alive: c_alive,
                     backend: c_backend.to_string(),
@@ -787,6 +790,230 @@ impl ProcessManager {
         }
     }
 
+    /// Restart a single process type of a running app group: `"web"` restarts
+    /// the primary while companions keep running; any other type restarts that
+    /// companion alone. The group must already be running — starting a lone
+    /// member of a stopped app is not meaningful.
+    /// Returns the (possibly re-resolved) listen target of the primary.
+    pub async fn restart_process_type(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        process_type: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<ListenTarget> {
+        if !self.processes.contains_key(&app_id) {
+            anyhow::bail!("{name} is not running; use `coulson restart {name}` to start it");
+        }
+        if process_type == "web" {
+            if self
+                .processes
+                .get(&app_id)
+                .is_some_and(|g| g.companions.is_empty())
+            {
+                // No companions to preserve — identical to a group restart.
+                self.kill_process(app_id).await;
+                return self
+                    .ensure_running(app_id, name, root, kind, env_url_env)
+                    .await;
+            }
+            self.restart_primary(app_id, name, root, kind, env_url_env)
+                .await
+        } else {
+            self.restart_companion(app_id, name, root, kind, process_type, env_url_env)
+                .await?;
+            Ok(self
+                .processes
+                .get(&app_id)
+                .expect("group checked above")
+                .primary
+                .listen_target
+                .clone())
+        }
+    }
+
+    /// Kill and respawn one companion, re-resolving its Procfile entry and env
+    /// so config edits take effect. Also (re)starts a configured companion that
+    /// died or failed to spawn with the group.
+    async fn restart_companion(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        process_type: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<()> {
+        let (_spec, app_dir, _prov_name, companion_types, manifest, coulsonrc) =
+            self.resolve_spec(app_id, name, root, kind)?;
+
+        let running = self
+            .processes
+            .get(&app_id)
+            .is_some_and(|g| g.companions.iter().any(|c| c.process_type == process_type));
+        if !running && !companion_types.iter().any(|t| t == process_type) {
+            let mut available = vec!["web".to_string()];
+            available.extend(companion_types);
+            anyhow::bail!(
+                "unknown process type '{process_type}' for {name}; available: {}",
+                available.join(", ")
+            );
+        }
+
+        if let Some(group) = self.processes.get_mut(&app_id) {
+            if let Some(pos) = group
+                .companions
+                .iter()
+                .position(|c| c.process_type == process_type)
+            {
+                info!(app_id, process_type, "restarting companion process");
+                let old = group.companions.remove(pos);
+                kill_handle(old.handle).await;
+            }
+        }
+
+        let log_dir = resolve_log_dir(&manifest, root, &app_dir);
+        std::fs::create_dir_all(&log_dir).ok();
+        let log_tx = self.log_tx.clone();
+        let types = [process_type.to_string()];
+        let spawned = self.spawn_companions(
+            app_id,
+            name,
+            root,
+            kind,
+            &types,
+            &app_dir,
+            &manifest,
+            env_url_env.as_ref(),
+            &log_dir,
+            &log_tx,
+            &coulsonrc,
+        );
+        if spawned.is_empty() {
+            anyhow::bail!(
+                "failed to start {process_type} for {name} (see {})",
+                process_log_path(&log_dir, process_type).display()
+            );
+        }
+        self.processes
+            .get_mut(&app_id)
+            .expect("group checked by caller")
+            .companions
+            .extend(spawned);
+        Ok(())
+    }
+
+    /// Kill and respawn only the primary, keeping companions running. Only
+    /// reached for groups that have companions (procfile — never docker). If
+    /// the respawn fails the group is gone, so the orphaned companions are
+    /// killed too rather than leaked.
+    async fn restart_primary(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<ListenTarget> {
+        let group = self
+            .processes
+            .remove(&app_id)
+            .expect("group checked by caller");
+        info!(app_id, "restarting primary process, keeping companions");
+        kill_handle(group.primary.handle).await;
+        cleanup_listen_target(&group.primary.listen_target);
+        self.fire_hook(HookEvent::AppStop, app_id, &group.name, &group.root, kind);
+
+        match self
+            .spawn_primary(app_id, name, root, kind, env_url_env)
+            .await
+        {
+            Ok((primary, idle_timeout)) => {
+                let listen_target = primary.listen_target.clone();
+                self.processes.insert(
+                    app_id,
+                    ProcessGroup {
+                        primary,
+                        companions: group.companions,
+                        name: name.to_string(),
+                        root: root.to_path_buf(),
+                        idle_timeout,
+                    },
+                );
+                Ok(listen_target)
+            }
+            Err(e) => {
+                for companion in group.companions {
+                    kill_handle(companion.handle).await;
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Resolve and spawn the primary (non-docker), waiting for readiness.
+    /// The spawn half of `ensure_running`, minus companions and group insert.
+    async fn spawn_primary(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<(ManagedProcess, Option<Duration>)> {
+        let (mut spec, app_dir, prov_name, _companion_types, manifest, coulsonrc) =
+            self.resolve_spec(app_id, name, root, kind)?;
+        let resolved_env =
+            apply_and_capture_env(&mut spec, &manifest, env_url_env.as_ref(), &coulsonrc, root);
+
+        let log_dir = resolve_log_dir(&manifest, root, &app_dir);
+        std::fs::create_dir_all(&log_dir).ok();
+        let log_path = process_log_path(&log_dir, "web");
+
+        info!(
+            app_id,
+            kind,
+            listen = %listen_target_display(&spec.listen_target),
+            root = %root.display(),
+            "starting managed process via {prov_name} provider",
+        );
+        self.fire_hook(HookEvent::AppStart, app_id, name, root, kind);
+        cleanup_listen_target(&spec.listen_target);
+
+        let handle = self.spawn_process(
+            name,
+            &spec,
+            &log_path,
+            &app_dir,
+            &self.log_tx.clone(),
+            app_id,
+            "web",
+        )?;
+
+        if let Err(e) = wait_for_ready(&spec.listen_target, Duration::from_secs(30)).await {
+            log_tail(&log_path, name);
+            kill_handle(handle).await;
+            return Err(e);
+        }
+        self.fire_hook(HookEvent::AppReady, app_id, name, root, kind);
+
+        let now = Instant::now();
+        Ok((
+            ManagedProcess {
+                handle,
+                listen_target: spec.listen_target.clone(),
+                started_at: now,
+                last_active: now,
+                kind: kind.to_string(),
+                ready: true,
+                resolved_env,
+            },
+            manifest_idle_timeout(&manifest),
+        ))
+    }
+
     pub fn mark_active(&mut self, app_id: i64) {
         if let Some(group) = self.processes.get_mut(&app_id) {
             group.primary.last_active = Instant::now();
@@ -1062,6 +1289,7 @@ impl ProcessManager {
                             companions.push(CompanionProcess {
                                 process_type: ptype.clone(),
                                 handle,
+                                started_at: Instant::now(),
                             });
                         }
                         Err(e) => {

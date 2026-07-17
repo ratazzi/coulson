@@ -367,9 +367,9 @@ enum Commands {
         /// App name or domain (omit to match CWD)
         name: Option<String>,
     },
-    /// Restart a managed process
+    /// Restart a managed process (whole group, or one type: app:worker, :worker)
     Restart {
-        /// App name or domain (omit to match CWD)
+        /// App name or domain, optionally with :type (omit name to match CWD)
         name: Option<String>,
     },
     /// Trust the Coulson CA certificate (add to macOS login keychain)
@@ -1502,9 +1502,12 @@ async fn main() -> anyhow::Result<()> {
             no_remote,
         } => run_env(cfg, name, bare, json, preview, no_remote).await,
         Commands::Ps => run_ps(cfg),
-        Commands::Start { name } => run_process_action(cfg, name, "process.start"),
-        Commands::Stop { name } => run_process_action(cfg, name, "process.stop"),
-        Commands::Restart { name } => run_process_action(cfg, name, "process.restart"),
+        Commands::Start { name } => run_process_action(cfg, name, "process.start", None),
+        Commands::Stop { name } => run_process_action(cfg, name, "process.stop", None),
+        Commands::Restart { name } => {
+            let (name, process_type) = parse_process_target(name)?;
+            run_process_action(cfg, name, "process.restart", process_type)
+        }
         Commands::Open { name } => run_open(cfg, name),
         Commands::Attach { name } => run_attach(cfg, name),
         Commands::Trust { forward, pf, force } => run_trust(cfg, forward || pf, force),
@@ -2395,15 +2398,38 @@ fn run_ps(cfg: CoulsonConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Split a `[name][:type]` restart target into its parts: `app` addresses the
+/// whole group, `app:worker` one process type, `:worker` a type of the CWD app.
+fn parse_process_target(arg: Option<String>) -> anyhow::Result<(Option<String>, Option<String>)> {
+    let Some(arg) = arg else {
+        return Ok((None, None));
+    };
+    match arg.split_once(':') {
+        None => Ok((Some(arg), None)),
+        Some((name, ptype)) => {
+            if ptype.is_empty() {
+                anyhow::bail!("missing process type after ':' in '{arg}'");
+            }
+            let name = (!name.is_empty()).then(|| name.to_string());
+            Ok((name, Some(ptype.to_string())))
+        }
+    }
+}
+
 fn run_process_action(
     cfg: CoulsonConfig,
     name: Option<String>,
     method: &str,
+    process_type: Option<String>,
 ) -> anyhow::Result<()> {
     let client = RpcClient::new(&cfg.control_socket);
     let (bare_name, app_id) = resolve_app_id(&client, &cfg, name)?;
 
-    let result = client.call(method, serde_json::json!({ "app_id": app_id }))?;
+    let mut params = serde_json::json!({ "app_id": app_id });
+    if let Some(ptype) = &process_type {
+        params["process_type"] = serde_json::json!(ptype);
+    }
+    let result = client.call(method, params)?;
 
     let action = match method {
         "process.start" => "started",
@@ -2411,10 +2437,15 @@ fn run_process_action(
         "process.restart" => "restarted",
         _ => "done",
     };
-    println!("{} {bare_name} {action}", "✓".green());
+    let display = match &process_type {
+        Some(ptype) => format!("{bare_name}:{ptype}"),
+        None => bare_name,
+    };
+    println!("{} {display} {action}", "✓".green());
 
-    // Show URLs after start/restart
-    if method != "process.stop" {
+    // Show URLs after start/restart (not after a companion-only restart —
+    // companions don't serve HTTP)
+    if method != "process.stop" && process_type.as_deref().is_none_or(|t| t == "web") {
         if let Some(app) = client
             .call("app.list", serde_json::json!({}))
             .ok()
@@ -3660,6 +3691,45 @@ fn is_pf_configured_quick(
     _listen_https: &Option<std::net::SocketAddr>,
 ) -> bool {
     false
+}
+
+#[cfg(test)]
+mod process_target_tests {
+    use super::*;
+
+    #[test]
+    fn no_arg_is_group_of_cwd_app() {
+        assert_eq!(parse_process_target(None).unwrap(), (None, None));
+    }
+
+    #[test]
+    fn bare_name_is_whole_group() {
+        assert_eq!(
+            parse_process_target(Some("myapp".into())).unwrap(),
+            (Some("myapp".into()), None)
+        );
+    }
+
+    #[test]
+    fn name_and_type() {
+        assert_eq!(
+            parse_process_target(Some("myapp:worker".into())).unwrap(),
+            (Some("myapp".into()), Some("worker".into()))
+        );
+    }
+
+    #[test]
+    fn type_only_uses_cwd_app() {
+        assert_eq!(
+            parse_process_target(Some(":worker".into())).unwrap(),
+            (None, Some("worker".into()))
+        );
+    }
+
+    #[test]
+    fn trailing_colon_is_an_error() {
+        assert!(parse_process_target(Some("myapp:".into())).is_err());
+    }
 }
 
 #[cfg(test)]
