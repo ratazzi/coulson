@@ -3526,15 +3526,21 @@ async fn run_forward(
     Ok(())
 }
 
+/// Resolve symlinks so launchd keeps working independently of the CLI helper link.
+#[cfg(target_os = "macos")]
+fn resolve_executable_path(path: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    std::fs::canonicalize(path)
+        .with_context(|| format!("failed to resolve executable path {}", path.display()))
+}
+
 /// Install the launchd forwarding daemon plist.
 #[cfg(target_os = "macos")]
 fn setup_forward_daemon(cfg: &CoulsonConfig, force: bool) -> anyhow::Result<()> {
     let http_port = cfg.listen_http.port();
     let https_port = cfg.listen_https.map(|a| a.port());
 
-    // Find the coulson binary path
-    let coulson_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/coulson"));
+    let current_exe = std::env::current_exe().context("failed to determine executable path")?;
+    let coulson_bin = resolve_executable_path(&current_exe)?;
 
     let username = std::env::var("SUDO_USER")
         .or_else(|_| std::env::var("USER"))
@@ -3835,5 +3841,31 @@ mod add_tests {
     fn large_number_beyond_u16_is_name() {
         let mode = classify_add(Some("99999"), None).unwrap();
         assert_eq!(mode, AddMode::Named { name: "99999" });
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod forward_tests {
+    use super::*;
+
+    #[test]
+    fn executable_path_resolves_cli_symlink() {
+        let test_dir =
+            std::env::temp_dir().join(format!("coulson-forward-path-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&test_dir).unwrap();
+
+        let binary = test_dir.join("Coulson.app/Contents/Resources/coulson");
+        std::fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        std::fs::write(&binary, b"binary").unwrap();
+
+        let cli_link = test_dir.join("coulson");
+        std::os::unix::fs::symlink(&binary, &cli_link).unwrap();
+
+        assert_eq!(
+            resolve_executable_path(&cli_link).unwrap(),
+            std::fs::canonicalize(&binary).unwrap()
+        );
+
+        std::fs::remove_dir_all(test_dir).unwrap();
     }
 }
