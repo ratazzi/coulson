@@ -1,3 +1,4 @@
+mod app_status;
 mod certs;
 mod config;
 mod control;
@@ -130,6 +131,7 @@ pub struct SharedState {
     pub listen_http: std::net::SocketAddr,
     pub listen_https: Option<std::net::SocketAddr>,
     pub process_manager: ProcessManagerHandle,
+    pub app_statuses: app_status::AppStatusStore,
     pub provider_registry: Arc<ProviderRegistry>,
     pub share_signer: Arc<ShareSigner>,
     pub inspect_max_requests: usize,
@@ -359,6 +361,14 @@ enum Commands {
     },
     /// Show running managed processes
     Ps,
+    /// Show application lifecycle status from the running daemon
+    Status {
+        /// App name or domain (omit to list all apps)
+        name: Option<String>,
+        /// Print the structured status response as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Start a managed process
     Start {
         /// App name or domain (omit to match CWD)
@@ -516,7 +526,9 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         pm_use_default_https,
         cfg.domain_suffix.clone(),
     );
+    let app_statuses = app_status::AppStatusStore::default();
     let process_manager = process::new_process_manager(process::ProcessManagerConfig {
+        app_statuses: app_statuses.clone(),
         idle_timeout,
         registry: Arc::clone(&registry),
         runtime_dir: cfg.runtime_dir.clone(),
@@ -544,6 +556,7 @@ fn build_state(cfg: &CoulsonConfig) -> anyhow::Result<SharedState> {
         listen_http: cfg.listen_http,
         listen_https: cfg.listen_https,
         process_manager,
+        app_statuses,
         provider_registry: registry,
         share_signer,
         inspect_max_requests: cfg.inspect_max_requests,
@@ -1323,6 +1336,15 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
         }
     });
 
+    let status_state = state.clone();
+    let status_task = tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(1)).await;
+            let mut pm = status_state.process_manager.lock().await;
+            pm.refresh_runtime_states().await;
+        }
+    });
+
     let reaper_state = state.clone();
     let reaper_task = tokio::spawn(async move {
         loop {
@@ -1337,6 +1359,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
             let mut pm = reaper_state.process_manager.lock().await;
             match reaper_state.store.list_filtered(None, None) {
                 Ok(apps) => {
+                    reaper_state.app_statuses.retain_apps(&apps);
                     let live_apps: HashMap<i64, (String, std::path::PathBuf, String)> = apps
                         .into_iter()
                         .filter_map(|a| match a.target {
@@ -1384,6 +1407,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
     dedicated_task.abort();
     mdns_task.abort();
     reaper_task.abort();
+    status_task.abort();
 
     Ok(())
 }
@@ -1487,9 +1511,9 @@ fn build_watcher(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    runtime::init_tracing();
-    let cfg = CoulsonConfig::load().context("failed to load config")?;
     let cli = Cli::parse();
+    runtime::init_tracing(matches!(&cli.command, Commands::Status { json: true, .. }));
+    let cfg = CoulsonConfig::load().context("failed to load config")?;
 
     #[cfg(debug_assertions)]
     if !matches!(cli.command, Commands::Serve) {
@@ -1541,6 +1565,7 @@ async fn main() -> anyhow::Result<()> {
             no_remote,
         } => run_env(cfg, name, bare, json, preview, no_remote).await,
         Commands::Ps => run_ps(cfg),
+        Commands::Status { name, json } => run_status(cfg, name, json),
         Commands::Start { name } => run_process_action(cfg, name, "process.start"),
         Commands::Stop { name } => run_process_action(cfg, name, "process.stop"),
         Commands::Restart { name } => run_process_action(cfg, name, "process.restart"),
@@ -2572,6 +2597,57 @@ fn open_url(
             ctx.use_default_http_port,
         ),
     }
+}
+
+fn run_status(cfg: CoulsonConfig, name: Option<String>, json: bool) -> anyhow::Result<()> {
+    let response = RpcClient::new(&cfg.control_socket)
+        .call("app.status", serde_json::json!({ "name": name }))
+        .context("could not read app status from daemon")?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+        return Ok(());
+    }
+    #[derive(serde::Deserialize)]
+    struct StatusResponse {
+        apps: Vec<app_status::AppStatus>,
+    }
+    #[derive(Tabled)]
+    struct StatusRow {
+        #[tabled(rename = "APP")]
+        name: String,
+        #[tabled(rename = "STATUS")]
+        state: &'static str,
+        #[tabled(rename = "DETAIL")]
+        detail: String,
+    }
+    let result: StatusResponse = serde_json::from_value(response)?;
+    let rows: Vec<_> = result
+        .apps
+        .into_iter()
+        .map(|app| {
+            let detail = if app.state == app_status::AppState::Failed {
+                app.last_error
+                    .map(|e| match e.exit_code {
+                        Some(code) => format!("{} (exit {code})", e.message),
+                        None => e.message,
+                    })
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+            StatusRow {
+                name: app.name,
+                state: app.state.label(),
+                detail,
+            }
+        })
+        .collect();
+    if rows.is_empty() {
+        println!("No apps registered");
+    } else {
+        println!("{}", tabled::Table::new(rows));
+    }
+    Ok(())
 }
 
 fn run_open(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
@@ -3812,6 +3888,24 @@ fn is_pf_configured_quick(
 #[cfg(test)]
 mod open_tests {
     use super::*;
+
+    #[test]
+    fn status_cli_accepts_all_apps_name_domain_and_json() {
+        for args in [
+            vec!["coulson", "status"],
+            vec!["coulson", "status", "demo", "--json"],
+            vec!["coulson", "status", "--json", "demo.coulson.local"],
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap();
+            match cli.command {
+                Commands::Status { name, json } => {
+                    assert_eq!(json, args.contains(&"--json"));
+                    assert_eq!(name.is_some(), args.len() > 2);
+                }
+                _ => panic!("expected status command"),
+            }
+        }
+    }
 
     fn context() -> domain::UrlContext<'static> {
         domain::UrlContext {

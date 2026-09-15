@@ -39,6 +39,23 @@ pub fn app_list(state: &SharedState) -> Result<Vec<AppSpec>, ServiceError> {
     state.store.list_all().map_err(ServiceError::from)
 }
 
+pub fn app_status(
+    state: &SharedState,
+    name: Option<&str>,
+) -> Result<Vec<crate::app_status::AppStatus>, ServiceError> {
+    let apps = app_list(state)?;
+    let mut statuses: Vec<_> = apps
+        .iter()
+        .filter(|app| name.is_none_or(|n| app.name == n || app.domain.0 == n))
+        .map(|app| state.app_statuses.snapshot(app))
+        .collect();
+    if name.is_some() && statuses.is_empty() {
+        return Err(ServiceError::NotFound);
+    }
+    statuses.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(statuses)
+}
+
 pub fn app_get_by_name(state: &SharedState, name: &str) -> Result<AppSpec, ServiceError> {
     match state.store.get_by_name(name) {
         Ok(Some(app)) => Ok(app),

@@ -14,6 +14,16 @@ struct AppDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 statusBanner
+                if vm.status(for: app) == .failed {
+                    Text(vm.statusDetail(for: app))
+                        .font(.callout)
+                        .foregroundStyle(.red)
+                    if app.target.type == "managed" && app.enabled {
+                        Button("Retry Start") {
+                            Task { await vm.retryStart(app: app) }
+                        }
+                    }
+                }
                 urlsSection
                 infoSection
                 settingsSection
@@ -60,11 +70,11 @@ struct AppDetailView: View {
     private var statusBanner: some View {
         HStack {
             Label(
-                app.enabled ? "Running" : "Stopped",
-                systemImage: app.enabled ? "circle.fill" : "circle"
+                vm.status(for: app).label,
+                systemImage: "circle.fill"
             )
             .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(app.enabled ? .green : .secondary)
+            .foregroundStyle(Color(nsColor: vm.status(for: app).color))
 
             Spacer()
 

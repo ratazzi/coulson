@@ -22,6 +22,11 @@ struct RequestEnvelope {
     params: serde_json::Value,
 }
 
+#[derive(Deserialize)]
+struct AppStatusParams {
+    name: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ResponseEnvelope {
     request_id: String,
@@ -308,6 +313,12 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             "use_default_https_port": state.use_default_https_port(),
             "runtime_dir": state.runtime_dir.to_string_lossy(),
         })),
+        "app.status" => {
+            let params: AppStatusParams = parse_params!(req);
+            service::app_status(state, params.name.as_deref())
+                .map(|apps| json!({ "apps": apps }))
+                .map_err(ControlError::from)
+        }
         "app.list" => service::app_list(state)
             .map(|apps| json!({ "apps": apps }))
             .map_err(ControlError::from),
@@ -549,11 +560,36 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
                 return ok_response(req.request_id, json!({ "stopped": killed }));
             }
             // Pre-fetch env_url outside the lock (only needed for start/restart)
-            let env_url_env =
-                match crate::process::prefetch_env_url(std::path::Path::new(&root)).await {
-                    Ok(v) => v,
-                    Err(e) => return internal_error(req.request_id, e.to_string()),
-                };
+            state
+                .process_manager
+                .lock()
+                .await
+                .mark_starting_if_inactive(
+                    params.app_id,
+                    &name,
+                    std::path::Path::new(&root),
+                    &kind,
+                );
+            let env_url_env = match crate::process::prefetch_env_url(std::path::Path::new(&root))
+                .await
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    let e = e.context(crate::app_status::StartFailure {
+                        code: "environment_failed",
+                        message: "Could not fetch startup environment; check env_url configuration"
+                            .into(),
+                    });
+                    state.process_manager.lock().await.record_start_failure(
+                        params.app_id,
+                        &name,
+                        std::path::Path::new(&root),
+                        &kind,
+                        &e,
+                    );
+                    return internal_error(req.request_id, e.to_string());
+                }
+            };
             // start and restart both ensure the process is running;
             // restart kills first.
             let mut pm = state.process_manager.lock().await;
@@ -1283,6 +1319,79 @@ fn internal_error(request_id: String, message: String) -> ResponseEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn status_rpc_reads_lifecycle_without_waiting_for_startup_lock() {
+        let dir = std::env::temp_dir().join(format!("coulson-status-rpc-{}", uuid::Uuid::now_v7()));
+        let cfg = crate::config::CoulsonConfig {
+            apps_root: dir.join("apps"),
+            sqlite_path: dir.join("db"),
+            control_socket: dir.join("control.sock"),
+            scan_warnings_path: dir.join("warnings.json"),
+            runtime_dir: dir.join("runtime"),
+            certs_dir: dir.join("certs"),
+            process_backend: crate::config::ProcessBackend::Direct,
+            ..Default::default()
+        };
+        let state = crate::build_state(&cfg).unwrap();
+        let (app, _) = state
+            .store
+            .upsert_scanned_managed(
+                "demo",
+                &crate::domain::DomainName("demo.coulson.local".into()),
+                dir.to_str().unwrap(),
+                "procfile",
+                true,
+                "fs",
+                "entry",
+                None,
+            )
+            .unwrap();
+        let _startup_lock = state.process_manager.lock().await;
+        for expected in ["sleeping", "starting", "ready", "failed"] {
+            match expected {
+                "starting" => state.app_statuses.starting(&app),
+                "ready" => state.app_statuses.ready(&app),
+                "failed" => state.app_statuses.failed(
+                    &app,
+                    "process_exited",
+                    "Primary process exited",
+                    Some(7),
+                ),
+                _ => {}
+            }
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                dispatch_request(
+                    RequestEnvelope {
+                        request_id: "status-test".into(),
+                        method: "app.status".into(),
+                        params: json!({ "name": "demo.coulson.local" }),
+                    },
+                    &state,
+                ),
+            )
+            .await
+            .unwrap();
+            assert!(response.ok);
+            let result = response.result.unwrap();
+            assert_eq!(result["apps"][0]["state"], expected);
+            assert_eq!(result["apps"][0]["app_id"], app.id.0);
+            assert!(result["apps"][0].get("target").is_none());
+        }
+        let missing = dispatch_request(
+            RequestEnvelope {
+                request_id: "missing".into(),
+                method: "app.status".into(),
+                params: json!({ "name": "missing" }),
+            },
+            &state,
+        )
+        .await;
+        assert!(!missing.ok);
+        assert_eq!(missing.error.unwrap().code, "not_found");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     // -- validate_tunnel_domain --
 

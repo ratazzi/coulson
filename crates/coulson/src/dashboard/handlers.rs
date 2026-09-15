@@ -563,12 +563,35 @@ pub async fn action_restart_process(
             root, kind, name, ..
         } = &app.target
         {
+            state
+                .shared
+                .process_manager
+                .lock()
+                .await
+                .mark_starting_if_inactive(app_id, name, std::path::Path::new(root), kind);
             let env_url_env = match crate::process::prefetch_env_url(std::path::Path::new(root))
                 .await
             {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(app_id, error = %e, "env_url fetch failed, aborting restart");
+                    let error = e.context(crate::app_status::StartFailure {
+                        code: "environment_failed",
+                        message: "Could not fetch startup environment; check env_url configuration"
+                            .into(),
+                    });
+                    state
+                        .shared
+                        .process_manager
+                        .lock()
+                        .await
+                        .record_start_failure(
+                            app_id,
+                            name,
+                            std::path::Path::new(root),
+                            kind,
+                            &error,
+                        );
                     return Redirect::to("/processes");
                 }
             };

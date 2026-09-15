@@ -11,8 +11,9 @@ struct AppRowView: View {
         HStack(spacing: 10) {
             // Status indicator
             Circle()
-                .fill(app.enabled ? Color.green : Color.gray.opacity(0.35))
+                .fill(Color(nsColor: vm.status(for: app).color))
                 .frame(width: 9, height: 9)
+                .help(vm.statusDetail(for: app))
 
             // Domain + target info
             VStack(alignment: .leading, spacing: 2) {
