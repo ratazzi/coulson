@@ -18,6 +18,7 @@ pub mod service;
 pub mod share;
 mod store;
 mod tunnel;
+mod wait;
 
 // Re-export at crate root so generated capnp code can find it as `crate::tunnelrpc_capnp`
 pub(crate) use tunnel::rpc::tunnelrpc_capnp;
@@ -366,6 +367,17 @@ enum Commands {
         /// App name or domain (omit to list all apps)
         name: Option<String>,
         /// Print the structured status response as JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Wait for a managed app to become ready without starting it
+    Wait {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+        /// Maximum total wait (e.g. 30s, 2m, 500ms; bare numbers mean seconds)
+        #[arg(long, default_value = "30s", value_parser = wait::parse_timeout)]
+        timeout: Duration,
+        /// Print the final outcome as JSON, including failures and timeouts
         #[arg(long)]
         json: bool,
     },
@@ -1510,9 +1522,12 @@ fn build_watcher(
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cli = Cli::parse();
-    runtime::init_tracing(matches!(&cli.command, Commands::Status { json: true, .. }));
+    runtime::init_tracing(matches!(
+        &cli.command,
+        Commands::Status { json: true, .. } | Commands::Wait { .. }
+    ));
     let cfg = CoulsonConfig::load().context("failed to load config")?;
 
     #[cfg(debug_assertions)]
@@ -1566,6 +1581,11 @@ async fn main() -> anyhow::Result<()> {
         } => run_env(cfg, name, bare, json, preview, no_remote).await,
         Commands::Ps => run_ps(cfg),
         Commands::Status { name, json } => run_status(cfg, name, json),
+        Commands::Wait {
+            name,
+            timeout,
+            json,
+        } => return run_wait(cfg, name, timeout, json).await,
         Commands::Start { name } => run_process_action(cfg, name, "process.start"),
         Commands::Stop { name } => run_process_action(cfg, name, "process.stop"),
         Commands::Restart { name } => run_process_action(cfg, name, "process.restart"),
@@ -1577,7 +1597,8 @@ async fn main() -> anyhow::Result<()> {
             https_target,
         } => run_forward(http_target, https_target).await,
         Commands::Tunnel { action } => run_tunnel(cfg, action),
-    }
+    }?;
+    Ok(std::process::ExitCode::SUCCESS)
 }
 
 #[derive(Debug, PartialEq)]
@@ -2597,6 +2618,27 @@ fn open_url(
             ctx.use_default_http_port,
         ),
     }
+}
+
+async fn run_wait(
+    cfg: CoulsonConfig,
+    name: Option<String>,
+    timeout: Duration,
+    json: bool,
+) -> anyhow::Result<std::process::ExitCode> {
+    let name = match name {
+        Some(name) => name,
+        None => resolve_app_name(&cfg, None)?,
+    };
+    let report = wait::wait_for_app(&RpcClient::new(&cfg.control_socket), &name, timeout).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else if report.ready {
+        println!("{name} is ready");
+    } else if let Some(error) = &report.error {
+        eprintln!("{}: {}", error.code, error.message);
+    }
+    Ok(std::process::ExitCode::from(report.exit_code()))
 }
 
 fn run_status(cfg: CoulsonConfig, name: Option<String>, json: bool) -> anyhow::Result<()> {
@@ -3888,6 +3930,27 @@ fn is_pf_configured_quick(
 #[cfg(test)]
 mod open_tests {
     use super::*;
+
+    #[test]
+    fn wait_cli_defaults_and_duration_validation() {
+        let cli = Cli::try_parse_from(["coulson", "wait"]).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Wait { name: None, timeout, json: false } if timeout == Duration::from_secs(30))
+        );
+        let cli = Cli::try_parse_from([
+            "coulson",
+            "wait",
+            "demo.coulson.local",
+            "--timeout",
+            "2m",
+            "--json",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::Wait { name: Some(name), timeout, json: true } if name == "demo.coulson.local" && timeout == Duration::from_secs(120))
+        );
+        assert!(Cli::try_parse_from(["coulson", "wait", "demo", "--timeout", "0s"]).is_err());
+    }
 
     #[test]
     fn status_cli_accepts_all_apps_name_domain_and_json() {

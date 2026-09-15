@@ -414,6 +414,7 @@ Priority: defaults < config file < environment variables.
 | `coulson start\|stop\|restart [name]` | Start / stop / restart a managed process |
 | `coulson ps` | Show running managed processes |
 | `coulson status [name] [--json]` | Show daemon-reported application lifecycle status; omit name to list all apps |
+| `coulson wait [name] [--timeout 30s] [--json]` | Wait for one app to become ready without starting it; omit name to match CWD |
 | `coulson logs [name] [-f] [-n <lines>] [--path]` | Show logs (`--path` prints the log file path) |
 | `coulson env [name] [--bare\|--json] [--preview] [--no-remote]` | Show effective app and Coulson environment configuration with source and scope |
 | `coulson open [name]` | Open the app URL in the default browser |
@@ -444,7 +445,7 @@ Priority: defaults < config file < environment variables.
 
 Written for scripting and AI agents that need predictable commands and failure paths.
 
-**Exit codes.** Every CLI command returns `0` on success and `1` on any failure — there are no distinct codes per error type. The cause is always printed to **stderr** (`Error: …`); parse stderr, not the exit code, to distinguish failures.
+**Exit codes.** Commands return `0` on success and `1` for operational failures. `coulson wait` additionally returns `124` when its deadline expires. Invalid CLI arguments exit `2`. Errors are printed to **stderr**; `wait --json` instead includes its wait outcome and error in the JSON response on stdout.
 
 **Non-interactive / CI / agents.** Only one command prompts: `coulson rm` asks `Remove <app>? [y/N]`. With no TTY (piped/CI/agent), the read hits EOF, defaults to **No**, prints `Cancelled.`, and exits `0` — it never hangs and never deletes. There is no `--yes` bypass, so **`rm` is effectively a safe no-op in non-interactive contexts.** Every other command is non-interactive and never requires a TTY.
 
@@ -478,6 +479,15 @@ The macOS menu and native dashboard display the same daemon states:
 - `unknown`: external TCP/Unix-socket backends have no managed lifecycle. The macOS app also shows unknown when status is unavailable, including with older daemons.
 
 Startup readiness timeout is **120s for Docker, 30s otherwise**. The daemon observes tracked processes approximately once per second; slow process operations can delay observation. Readiness is a startup check, not ongoing application-level health monitoring. Failure details remain in memory until the daemon restarts, the app is deliberately stopped, or its identity changes; retries can retain the last error alongside the new state. The next request can retry a failed app. There is no automatic retry backoff in this version. Raw environment values and subprocess output are not included in status responses.
+
+**Waiting for readiness.** `coulson wait myapp --timeout 30s` observes `app.status` every 250ms. It waits through `sleeping` and `starting`, succeeds on `ready`, and fails immediately on `failed`, `disabled`, or `unknown`. An unreachable daemon, missing/replaced app, or invalid response is an error. The default timeout is 30 seconds; positive integer values support `ms`, `s`, `m`, and `h`, with bare numbers interpreted as seconds. The deadline covers connecting, sending, receiving (including a stalled daemon), and polling delays. Waiting does not start or restart an app, send it traffic, or reset its idle timer.
+
+```bash
+coulson start myapp && coulson wait myapp --timeout 30s
+coulson wait myapp --timeout 2m --json
+```
+
+`wait --json` emits one final object: `ready` (boolean), `app` (the last observed status, or null), and `error` (null on success, otherwise `{ "code": "...", "message": "..." }`). Error codes include `timeout`, `app_failed`, `app_disabled`, `status_unknown`, `query_failed`, `invalid_response`, and `app_replaced`. A ready app succeeds even if its status retains a historical `last_error`. A sleeping app with no concurrent start will remain sleeping until the wait times out.
 
 ## Name Resolution & Troubleshooting
 
