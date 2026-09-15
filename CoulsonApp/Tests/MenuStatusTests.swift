@@ -4,65 +4,84 @@ import XCTest
 
 final class MenuStatusTests: XCTestCase {
     @MainActor
-    func testEnabledAppWithoutRunningProcessUsesInactiveDot() throws {
+    func testMenuDisplaysEveryDaemonState() throws {
         let vm = viewModel()
         vm.isHealthy = true
-        vm.apps = [try app(id: 1, enabled: true), try app(id: 2, enabled: false)]
-
-        let menu = NSMenu()
-        MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-        let enabledDot = try XCTUnwrap(menu.item(withTitle: "demo-1")?.image?.tiffRepresentation)
-        let disabledDot = try XCTUnwrap(menu.item(withTitle: "demo-2")?.image?.tiffRepresentation)
-        XCTAssertEqual(enabledDot, disabledDot, "Enabling an app does not mean its process is running")
-    }
-
-    @MainActor
-    func testMenuDotTracksRunningProcessAndDaemonHealth() throws {
-        let vm = viewModel()
-        vm.isHealthy = true
-        vm.apps = [try app(id: 1, enabled: true), try app(id: 2, enabled: false)]
-        vm.runningAppIDs = [1, 2]
-        let menu = NSMenu()
-        MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-        let runningDot = try XCTUnwrap(menu.item(withTitle: "demo-1")?.image?.tiffRepresentation)
-        let disabledDot = try XCTUnwrap(menu.item(withTitle: "demo-2")?.image?.tiffRepresentation)
-        XCTAssertNotEqual(runningDot, disabledDot)
-
-        vm.isHealthy = false
-        let offlineMenu = NSMenu()
-        MenuBuilder.build(menu: offlineMenu, vm: vm, updater: nil, target: AppDelegate())
-        XCTAssertEqual(offlineMenu.item(withTitle: "demo-1")?.image?.tiffRepresentation, disabledDot)
-    }
-
-    func testProcessSnapshotRequiresLiveWebProcess() throws {
-        let json = #"{"processes":[{"app_id":1,"process_type":"web","alive":true},{"app_id":1,"process_type":"worker","alive":false},{"app_id":2,"process_type":"web","alive":false},{"app_id":2,"process_type":"worker","alive":true},{"app_id":3,"process_type":"worker","alive":true}]}"#
-        let snapshot = try JSONDecoder().decode(ProcessListResponse.self, from: Data(json.utf8))
-        XCTAssertEqual(snapshot.runningAppIDs, [1])
-    }
-
-    @MainActor
-    func testFailedProcessRefreshClearsPreviousRunningState() async throws {
-        let vm = viewModel()
-        vm.isHealthy = true
-        vm.runningAppIDs = [1]
-        let record = try app(id: 1, enabled: true)
-        XCTAssertTrue(vm.isAppRunning(record))
-        await vm.refreshProcesses()
-        XCTAssertFalse(vm.isAppRunning(record))
-        XCTAssertTrue(vm.runningAppIDs.isEmpty)
-    }
-
-    @MainActor
-    func testStaticFilesAndUnmonitoredExternalBackends() throws {
-        let vm = viewModel()
-        vm.isHealthy = true
-        XCTAssertTrue(vm.isAppRunning(try app(id: 1, enabled: true, targetType: "static_dir")))
-        XCTAssertFalse(vm.isAppRunning(try app(id: 2, enabled: false, targetType: "static_dir")))
-        for type in ["tcp", "unix_socket"] {
-            XCTAssertFalse(vm.isAppRunning(try app(id: 3, enabled: true, targetType: type)))
+        vm.apps = [try app()]
+        var dots: [AppRuntimeState: Data] = [:]
+        for state in AppRuntimeState.allCases {
+            vm.appStatuses = [1: try status(state)]
+            let menu = NSMenu()
+            MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
+            let item = try XCTUnwrap(menu.item(withTitle: "demo — \(state.label)"))
+            dots[state] = try XCTUnwrap(item.image?.tiffRepresentation)
+            if state == .disabled { XCTAssertNotNil(item.attributedTitle) }
         }
-        vm.isHealthy = false
-        XCTAssertFalse(vm.isAppRunning(try app(id: 1, enabled: true, targetType: "static_dir")))
+        for state in AppRuntimeState.allCases where state != .ready {
+            XCTAssertNotEqual(dots[state], dots[.ready], "Only ready apps should have green dots")
+        }
+        XCTAssertNotEqual(dots[.starting], dots[.failed])
+        XCTAssertEqual(dots[.sleeping], dots[.unknown])
+    }
+
+    @MainActor
+    func testFailedMenuIncludesReasonAndRetry() throws {
+        let vm = viewModel()
+        vm.isHealthy = true
+        vm.apps = [try app()]
+        vm.appStatuses = [1: try status(.failed)]
+        let menu = NSMenu()
+        MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
+        let item = try XCTUnwrap(menu.item(withTitle: "demo — Failed"))
+        XCTAssertEqual(item.toolTip, "Primary process exited unexpectedly (exit 7)")
+        XCTAssertNotNil(item.submenu?.item(withTitle: "Retry Start"))
+    }
+
+    @MainActor
+    func testUnavailableDaemonOverridesCachedReadyState() throws {
+        let vm = viewModel()
+        vm.appStatuses = [1: try status(.ready)]
+        XCTAssertEqual(vm.status(for: try app()), .unknown)
+        vm.isHealthy = true
+        XCTAssertEqual(vm.status(for: try app()), .ready)
+    }
+
+    @MainActor
+    func testFailedStatusRefreshDoesNotGuessFromEnabledFlag() async throws {
+        let vm = viewModel()
+        vm.isHealthy = true
+        vm.appStatuses = [1: try status(.ready)]
+        await vm.refreshAppStatuses()
+        XCTAssertEqual(vm.status(for: try app()), .unknown)
+        XCTAssertTrue(vm.appStatuses.isEmpty)
+    }
+
+    func testDecodeDaemonStatusWithFailureAndTimestamps() throws {
+        let json = #"{"apps":[{"app_id":1,"name":"demo","domain":"demo.coulson.local","state":"failed","since":103,"started_at":100,"ready_at":101,"last_error":{"code":"process_exited","message":"Primary process exited unexpectedly","occurred_at":103,"exit_code":7}}]}"#
+        let response = try JSONDecoder().decode(AppStatusResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(response.apps.first?.state, .failed)
+        XCTAssertEqual(response.apps.first?.startedAt, 100)
+        XCTAssertEqual(response.apps.first?.readyAt, 101)
+        XCTAssertEqual(response.apps.first?.lastError?.exitCode, 7)
+    }
+
+    @MainActor
+    func testSubtitleCountsReadyAppsOnly() throws {
+        let vm = viewModel()
+        vm.isHealthy = true
+        vm.apps = [try app()]
+        vm.appStatuses = [1: try status(.starting)]
+        XCTAssertEqual(vm.subtitle, "0/1 ready")
+        vm.appStatuses = [1: try status(.ready)]
+        XCTAssertEqual(vm.subtitle, "1/1 ready")
+    }
+
+    private func status(_ state: AppRuntimeState) throws -> AppRuntimeStatus {
+        let json = """
+        {"app_id":1,"state":"\(state.rawValue)","since":100,"started_at":100,"ready_at":null,
+         "last_error":{"code":"process_exited","message":"Primary process exited unexpectedly","occurred_at":103,"exit_code":7}}
+        """
+        return try JSONDecoder().decode(AppRuntimeStatus.self, from: Data(json.utf8))
     }
 
     @MainActor
@@ -70,12 +89,8 @@ final class MenuStatusTests: XCTestCase {
         CoulsonViewModel(client: UDSControlClient(socketPath: "/tmp/coulson-missing-\(UUID().uuidString).sock"))
     }
 
-    private func app(id: Int, enabled: Bool, targetType: String = "managed") throws -> AppRecord {
-        let json = """
-        {"id":\(id),"name":"demo-\(id)","kind":"asgi","domain":"demo-\(id).coulson.local",
-         "target":{"type":"\(targetType)","kind":"asgi"},"cors_enabled":false,"spa_rewrite":false,
-         "lan_access":false,"tunnel_exposed":false,"tunnel_mode":"none","enabled":\(enabled)}
-        """
+    private func app() throws -> AppRecord {
+        let json = #"{"id":1,"name":"demo","kind":"asgi","domain":"demo.coulson.local","target":{"type":"managed","kind":"asgi"},"cors_enabled":false,"spa_rewrite":false,"lan_access":false,"tunnel_exposed":false,"tunnel_mode":"none","enabled":true}"#
         return try JSONDecoder().decode(AppRecord.self, from: Data(json.utf8))
     }
 }

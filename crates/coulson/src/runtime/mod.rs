@@ -19,12 +19,17 @@ const NOISY_MODULES: &[&str] = &[
     "rustls::client",
 ];
 
-pub fn init_tracing() {
+pub fn init_tracing(json_output: bool) {
     let mut filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     for module in NOISY_MODULES {
         filter = filter.add_directive(format!("{module}=warn").parse().unwrap());
     }
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+    if json_output {
+        subscriber.with_writer(std::io::stderr).init();
+    } else {
+        subscriber.init();
+    }
 }
 
 pub fn ensure_runtime_paths(cfg: &CoulsonConfig) -> anyhow::Result<()> {

@@ -36,7 +36,7 @@ enum MenuBuilder {
                 let status = NSMenuItem(
                     title: "Daemon: Running (v\(dm.daemonVersion ?? "?"))",
                     action: nil, keyEquivalent: "")
-                status.image = statusDot(enabled: true)
+                status.image = statusDot(color: .systemGreen)
                 status.isEnabled = false
                 menu.addItem(status)
 
@@ -60,7 +60,7 @@ enum MenuBuilder {
             } else {
                 let status = NSMenuItem(
                     title: "Daemon: Offline", action: nil, keyEquivalent: "")
-                status.image = statusDot(enabled: false)
+                status.image = statusDot(color: .systemGray)
                 status.isEnabled = false
                 menu.addItem(status)
 
@@ -98,8 +98,14 @@ enum MenuBuilder {
             menu.addItem(empty)
         } else {
             for app in apps {
-                let item = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
-                item.image = statusDot(enabled: vm.isAppRunning(app))
+                let state = vm.status(for: app)
+                let item = NSMenuItem(title: "\(app.name) — \(state.label)", action: nil, keyEquivalent: "")
+                item.image = statusDot(color: state.color)
+                item.toolTip = vm.statusDetail(for: app)
+                if state == .disabled {
+                    item.attributedTitle = NSAttributedString(
+                        string: item.title, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+                }
                 item.submenu = buildAppSubmenu(app: app, vm: vm, target: target)
                 menu.addItem(item)
             }
@@ -143,6 +149,19 @@ enum MenuBuilder {
     ) -> NSMenu {
         let sub = NSMenu()
         let box = AppRecordBox(app)
+
+        if vm.status(for: app) == .failed {
+            let failure = NSMenuItem(title: vm.statusDetail(for: app), action: nil, keyEquivalent: "")
+            failure.isEnabled = false
+            sub.addItem(failure)
+            if app.target.type == "managed" && app.enabled {
+                let retry = NSMenuItem(title: "Retry Start", action: #selector(AppDelegate.retryStart(_:)), keyEquivalent: "")
+                retry.representedObject = box
+                retry.target = target
+                sub.addItem(retry)
+            }
+            sub.addItem(.separator())
+        }
 
         // Open in Browser
         let browser = NSMenuItem(
@@ -257,11 +276,11 @@ enum MenuBuilder {
         return sub
     }
 
-    private static func statusDot(enabled: Bool) -> NSImage {
+    private static func statusDot(color: NSColor) -> NSImage {
         let size: CGFloat = 8
         let image = NSImage(size: NSSize(width: size, height: size))
         image.lockFocus()
-        (enabled ? NSColor.systemGreen : NSColor.systemGray).setFill()
+        color.setFill()
         NSBezierPath(ovalIn: NSRect(x: 0, y: 0, width: size, height: size)).fill()
         image.unlockFocus()
         image.isTemplate = false

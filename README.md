@@ -413,6 +413,7 @@ Priority: defaults < config file < environment variables.
 |---|---|
 | `coulson start\|stop\|restart [name]` | Start / stop / restart a managed process |
 | `coulson ps` | Show running managed processes |
+| `coulson status [name] [--json]` | Show daemon-reported application lifecycle status; omit name to list all apps |
 | `coulson logs [name] [-f] [-n <lines>] [--path]` | Show logs (`--path` prints the log file path) |
 | `coulson env [name] [--bare\|--json] [--preview] [--no-remote]` | Show effective app and Coulson environment configuration with source and scope |
 | `coulson open [name]` | Open the app URL in the default browser |
@@ -466,7 +467,17 @@ The underlying error (e.g. `uvicorn not found`) is written to the app's log file
 
 **Gotcha — silent static fallback.** If *nothing* above is detected for a directory, Coulson does **not** error; it serves the directory as static files. A misconfigured app (e.g. a missing `pyproject.toml`) can therefore quietly become a static site instead of failing. Run `coulson warnings` and `coulson doctor` to catch this.
 
-**No persistent failure state, no backoff.** Coulson never records an app as permanently "failed." A start failure surfaces per attempt (HTTP 502/504, or `coulson start` exit 1); the next request retries a fresh cold start, and a process that crashes after becoming ready is auto-restarted on the next request. Startup readiness timeout is **120s for Docker, 30s otherwise**.
+**Application status.** `coulson status` lists all apps; pass a name or stored domain to select one. `--json` returns the same `{ "apps": [...] }` response as the `app.status` control method. Each entry contains `app_id`, `name`, `domain`, `state`, Unix-second timestamps (`since`, `started_at`, `ready_at`, nullable when unavailable), and `last_error` (code, safe diagnostic message, timestamp, and an exit code when the backend provides it). A successful query exits 0 even when an app is failed; a missing app or unavailable daemon exits 1. Querying status never starts an app or resets its idle timer.
+
+The macOS menu and native dashboard display the same daemon states:
+- `sleeping`: enabled managed app awaiting its next start.
+- `starting`: startup is in progress; the backend has not passed readiness yet.
+- `ready`: the managed backend accepted a TCP/Unix-socket connection during startup, or an enabled static directory is available.
+- `failed`: startup failed, timed out, or the primary process unexpectedly exited. A live companion worker does not make the app ready.
+- `disabled`: the app is administratively disabled, regardless of any retained process state.
+- `unknown`: external TCP/Unix-socket backends have no managed lifecycle. The macOS app also shows unknown when status is unavailable, including with older daemons.
+
+Startup readiness timeout is **120s for Docker, 30s otherwise**. The daemon observes tracked processes approximately once per second; slow process operations can delay observation. Readiness is a startup check, not ongoing application-level health monitoring. Failure details remain in memory until the daemon restarts, the app is deliberately stopped, or its identity changes; retries can retain the last error alongside the new state. The next request can retry a failed app. There is no automatic retry backoff in this version. Raw environment values and subprocess output are not included in status responses.
 
 ## Name Resolution & Troubleshooting
 

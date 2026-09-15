@@ -12,7 +12,7 @@ private let dirName = "coulson"
 @MainActor
 final class CoulsonViewModel: ObservableObject {
     @Published var apps: [AppRecord] = []
-    @Published var runningAppIDs: Set<Int> = []
+    @Published var appStatuses: [Int: AppRuntimeStatus] = [:]
     @Published var warnings: ScanWarningsFile?
     @Published var isHealthy = false
     @Published var namedTunnelDomain: String?
@@ -122,17 +122,17 @@ final class CoulsonViewModel: ObservableObject {
 
     // MARK: - Computed
 
-    func isAppRunning(_ app: AppRecord) -> Bool {
-        guard isHealthy, app.enabled else { return false }
-        switch app.target.type {
-        case "managed":
-            return runningAppIDs.contains(app.id)
-        case "static_dir":
-            return true
-        default:
-            // External backends have no process status in Coulson.
-            return false
+    func status(for app: AppRecord) -> AppRuntimeState {
+        guard isHealthy else { return .unknown }
+        return appStatuses[app.id]?.state ?? .unknown
+    }
+
+    func statusDetail(for app: AppRecord) -> String {
+        let state = status(for: app)
+        if state == .failed, let error = appStatuses[app.id]?.lastError {
+            return error.summary
         }
+        return state.label
     }
 
     var localWebURLs: LocalWebURLs {
@@ -145,8 +145,8 @@ final class CoulsonViewModel: ObservableObject {
     }
 
     var subtitle: String {
-        let running = apps.filter(\.enabled).count
-        return isHealthy ? "\(running)/\(apps.count) running" : "daemon offline"
+        let ready = apps.filter { status(for: $0) == .ready }.count
+        return isHealthy ? "\(ready)/\(apps.count) ready" : "daemon offline"
     }
 
     var warningLines: [String] {
@@ -189,7 +189,7 @@ final class CoulsonViewModel: ObservableObject {
         async let w: Void = refreshWarnings()
         async let h: Void = refreshHealth()
         async let t: Void = refreshNamedTunnel()
-        async let p: Void = refreshProcesses()
+        async let p: Void = refreshAppStatuses()
         _ = await (a, w, h, t, p)
     }
 
@@ -215,15 +215,27 @@ final class CoulsonViewModel: ObservableObject {
         }
     }
 
-    func refreshProcesses() async {
+    func refreshAppStatuses() async {
         do {
-            let response = try client.request(method: "process.list", params: [:])
+            let response = try client.request(method: "app.status", params: [:])
             let data = try JSONSerialization.data(withJSONObject: response, options: [])
-            let parsed = try JSONDecoder().decode(ProcessListResponse.self, from: data)
-            runningAppIDs = parsed.runningAppIDs
+            let parsed = try JSONDecoder().decode(AppStatusResponse.self, from: data)
+            appStatuses = Dictionary(uniqueKeysWithValues: parsed.apps.map { ($0.appID, $0) })
         } catch {
-            runningAppIDs = []
+            appStatuses = [:]
         }
+    }
+
+    func retryStart(app: AppRecord) async {
+        do {
+            let client = self.client
+            _ = try await Task.detached {
+                try client.request(method: "process.start", params: ["app_id": app.id])
+            }.value
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        await refreshAll()
     }
 
     func refreshHealth() async {

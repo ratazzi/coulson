@@ -5,6 +5,8 @@ mod docker;
 mod node;
 mod procfile;
 mod rack;
+#[cfg(test)]
+mod status_tests;
 
 pub use provider::{ListenTarget, ProviderRegistry};
 
@@ -20,6 +22,7 @@ use tracing::{debug, info, warn};
 
 use std::process::Stdio;
 
+use crate::app_status::{AppStatusStore, ProcessExit, StartFailure};
 use crate::config::ProcessBackend;
 use crate::hooks::{HookContextFactory, HookEvent, HookManager};
 use provider::{ManagedApp, ProcessSpec};
@@ -38,6 +41,7 @@ pub struct LogLine {
 pub type ProcessManagerHandle = Arc<tokio::sync::Mutex<ProcessManager>>;
 
 pub struct ProcessManagerConfig {
+    pub app_statuses: AppStatusStore,
     pub idle_timeout: Duration,
     pub registry: Arc<ProviderRegistry>,
     pub runtime_dir: PathBuf,
@@ -123,6 +127,7 @@ pub struct StoppedGroup {
 }
 
 pub struct ProcessManager {
+    app_statuses: AppStatusStore,
     processes: HashMap<i64, ProcessGroup>,
     idle_timeout: Duration,
     registry: Arc<ProviderRegistry>,
@@ -337,6 +342,7 @@ impl ProcessManager {
         };
 
         Self {
+            app_statuses: cfg.app_statuses,
             processes: HashMap::new(),
             idle_timeout: cfg.idle_timeout,
             registry: cfg.registry,
@@ -373,6 +379,109 @@ impl ProcessManager {
     /// Whether the tmux backend is active.
     pub fn uses_tmux(&self) -> bool {
         self.use_tmux
+    }
+
+    pub(crate) fn mark_starting_if_inactive(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+    ) {
+        if !self.has_live_process(app_id) {
+            if let Ok(app) = self.validate_app_current(app_id, name, root, kind) {
+                self.app_statuses.starting(&app);
+            }
+        }
+    }
+
+    pub(crate) fn record_start_failure(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        error: &anyhow::Error,
+    ) {
+        // A competing request may have completed startup while env preparation failed.
+        let environment_failure = error
+            .downcast_ref::<StartFailure>()
+            .is_some_and(|e| e.code == "environment_failed");
+        if self.processes.get_mut(&app_id).is_some_and(|g| {
+            (g.primary.ready || environment_failure) && is_alive(&mut g.primary.handle)
+        }) {
+            return;
+        }
+        if let Ok(app) = self.validate_app_current(app_id, name, root, kind) {
+            if let Some(exit) = error.downcast_ref::<ProcessExit>() {
+                self.app_statuses.failed(
+                    &app,
+                    "process_exited",
+                    "Primary process exited unexpectedly",
+                    exit.exit_code,
+                );
+                return;
+            }
+            let (code, message) = error
+                .downcast_ref::<StartFailure>()
+                .map(|e| (e.code, e.message.as_str()))
+                .unwrap_or((
+                    "start_failed",
+                    "Application could not start; inspect its process logs",
+                ));
+            self.app_statuses.failed(&app, code, message, None);
+        }
+    }
+
+    /// Observe tracked processes only. Probes never route through Coulson, spawn an
+    /// app, or update last_active. Ready apps are checked for exits, not health-polled.
+    pub async fn refresh_runtime_states(&mut self) {
+        let ids: Vec<_> = self.processes.keys().copied().collect();
+        for id in ids {
+            let group = self.processes.get_mut(&id).unwrap();
+            let snapshot = group.app_snapshot.clone();
+            let mut failure = None;
+            if !is_alive(&mut group.primary.handle) {
+                let exit_code = match &mut group.primary.handle {
+                    ProcessHandle::Direct { child } => {
+                        child.try_wait().ok().flatten().and_then(|s| s.code())
+                    }
+                    _ => None,
+                };
+                failure = Some((
+                    "process_exited",
+                    "Primary process exited unexpectedly".to_string(),
+                    exit_code,
+                ));
+            } else if !group.primary.ready {
+                let seconds = if group.primary.kind == "docker" {
+                    120
+                } else {
+                    30
+                };
+                if quick_ready_check(&group.primary.listen_target).await {
+                    group.primary.ready = true;
+                    self.app_statuses.ready(&snapshot);
+                    let (name, root, kind) = (
+                        group.name.clone(),
+                        group.root.clone(),
+                        group.primary.kind.clone(),
+                    );
+                    self.fire_hook(HookEvent::AppReady, id, &name, &root, &kind, &snapshot);
+                } else if group.primary.started_at.elapsed() > Duration::from_secs(seconds) {
+                    failure = Some((
+                        "readiness_timeout",
+                        StartFailure::timeout(seconds).message,
+                        None,
+                    ));
+                }
+            }
+            if let Some((code, message, exit_code)) = failure {
+                self.kill_process(id).await;
+                self.app_statuses
+                    .failed(&snapshot, code, &message, exit_code);
+            }
+        }
     }
 
     /// List process types for a managed app (e.g. `["web", "worker"]`).
@@ -460,12 +569,47 @@ impl ProcessManager {
         kind: &str,
         env_url_env: Option<HashMap<String, String>>,
     ) -> anyhow::Result<ListenTarget> {
+        let result = self
+            .ensure_running_inner(app_id, name, root, kind, env_url_env)
+            .await;
+        if let Err(error) = &result {
+            self.record_start_failure(app_id, name, root, kind, error);
+        } else if let Some(group) = self.processes.get(&app_id) {
+            self.app_statuses.ready(&group.app_snapshot);
+        }
+        result
+    }
+
+    async fn ensure_running_inner(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<ListenTarget> {
         self.remove_stale_group(app_id, name, root, kind).await?;
         // Check if already running and alive
         if let Some(group) = self.processes.get_mut(&app_id) {
             if is_alive(&mut group.primary.handle) {
+                let became_ready = !group.primary.ready;
+                if !group.primary.ready {
+                    let seconds = if kind == "docker" { 120 } else { 30 };
+                    wait_for_process_ready(
+                        &mut group.primary.handle,
+                        &group.primary.listen_target,
+                        Duration::from_secs(seconds),
+                    )
+                    .await?;
+                    group.primary.ready = true;
+                }
                 group.primary.last_active = Instant::now();
-                return Ok(group.primary.listen_target.clone());
+                let target = group.primary.listen_target.clone();
+                let snapshot = group.app_snapshot.clone();
+                if became_ready {
+                    self.fire_hook(HookEvent::AppReady, app_id, name, root, kind, &snapshot);
+                }
+                return Ok(target);
             }
             info!(app_id, "managed process exited, will restart");
             let removed = self.processes.remove(&app_id).unwrap();
@@ -478,8 +622,14 @@ impl ProcessManager {
 
         let app_row = self.validate_app_current(app_id, name, root, kind)?;
 
-        let (mut spec, app_dir, prov_name, companion_types, manifest, coulsonrc) =
-            self.resolve_spec(app_id, name, root, kind)?;
+        self.app_statuses.starting(&app_row);
+        let (mut spec, app_dir, prov_name, companion_types, manifest, coulsonrc) = self
+            .resolve_spec(app_id, name, root, kind)
+            .context(StartFailure {
+                code: "prepare_failed",
+                message: "Could not prepare startup; check runtime dependencies and configuration"
+                    .into(),
+            })?;
 
         let resolved_env =
             apply_and_capture_env(&mut spec, &manifest, env_url_env.as_ref(), &coulsonrc, root);
@@ -502,7 +652,7 @@ impl ProcessManager {
 
         let log_tx = &self.log_tx;
 
-        let handle = if kind == "docker" {
+        let mut handle = if kind == "docker" {
             // Docker Compose: run `docker compose up -d --build` synchronously,
             // since it exits immediately after starting containers in the background.
             let project_name = name.to_string();
@@ -556,8 +706,12 @@ impl ProcessManager {
 
         // Docker builds can be slow — use a longer readiness timeout.
         let ready_timeout_secs: u64 = if kind == "docker" { 120 } else { 30 };
-        if let Err(e) =
-            wait_for_ready(&spec.listen_target, Duration::from_secs(ready_timeout_secs)).await
+        if let Err(e) = wait_for_process_ready(
+            &mut handle,
+            &spec.listen_target,
+            Duration::from_secs(ready_timeout_secs),
+        )
+        .await
         {
             log_tail(&log_path, name);
             // Clean up the started process/containers to avoid leaking resources
@@ -644,6 +798,29 @@ impl ProcessManager {
         kind: &str,
         env_url_env: Option<HashMap<String, String>>,
     ) -> anyhow::Result<EnsureStarted> {
+        let result = self
+            .ensure_started_inner(app_id, name, root, kind, env_url_env)
+            .await;
+        match &result {
+            Err(error) => self.record_start_failure(app_id, name, root, kind, error),
+            Ok(EnsureStarted::Status(StartStatus::Ready(_))) => {
+                if let Some(group) = self.processes.get(&app_id) {
+                    self.app_statuses.ready(&group.app_snapshot);
+                }
+            }
+            _ => {}
+        }
+        result
+    }
+
+    async fn ensure_started_inner(
+        &mut self,
+        app_id: i64,
+        name: &str,
+        root: &Path,
+        kind: &str,
+        env_url_env: Option<HashMap<String, String>>,
+    ) -> anyhow::Result<EnsureStarted> {
         self.remove_stale_group(app_id, name, root, kind).await?;
         // Check existing process state in a limited scope to avoid borrow conflicts
         enum ExistingState {
@@ -716,9 +893,7 @@ impl ProcessManager {
                 log_tail(&timed_out_log, name);
                 kill_handle(removed.primary.handle).await;
                 cleanup_listen_target(&removed.primary.listen_target);
-                anyhow::bail!(
-                    "managed process for {name} (app_id={app_id}) failed to become ready within {startup_timeout}s"
-                );
+                return Err(StartFailure::timeout(startup_timeout).into());
             }
             Some(ExistingState::Exited) => {
                 info!(app_id, "managed process exited, will restart");
@@ -744,8 +919,14 @@ impl ProcessManager {
             return Ok(EnsureStarted::NeedsEnvUrl);
         }
 
-        let (mut spec, app_dir, prov_name, companion_types, manifest, coulsonrc) =
-            self.resolve_spec(app_id, name, root, kind)?;
+        self.app_statuses.starting(&app_row);
+        let (mut spec, app_dir, prov_name, companion_types, manifest, coulsonrc) = self
+            .resolve_spec(app_id, name, root, kind)
+            .context(StartFailure {
+                code: "prepare_failed",
+                message: "Could not prepare startup; check runtime dependencies and configuration"
+                    .into(),
+            })?;
 
         let resolved_env =
             apply_and_capture_env(&mut spec, &manifest, env_url_env.as_ref(), &coulsonrc, root);
@@ -904,6 +1085,7 @@ impl ProcessManager {
     /// row, which still carries the route/tunnel fields a post-delete store
     /// lookup would miss.
     pub async fn kill_process_quiet(&mut self, app_id: i64) -> Option<StoppedGroup> {
+        self.app_statuses.sleeping(app_id);
         let group = self.processes.remove(&app_id)?;
         info!(app_id, "killing managed process");
         for companion in group.companions {
@@ -927,6 +1109,8 @@ impl ProcessManager {
 
     /// Kill processes idle longer than the configured timeout. Returns count reaped.
     pub async fn reap_idle(&mut self) -> usize {
+        // Observe exits before reaping so an unexpected exit is not reported as sleep.
+        self.refresh_runtime_states().await;
         let now = Instant::now();
         let global_timeout = self.idle_timeout;
         let mut to_remove = Vec::new();
@@ -940,6 +1124,7 @@ impl ProcessManager {
 
         for app_id in &to_remove {
             if let Some(group) = self.processes.remove(app_id) {
+                self.app_statuses.sleeping(*app_id);
                 info!(
                     app_id,
                     listen = %listen_target_display(&group.primary.listen_target),
@@ -1970,10 +2155,24 @@ pub async fn prepare_and_ensure_started(
     loop {
         let need_prefetch = {
             let mut guard = pm.lock().await;
+            guard.mark_starting_if_inactive(app_id, name, root, kind);
             !guard.has_live_process(app_id)
         };
         let env_url_env = if need_prefetch {
-            prefetch_env_url(root).await?
+            match prefetch_env_url(root).await {
+                Ok(env) => env,
+                Err(error) => {
+                    let error = error.context(StartFailure {
+                        code: "environment_failed",
+                        message: "Could not fetch startup environment; check env_url configuration"
+                            .into(),
+                    });
+                    pm.lock()
+                        .await
+                        .record_start_failure(app_id, name, root, kind, &error);
+                    return Err(error);
+                }
+            }
         } else {
             None
         };
@@ -2580,6 +2779,34 @@ fn cleanup_listen_target(target: &ListenTarget) {
 }
 
 /// Wait for a listen target to become ready (UDS or TCP).
+async fn wait_for_process_ready(
+    handle: &mut ProcessHandle,
+    target: &ListenTarget,
+    timeout: Duration,
+) -> anyhow::Result<()> {
+    let readiness = tokio::time::timeout(timeout, wait_for_ready(target, timeout));
+    tokio::pin!(readiness);
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    loop {
+        tokio::select! {
+            biased;
+            _ = interval.tick() => {
+                if !is_alive(handle) {
+                    let exit_code = match handle {
+                        ProcessHandle::Direct { child } => child.try_wait().ok().flatten().and_then(|s| s.code()),
+                        _ => None,
+                    };
+                    return Err(ProcessExit { exit_code }.into());
+                }
+            }
+            result = &mut readiness => {
+                return result.context(StartFailure::timeout(timeout.as_secs()))?
+                    .context(StartFailure::timeout(timeout.as_secs()));
+            }
+        }
+    }
+}
+
 async fn wait_for_ready(target: &ListenTarget, timeout: Duration) -> anyhow::Result<()> {
     match target {
         ListenTarget::Uds(path) => provider::wait_for_uds_ready(path, timeout).await,
@@ -3630,6 +3857,7 @@ OVERRIDE = "toml_wins"
         store.init_schema().unwrap();
         let (log_tx, _rx) = broadcast::channel(8);
         let pm = ProcessManager::new(ProcessManagerConfig {
+            app_statuses: AppStatusStore::default(),
             idle_timeout: Duration::from_secs(60),
             registry: Arc::new(default_registry()),
             runtime_dir: dir.clone(),

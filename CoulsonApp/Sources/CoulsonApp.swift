@@ -275,6 +275,11 @@ extension AppDelegate {
         Task { @MainActor in await vm?.setEnabled(app: app, enabled: !app.enabled) }
     }
 
+    @objc func retryStart(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.retryStart(app: box.app) }
+    }
+
     @objc func openInBrowser(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app
