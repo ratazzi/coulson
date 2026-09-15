@@ -12,6 +12,7 @@ private let dirName = "coulson"
 @MainActor
 final class CoulsonViewModel: ObservableObject {
     @Published var apps: [AppRecord] = []
+    @Published var runningAppIDs: Set<Int> = []
     @Published var warnings: ScanWarningsFile?
     @Published var isHealthy = false
     @Published var namedTunnelDomain: String?
@@ -56,11 +57,11 @@ final class CoulsonViewModel: ObservableObject {
         return (base as NSString).appendingPathComponent(dirName)
     }
 
-    init() {
+    init(client: UDSControlClient? = nil) {
         let defaultRuntime = Self.defaultRuntimeDir
         let socket = ProcessInfo.processInfo.environment["COULSON_CONTROL_SOCKET"]
             ?? (Self.defaultStateDir as NSString).appendingPathComponent("coulson.sock")
-        self.client = UDSControlClient(socketPath: socket)
+        self.client = client ?? UDSControlClient(socketPath: socket)
         self.domainSuffix = ProcessInfo.processInfo.environment["COULSON_DOMAIN_SUFFIX"]
             ?? "coulson.local"
         if let listen = ProcessInfo.processInfo.environment["COULSON_LISTEN_HTTP"],
@@ -71,7 +72,7 @@ final class CoulsonViewModel: ObservableObject {
             self.proxyPort = nil
         }
         self.runtimeDir = defaultRuntime
-        self.daemonManager = DaemonManager(client: client)
+        self.daemonManager = DaemonManager(client: self.client)
         startNetworkMonitor()
     }
 
@@ -120,6 +121,19 @@ final class CoulsonViewModel: ObservableObject {
     }
 
     // MARK: - Computed
+
+    func isAppRunning(_ app: AppRecord) -> Bool {
+        guard isHealthy, app.enabled else { return false }
+        switch app.target.type {
+        case "managed":
+            return runningAppIDs.contains(app.id)
+        case "static_dir":
+            return true
+        default:
+            // External backends have no process status in Coulson.
+            return false
+        }
+    }
 
     var localWebURLs: LocalWebURLs {
         LocalWebURLs(
@@ -175,7 +189,8 @@ final class CoulsonViewModel: ObservableObject {
         async let w: Void = refreshWarnings()
         async let h: Void = refreshHealth()
         async let t: Void = refreshNamedTunnel()
-        _ = await (a, w, h, t)
+        async let p: Void = refreshProcesses()
+        _ = await (a, w, h, t, p)
     }
 
     func refreshApps() async {
@@ -197,6 +212,17 @@ final class CoulsonViewModel: ObservableObject {
             warnings = parsed.warnings
         } catch {
             warnings = nil
+        }
+    }
+
+    func refreshProcesses() async {
+        do {
+            let response = try client.request(method: "process.list", params: [:])
+            let data = try JSONSerialization.data(withJSONObject: response, options: [])
+            let parsed = try JSONDecoder().decode(ProcessListResponse.self, from: data)
+            runningAppIDs = parsed.runningAppIDs
+        } catch {
+            runningAppIDs = []
         }
     }
 
