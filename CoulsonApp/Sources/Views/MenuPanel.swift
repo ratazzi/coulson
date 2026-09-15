@@ -99,7 +99,7 @@ enum MenuBuilder {
         } else {
             for app in apps {
                 let item = NSMenuItem(title: app.name, action: nil, keyEquivalent: "")
-                item.image = statusDot(enabled: app.enabled)
+                item.image = statusDot(enabled: vm.isAppRunning(app))
                 item.submenu = buildAppSubmenu(app: app, vm: vm, target: target)
                 menu.addItem(item)
             }
