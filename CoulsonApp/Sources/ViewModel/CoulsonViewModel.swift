@@ -135,6 +135,11 @@ final class CoulsonViewModel: ObservableObject {
         return state.label
     }
 
+    func keepAwakeLabel(for app: AppRecord) -> String? {
+        guard isHealthy, app.enabled else { return nil }
+        return appStatuses[app.id]?.keepAwake?.remainingLabel()
+    }
+
     var localWebURLs: LocalWebURLs {
         LocalWebURLs(
             httpPort: proxyPort,
@@ -231,6 +236,18 @@ final class CoulsonViewModel: ObservableObject {
             let client = self.client
             _ = try await Task.detached {
                 try client.request(method: "process.start", params: ["app_id": app.id])
+            }.value
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+        await refreshAll()
+    }
+
+    func setKeepAwake(app: AppRecord, choice: KeepAwakeChoice) async {
+        do {
+            let client = self.client
+            _ = try await Task.detached {
+                try client.request(method: "app.keep_awake", params: choice.parameters(appID: app.id))
             }.value
         } catch {
             errorMessage = error.localizedDescription

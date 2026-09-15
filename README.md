@@ -415,6 +415,7 @@ Priority: defaults < config file < environment variables.
 | `coulson ps` | Show running managed processes |
 | `coulson status [name] [--json]` | Show daemon-reported application lifecycle status; omit name to list all apps |
 | `coulson wait [name] [--timeout 30s] [--json]` | Wait for one app to become ready without starting it; omit name to match CWD |
+| `coulson keep-awake [name] [--for 1h\|--until-cleared\|--clear] [--json]` | Temporarily suspend idle sleep for a managed app; starts it if needed |
 | `coulson logs [name] [-f] [-n <lines>] [--path]` | Show logs (`--path` prints the log file path) |
 | `coulson env [name] [--bare\|--json] [--preview] [--no-remote]` | Show effective app and Coulson environment configuration with source and scope |
 | `coulson open [name]` | Open the app URL in the default browser |
@@ -488,6 +489,19 @@ coulson wait myapp --timeout 2m --json
 ```
 
 `wait --json` emits one final object: `ready` (boolean), `app` (the last observed status, or null), and `error` (null on success, otherwise `{ "code": "...", "message": "..." }`). Error codes include `timeout`, `app_failed`, `app_disabled`, `status_unknown`, `query_failed`, `invalid_response`, and `app_replaced`. A ready app succeeds even if its status retains a historical `last_error`. A sleeping app with no concurrent start will remain sleeping until the wait times out.
+
+**Keep awake during development.** Choose **Keep Awake → For 1 Hour** or **Until Turned Off** in the macOS app's application submenu. The menu and native app details show the remaining time; **Resume Automatic Sleep** clears the override. CLI equivalents:
+
+```bash
+coulson keep-awake myapp --for 1h
+coulson keep-awake myapp --until-cleared
+coulson keep-awake myapp --clear
+coulson status myapp --json
+```
+
+The default duration is one hour. Custom CLI durations use the same units as `wait`, rounded up to whole seconds. Only enabled managed apps support keep awake. Setting it schedules startup if the app is sleeping; the command acknowledges the setting, and `status`/`wait` report startup success or failure. It does not automatically restart crashed apps or prevent computer sleep. Ordinary app restarts preserve the setting; explicit process stop, app disable/delete, and daemon restart clear it. Overrides are in memory for the current daemon session, including the until-cleared mode.
+
+Expiry or clearing restores the original idle rule without resetting the last-activity time: an already-idle app can be reaped on the next idle sweep (normally every 30 seconds). `app.status` includes `keep_awake: null` when inactive, `{ "expires_at": <Unix seconds> }` for a timed override, or `{ "expires_at": null }` until cleared. The `app.keep_awake` RPC accepts `app_id` and a mode of `for` (with positive `seconds`), `until_cleared`, or `off`, and returns `{ "app": <status> }`.
 
 ## Name Resolution & Troubleshooting
 

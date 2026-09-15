@@ -395,6 +395,19 @@ impl ProcessManager {
         }
     }
 
+    fn keep_awake_requested(&mut self, app_id: i64, name: &str, root: &Path, kind: &str) -> bool {
+        let Ok(app) = self.validate_app_current(app_id, name, root, kind) else {
+            return false;
+        };
+        if self.app_statuses.snapshot(&app).keep_awake.is_some() {
+            return true;
+        }
+        if !self.has_live_process(app_id) {
+            self.app_statuses.sleeping(app_id);
+        }
+        false
+    }
+
     pub(crate) fn record_start_failure(
         &mut self,
         app_id: i64,
@@ -1116,6 +1129,9 @@ impl ProcessManager {
         let mut to_remove = Vec::new();
 
         for (app_id, group) in &self.processes {
+            if self.app_statuses.is_kept_awake(&group.app_snapshot) {
+                continue;
+            }
             let timeout = group.idle_timeout.unwrap_or(global_timeout);
             if now.duration_since(group.primary.last_active) > timeout {
                 to_remove.push(*app_id);
@@ -2152,9 +2168,35 @@ pub async fn prepare_and_ensure_started(
     root: &Path,
     kind: &str,
 ) -> anyhow::Result<StartStatus> {
+    prepare_start(pm, app_id, name, root, kind, false)
+        .await?
+        .context("startup was cancelled")
+}
+
+pub async fn start_kept_awake(
+    pm: &ProcessManagerHandle,
+    app_id: i64,
+    name: &str,
+    root: &Path,
+    kind: &str,
+) -> anyhow::Result<Option<StartStatus>> {
+    prepare_start(pm, app_id, name, root, kind, true).await
+}
+
+async fn prepare_start(
+    pm: &ProcessManagerHandle,
+    app_id: i64,
+    name: &str,
+    root: &Path,
+    kind: &str,
+    require_keep_awake: bool,
+) -> anyhow::Result<Option<StartStatus>> {
     loop {
         let need_prefetch = {
             let mut guard = pm.lock().await;
+            if require_keep_awake && !guard.keep_awake_requested(app_id, name, root, kind) {
+                return Ok(None);
+            }
             guard.mark_starting_if_inactive(app_id, name, root, kind);
             !guard.has_live_process(app_id)
         };
@@ -2167,9 +2209,11 @@ pub async fn prepare_and_ensure_started(
                         message: "Could not fetch startup environment; check env_url configuration"
                             .into(),
                     });
-                    pm.lock()
-                        .await
-                        .record_start_failure(app_id, name, root, kind, &error);
+                    let mut guard = pm.lock().await;
+                    if require_keep_awake && !guard.keep_awake_requested(app_id, name, root, kind) {
+                        return Ok(None);
+                    }
+                    guard.record_start_failure(app_id, name, root, kind, &error);
                     return Err(error);
                 }
             }
@@ -2177,11 +2221,14 @@ pub async fn prepare_and_ensure_started(
             None
         };
         let mut guard = pm.lock().await;
+        if require_keep_awake && !guard.keep_awake_requested(app_id, name, root, kind) {
+            return Ok(None);
+        }
         match guard
             .ensure_started(app_id, name, root, kind, env_url_env)
             .await?
         {
-            EnsureStarted::Status(status) => return Ok(status),
+            EnsureStarted::Status(status) => return Ok(Some(status)),
             EnsureStarted::NeedsEnvUrl => {
                 // Process exited after the prefetch was skipped; loop to prefetch
                 // env_url off-lock before the cold-start.

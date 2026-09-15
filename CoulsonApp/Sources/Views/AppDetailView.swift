@@ -14,6 +14,11 @@ struct AppDetailView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 statusBanner
+                if let label = vm.keepAwakeLabel(for: app) {
+                    Label("Keeping awake \(label)", systemImage: "cup.and.saucer")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
                 if vm.status(for: app) == .failed {
                     Text(vm.statusDetail(for: app))
                         .font(.callout)

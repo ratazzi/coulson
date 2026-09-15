@@ -280,6 +280,21 @@ extension AppDelegate {
         Task { @MainActor in await vm?.retryStart(app: box.app) }
     }
 
+    @objc func keepAwakeOneHour(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .oneHour) }
+    }
+
+    @objc func keepAwakeUntilCleared(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .untilCleared) }
+    }
+
+    @objc func resumeAutomaticSleep(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .off) }
+    }
+
     @objc func openInBrowser(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         let app = box.app

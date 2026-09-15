@@ -99,7 +99,8 @@ enum MenuBuilder {
         } else {
             for app in apps {
                 let state = vm.status(for: app)
-                let item = NSMenuItem(title: "\(app.name) — \(state.label)", action: nil, keyEquivalent: "")
+                let awakeSuffix = vm.keepAwakeLabel(for: app).map { " · Awake \($0)" } ?? ""
+                let item = NSMenuItem(title: "\(app.name) — \(state.label)\(awakeSuffix)", action: nil, keyEquivalent: "")
                 item.image = statusDot(color: state.color)
                 item.toolTip = vm.statusDetail(for: app)
                 if state == .disabled {
@@ -149,6 +150,35 @@ enum MenuBuilder {
     ) -> NSMenu {
         let sub = NSMenu()
         let box = AppRecordBox(app)
+
+        if app.target.type == "managed" && app.enabled {
+            let awake = NSMenuItem(title: "Keep Awake", action: nil, keyEquivalent: "")
+            let options = NSMenu()
+            options.autoenablesItems = false
+            if let label = vm.keepAwakeLabel(for: app) {
+                let current = NSMenuItem(title: "Keeping awake \(label)", action: nil, keyEquivalent: "")
+                current.isEnabled = false
+                options.addItem(current)
+                options.addItem(.separator())
+            }
+            for (title, action) in [
+                ("For 1 Hour", #selector(AppDelegate.keepAwakeOneHour(_:))),
+                ("Until Turned Off", #selector(AppDelegate.keepAwakeUntilCleared(_:))),
+                ("Resume Automatic Sleep", #selector(AppDelegate.resumeAutomaticSleep(_:))),
+            ] {
+                let option = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                option.target = target
+                option.representedObject = box
+                option.isEnabled = vm.isHealthy
+                if title == "Resume Automatic Sleep" {
+                    option.isEnabled = vm.isHealthy && vm.keepAwakeLabel(for: app) != nil
+                }
+                options.addItem(option)
+            }
+            awake.submenu = options
+            sub.addItem(awake)
+            sub.addItem(.separator())
+        }
 
         if vm.status(for: app) == .failed {
             let failure = NSMenuItem(title: vm.statusDetail(for: app), action: nil, keyEquivalent: "")

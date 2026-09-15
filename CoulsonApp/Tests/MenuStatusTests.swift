@@ -3,6 +3,37 @@ import XCTest
 @testable import CoulsonApp
 
 final class MenuStatusTests: XCTestCase {
+    func testKeepAwakeCountdownAndExpiry() {
+        let now = Date(timeIntervalSince1970: 1000)
+        XCTAssertEqual(KeepAwakeStatus(expiresAt: 4600).remainingLabel(at: now), "1h left")
+        XCTAssertEqual(KeepAwakeStatus(expiresAt: 4660).remainingLabel(at: now), "1h 1m left")
+        XCTAssertEqual(KeepAwakeStatus(expiresAt: 1001).remainingLabel(at: now), "1m left")
+        XCTAssertNil(KeepAwakeStatus(expiresAt: 1000).remainingLabel(at: now))
+        XCTAssertEqual(KeepAwakeStatus(expiresAt: nil).remainingLabel(at: now), "until turned off")
+    }
+
+    @MainActor
+    func testKeepAwakeMenuShowsDurationAndKeepsFailureState() throws {
+        let vm = viewModel()
+        vm.isHealthy = true
+        vm.apps = [try app()]
+        let expires = Int64(Date().timeIntervalSince1970) + 3600
+        let json = """
+        {"app_id":1,"state":"failed","keep_awake":{"expires_at":\(expires)}}
+        """
+        vm.appStatuses = [1: try JSONDecoder().decode(AppRuntimeStatus.self, from: Data(json.utf8))]
+        let menu = NSMenu()
+        MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
+        let item = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("demo — Failed · Awake") })
+        let options = try XCTUnwrap(item.submenu?.item(withTitle: "Keep Awake")?.submenu)
+        XCTAssertNotNil(options.item(withTitle: "For 1 Hour"))
+        XCTAssertNotNil(options.item(withTitle: "Until Turned Off"))
+        XCTAssertTrue(try XCTUnwrap(options.item(withTitle: "Resume Automatic Sleep")).isEnabled)
+        XCTAssertEqual(vm.status(for: vm.apps[0]), .failed)
+        vm.isHealthy = false
+        XCTAssertNil(vm.keepAwakeLabel(for: vm.apps[0]))
+    }
+
     @MainActor
     func testMenuDisplaysEveryDaemonState() throws {
         let vm = viewModel()
