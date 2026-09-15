@@ -2536,6 +2536,44 @@ fn run_process_action(
     Ok(())
 }
 
+fn open_url(
+    domain: &str,
+    path: &str,
+    mut ctx: domain::UrlContext<'_>,
+    health: Option<&serde_json::Value>,
+) -> String {
+    // The daemon may have different listener and forwarding settings than this CLI.
+    if let Some(health) = health {
+        if let Some(port) = health.get("http_port").and_then(|v| v.as_u64()) {
+            if let Ok(port) = u16::try_from(port) {
+                ctx.http_port = port;
+            }
+        }
+        if let Some(port) = health.get("https_port") {
+            // An explicit null means TLS is disabled, even if local config enables it.
+            ctx.https_port = port.as_u64().and_then(|p| u16::try_from(p).ok());
+        }
+        ctx.use_default_http_port = health
+            .get("use_default_http_port")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(ctx.use_default_http_port);
+        ctx.use_default_https_port = health
+            .get("use_default_https_port")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(ctx.use_default_https_port);
+    }
+    match ctx.https_port {
+        Some(port) => domain::format_url("https", domain, port, path, ctx.use_default_https_port),
+        None => domain::format_url(
+            "http",
+            domain,
+            ctx.http_port,
+            path,
+            ctx.use_default_http_port,
+        ),
+    }
+}
+
 fn run_open(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
     let app_name = resolve_app_name(&cfg, name.as_deref())?;
     let state = build_state(&cfg)?;
@@ -2546,23 +2584,27 @@ fn run_open(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
         .find(|a| a.name == app_name || a.domain.0 == domain_match || a.domain.0 == app_name)
         .with_context(|| format!("app not found: {app_name}"))?;
 
-    let port = daemon_http_port(&cfg);
+    let health = RpcClient::new(&cfg.control_socket)
+        .call("health.ping", serde_json::json!({}))
+        .ok();
     let ctx = domain::UrlContext {
-        http_port: port,
-        https_port: None,
+        http_port: cfg.listen_http.port(),
+        https_port: cfg.listen_https.map(|addr| addr.port()),
         use_default_http_port: state.use_default_http_port(),
         use_default_https_port: state.use_default_https_port(),
         domain_suffix: &cfg.domain_suffix,
         global_tunnel_domain: None,
     };
-    let urls = app.urls(&ctx);
-    let url = urls
-        .first()
-        .with_context(|| format!("no URL available for {app_name}"))?;
+    let url = open_url(
+        &app.domain.0,
+        app.path_prefix.as_deref().unwrap_or("/"),
+        ctx,
+        health.as_ref(),
+    );
 
     println!("  Opening {}", url.cyan());
     let status = std::process::Command::new("open")
-        .arg(url)
+        .arg(&url)
         .status()
         .context("failed to run `open`")?;
     if !status.success() {
@@ -3765,6 +3807,77 @@ fn is_pf_configured_quick(
     _listen_https: &Option<std::net::SocketAddr>,
 ) -> bool {
     false
+}
+
+#[cfg(test)]
+mod open_tests {
+    use super::*;
+
+    fn context() -> domain::UrlContext<'static> {
+        domain::UrlContext {
+            http_port: 18080,
+            https_port: Some(18443),
+            use_default_http_port: false,
+            use_default_https_port: false,
+            domain_suffix: "coulson.local",
+            global_tunnel_domain: None,
+        }
+    }
+
+    #[test]
+    fn open_prefers_forwarded_https_from_daemon() {
+        let health = serde_json::json!({
+            "http_port": 28080, "https_port": 28443,
+            "use_default_http_port": true, "use_default_https_port": true,
+        });
+        assert_eq!(
+            open_url("demo.coulson.local", "/admin/", context(), Some(&health)),
+            "https://demo.coulson.local/admin/"
+        );
+    }
+
+    #[test]
+    fn open_uses_actual_https_port_without_forwarding() {
+        let health = serde_json::json!({
+            "http_port": 28080, "https_port": 28443,
+            "use_default_http_port": true, "use_default_https_port": false,
+        });
+        assert_eq!(
+            open_url("demo.coulson.local", "/", context(), Some(&health)),
+            "https://demo.coulson.local:28443/"
+        );
+    }
+
+    #[test]
+    fn open_respects_daemon_with_https_disabled() {
+        for (forwarded, expected) in [
+            (true, "http://demo.coulson.local/"),
+            (false, "http://demo.coulson.local:28080/"),
+        ] {
+            let health = serde_json::json!({
+                "http_port": 28080, "https_port": null,
+                "use_default_http_port": forwarded, "use_default_https_port": false,
+            });
+            assert_eq!(
+                open_url("demo.coulson.local", "/", context(), Some(&health)),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn open_falls_back_to_config_without_daemon() {
+        assert_eq!(
+            open_url("demo.coulson.local", "/", context(), None),
+            "https://demo.coulson.local:18443/"
+        );
+        let mut ctx = context();
+        ctx.https_port = None;
+        assert_eq!(
+            open_url("demo.coulson.local", "/", ctx, None),
+            "http://demo.coulson.local:18080/"
+        );
+    }
 }
 
 #[cfg(test)]

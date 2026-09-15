@@ -261,8 +261,8 @@ extension AppDelegate {
 
     @objc func openWebDashboard() {
         Task { @MainActor in
-            guard let vm = self.vm, let port = vm.proxyPort else { return }
-            let urlStr = "http://\(vm.domainSuffix):\(port)/"
+            guard let vm = self.vm, vm.proxyPort != nil || vm.httpsPort != nil else { return }
+            let urlStr = vm.localWebURLs.preferredURL(for: vm.domainSuffix)
             if let url = URL(string: urlStr) {
                 NSWorkspace.shared.open(url)
             }
@@ -281,10 +281,7 @@ extension AppDelegate {
         Task { @MainActor in
             guard let vm = self.vm else { return }
             if let url = URL(
-                string: app.primaryURL(
-                    proxyPort: vm.proxyPort,
-                    useDefaultPort: vm.useDefaultHttpPort
-                )
+                string: vm.localWebURLs.preferredURL(for: app.domain)
             ) {
                 NSWorkspace.shared.open(url)
             }
@@ -298,10 +295,7 @@ extension AppDelegate {
             guard let vm = self.vm else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(
-                app.primaryURL(
-                    proxyPort: vm.proxyPort,
-                    useDefaultPort: vm.useDefaultHttpPort
-                ),
+                vm.localWebURLs.preferredURL(for: app.domain),
                 forType: .string
             )
         }

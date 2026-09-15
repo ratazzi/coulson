@@ -121,6 +121,15 @@ final class CoulsonViewModel: ObservableObject {
 
     // MARK: - Computed
 
+    var localWebURLs: LocalWebURLs {
+        LocalWebURLs(
+            httpPort: proxyPort,
+            httpsPort: httpsPort,
+            useDefaultHttpPort: useDefaultHttpPort,
+            useDefaultHttpsPort: useDefaultHttpsPort
+        )
+    }
+
     var subtitle: String {
         let running = apps.filter(\.enabled).count
         return isHealthy ? "\(running)/\(apps.count) running" : "daemon offline"
@@ -199,9 +208,7 @@ final class CoulsonViewModel: ObservableObject {
             if let port = result["http_port"] as? Int {
                 proxyPort = port
             }
-            if let port = result["https_port"] as? Int {
-                httpsPort = port
-            }
+            httpsPort = result["https_port"] as? Int
             useDefaultHttpPort = result["use_default_http_port"] as? Bool ?? false
             useDefaultHttpsPort = result["use_default_https_port"] as? Bool ?? false
             if let dir = result["runtime_dir"] as? String {

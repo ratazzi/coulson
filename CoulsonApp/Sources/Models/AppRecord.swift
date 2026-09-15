@@ -65,15 +65,11 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         }
     }
 
-    func primaryURL(proxyPort: Int?, useDefaultPort: Bool = false) -> String {
-        let portSuffix = (proxyPort != nil && proxyPort != 80 && !useDefaultPort) ? ":\(proxyPort!)" : ""
-        return "http://\(domain)\(portSuffix)/"
-    }
-
     func httpsURL(httpsPort: Int?, useDefaultPort: Bool = false) -> String? {
-        guard let port = httpsPort else { return nil }
-        let portSuffix = (port != 443 && !useDefaultPort) ? ":\(port)" : ""
-        return "https://\(domain)\(portSuffix)/"
+        LocalWebURLs(
+            httpsPort: httpsPort,
+            useDefaultHttpsPort: useDefaultPort
+        ).httpsURL(for: domain)
     }
 
     func dashboardURLs(
@@ -82,10 +78,13 @@ struct AppRecord: Decodable, Identifiable, Hashable {
         useDefaultHttpPort: Bool = false,
         useDefaultHttpsPort: Bool = false
     ) -> [String] {
-        var out = [primaryURL(proxyPort: proxyPort, useDefaultPort: useDefaultHttpPort)]
-        if let https = httpsURL(httpsPort: httpsPort, useDefaultPort: useDefaultHttpsPort) {
-            out.append(https)
-        }
+        let urls = LocalWebURLs(
+            httpPort: proxyPort,
+            httpsPort: httpsPort,
+            useDefaultHttpPort: useDefaultHttpPort,
+            useDefaultHttpsPort: useDefaultHttpsPort
+        )
+        var out = [urls.httpsURL(for: domain), urls.httpURL(for: domain)].compactMap { $0 }
         if let host = target.host, let port = target.port {
             out.append("http://\(host):\(port)/")
         }

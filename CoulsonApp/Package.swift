@@ -29,5 +29,10 @@ let package = Package(
                 .copy("Resources/AppIcon.png"),
             ]
         ),
+        .testTarget(
+            name: "CoulsonAppTests",
+            dependencies: ["CoulsonApp"],
+            path: "Tests"
+        ),
     ]
 )
