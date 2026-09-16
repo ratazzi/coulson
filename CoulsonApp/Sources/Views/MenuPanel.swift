@@ -195,48 +195,6 @@ enum MenuBuilder {
         let sub = NSMenu()
         let app = box.app
 
-        if app.target.type == "managed" && app.enabled {
-            let awake = NSMenuItem(title: "Keep Awake", action: nil, keyEquivalent: "")
-            let options = NSMenu()
-            options.autoenablesItems = false
-            if let label = vm.keepAwakeLabel(for: app) {
-                let current = NSMenuItem(title: "Keeping awake \(label)", action: nil, keyEquivalent: "")
-                current.isEnabled = false
-                options.addItem(current)
-                options.addItem(.separator())
-            }
-            for (title, action) in [
-                ("For 1 Hour", #selector(AppDelegate.keepAwakeOneHour(_:))),
-                ("Until Turned Off", #selector(AppDelegate.keepAwakeUntilCleared(_:))),
-                ("Resume Automatic Sleep", #selector(AppDelegate.resumeAutomaticSleep(_:))),
-            ] {
-                let option = NSMenuItem(title: title, action: action, keyEquivalent: "")
-                option.target = target
-                option.representedObject = box
-                option.isEnabled = vm.isHealthy
-                if title == "Resume Automatic Sleep" {
-                    option.isEnabled = vm.isHealthy && vm.keepAwakeLabel(for: app) != nil
-                }
-                options.addItem(option)
-            }
-            awake.submenu = options
-            sub.addItem(awake)
-            sub.addItem(.separator())
-        }
-
-        if box.state == .failed {
-            let failure = NSMenuItem(title: vm.statusDetail(for: app), action: nil, keyEquivalent: "")
-            failure.isEnabled = false
-            sub.addItem(failure)
-            if app.target.type == "managed" && app.enabled {
-                let retry = NSMenuItem(title: "Retry Start", action: #selector(AppDelegate.retryStart(_:)), keyEquivalent: "")
-                retry.representedObject = box
-                retry.target = target
-                sub.addItem(retry)
-            }
-            sub.addItem(.separator())
-        }
-
         // Open in Browser
         let browser = NSMenuItem(
             title: "Open in Browser",
@@ -268,6 +226,48 @@ enum MenuBuilder {
             copyHTTPS.representedObject = box
             copyHTTPS.target = target
             sub.addItem(copyHTTPS)
+        }
+
+        if app.target.type == "managed" && app.enabled {
+            sub.addItem(.separator())
+            let awake = NSMenuItem(title: "Keep Awake", action: nil, keyEquivalent: "")
+            let options = NSMenu()
+            options.autoenablesItems = false
+            if let label = vm.keepAwakeLabel(for: app) {
+                let current = NSMenuItem(title: "Keeping awake \(label)", action: nil, keyEquivalent: "")
+                current.isEnabled = false
+                options.addItem(current)
+                options.addItem(.separator())
+            }
+            for (title, action) in [
+                ("For 1 Hour", #selector(AppDelegate.keepAwakeOneHour(_:))),
+                ("Until Turned Off", #selector(AppDelegate.keepAwakeUntilCleared(_:))),
+                ("Resume Automatic Sleep", #selector(AppDelegate.resumeAutomaticSleep(_:))),
+            ] {
+                let option = NSMenuItem(title: title, action: action, keyEquivalent: "")
+                option.target = target
+                option.representedObject = box
+                option.isEnabled = vm.isHealthy
+                if title == "Resume Automatic Sleep" {
+                    option.isEnabled = vm.isHealthy && vm.keepAwakeLabel(for: app) != nil
+                }
+                options.addItem(option)
+            }
+            awake.submenu = options
+            sub.addItem(awake)
+        }
+
+        if box.state == .failed {
+            sub.addItem(.separator())
+            let failure = NSMenuItem(title: vm.statusDetail(for: app), action: nil, keyEquivalent: "")
+            failure.isEnabled = false
+            sub.addItem(failure)
+            if app.target.type == "managed" && app.enabled {
+                let retry = NSMenuItem(title: "Retry Start", action: #selector(AppDelegate.retryStart(_:)), keyEquivalent: "")
+                retry.representedObject = box
+                retry.target = target
+                sub.addItem(retry)
+            }
         }
 
         // Tunnel
