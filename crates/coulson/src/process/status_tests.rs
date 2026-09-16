@@ -1,4 +1,5 @@
 use super::*;
+use crate::app_status::KeepAwake;
 use crate::app_status::{AppState, AppStatus};
 use crate::domain::{AppSpec, BackendTarget, DomainName};
 
@@ -94,6 +95,95 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.dir).ok();
     }
+}
+
+#[tokio::test]
+async fn keep_awake_blocks_idle_reaping_until_expiry_without_resetting_activity() {
+    let mut f = Fixture::new();
+    f.sleeping_child(true);
+    f.group().primary.last_active = Instant::now() - Duration::from_secs(901);
+    let last_active = f.group().primary.last_active;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    f.pm.app_statuses.set_keep_awake(
+        &f.app,
+        KeepAwake {
+            expires_at: Some(now + 3600),
+        },
+    );
+    // A process can have been started while disabled and enabled later.
+    f.group().app_snapshot.enabled = false;
+    assert_eq!(f.pm.reap_idle().await, 0);
+    assert_eq!(f.group().primary.last_active, last_active);
+    assert_eq!(f.status().state, AppState::Ready);
+    f.pm.app_statuses.set_keep_awake(
+        &f.app,
+        KeepAwake {
+            expires_at: Some(now - 1),
+        },
+    );
+    assert!(f.status().keep_awake.is_none());
+    assert_eq!(f.pm.reap_idle().await, 1);
+    assert_eq!(f.status().state, AppState::Sleeping);
+}
+
+#[tokio::test]
+async fn keep_awake_survives_restart_but_clear_restores_idle_reaping() {
+    let mut f = Fixture::new();
+    f.sleeping_child(true);
+    f.pm.app_statuses
+        .set_keep_awake(&f.app, KeepAwake { expires_at: None });
+    f.pm.kill_process(f.app.id.0).await;
+    assert!(f.status().keep_awake.is_some());
+    f.sleeping_child(true);
+    f.group().primary.last_active = Instant::now() - Duration::from_secs(901);
+    assert_eq!(f.pm.reap_idle().await, 0);
+    f.pm.app_statuses.clear_keep_awake(f.app.id.0);
+    assert_eq!(f.pm.reap_idle().await, 1);
+}
+
+#[tokio::test]
+async fn keep_awake_does_not_mask_failure_or_restart_crashed_processes() {
+    let mut f = Fixture::new();
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "exit 7"])
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    child.wait().await.unwrap();
+    f.insert_child(child, true);
+    f.pm.app_statuses
+        .set_keep_awake(&f.app, KeepAwake { expires_at: None });
+    f.pm.refresh_runtime_states().await;
+    assert_eq!(f.status().state, AppState::Failed);
+    assert!(f.status().keep_awake.is_some());
+    assert!(f.pm.processes.is_empty());
+    f.pm.refresh_runtime_states().await;
+    assert_eq!(f.status().state, AppState::Failed);
+    assert!(f.pm.processes.is_empty());
+}
+
+#[test]
+fn keep_awake_is_scoped_to_app_identity_and_daemon_session() {
+    let f = Fixture::new();
+    f.pm.app_statuses
+        .set_keep_awake(&f.app, KeepAwake { expires_at: None });
+    let mut changed = f.app.clone();
+    if let BackendTarget::Managed { root, .. } = &mut changed.target {
+        root.push_str("-new");
+    }
+    assert!(f.pm.app_statuses.snapshot(&changed).keep_awake.is_none());
+    let mut disabled = f.app.clone();
+    disabled.enabled = false;
+    f.pm.app_statuses.retain_apps(&[disabled]);
+    assert!(f.status().keep_awake.is_none());
+    f.pm.app_statuses
+        .set_keep_awake(&f.app, KeepAwake { expires_at: None });
+    assert!(AppStatusStore::default()
+        .snapshot(&f.app)
+        .keep_awake
+        .is_none());
+    f.pm.app_statuses.retain_apps(&[]);
+    assert!(f.status().keep_awake.is_none());
 }
 
 #[tokio::test]

@@ -17,3 +17,5 @@ Coulson gives development applications stable addresses and starts managed appli
 **Disabled application**: An application administratively excluded from normal routing and automatic startup.
 
 **Unknown application status**: There is insufficient current information to determine the application's lifecycle state, including externally managed services or an unreachable daemon.
+
+**Keep awake**: A temporary exemption from automatic idle sleep for one managed application. It is independent of readiness, lasts for a chosen duration or until explicitly cleared, and does not override a deliberate stop or disable action.

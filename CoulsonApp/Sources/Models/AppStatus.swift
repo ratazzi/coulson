@@ -27,6 +27,7 @@ struct AppRuntimeStatus: Decodable {
     let startedAt: Int64?
     let readyAt: Int64?
     let lastError: AppRuntimeFailure?
+    let keepAwake: KeepAwakeStatus?
 
     enum CodingKeys: String, CodingKey {
         case appID = "app_id"
@@ -34,6 +35,39 @@ struct AppRuntimeStatus: Decodable {
         case startedAt = "started_at"
         case readyAt = "ready_at"
         case lastError = "last_error"
+        case keepAwake = "keep_awake"
+    }
+}
+
+struct KeepAwakeStatus: Decodable {
+    let expiresAt: Int64?
+
+    enum CodingKeys: String, CodingKey {
+        case expiresAt = "expires_at"
+    }
+
+    func remainingLabel(at date: Date = Date()) -> String? {
+        guard let expiresAt else { return "until turned off" }
+        let seconds = Double(expiresAt) - date.timeIntervalSince1970
+        guard seconds > 0 else { return nil }
+        let minutes = Int(ceil(seconds / 60))
+        if minutes >= 60 {
+            let remainder = minutes % 60
+            return remainder == 0 ? "\(minutes / 60)h left" : "\(minutes / 60)h \(remainder)m left"
+        }
+        return "\(minutes)m left"
+    }
+}
+
+enum KeepAwakeChoice {
+    case oneHour, untilCleared, off
+
+    func parameters(appID: Int) -> [String: Any] {
+        switch self {
+        case .oneHour: return ["app_id": appID, "mode": "for", "seconds": 3600]
+        case .untilCleared: return ["app_id": appID, "mode": "until_cleared"]
+        case .off: return ["app_id": appID, "mode": "off"]
+        }
     }
 }
 

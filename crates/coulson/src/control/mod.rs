@@ -114,6 +114,13 @@ struct AppIdParams {
     app_id: i64,
 }
 
+#[derive(Deserialize)]
+struct KeepAwakeParams {
+    app_id: i64,
+    #[serde(flatten)]
+    mode: service::KeepAwakeMode,
+}
+
 #[derive(Debug, Deserialize)]
 struct NamedTunnelSetupParams {
     #[serde(default)]
@@ -317,6 +324,13 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             let params: AppStatusParams = parse_params!(req);
             service::app_status(state, params.name.as_deref())
                 .map(|apps| json!({ "apps": apps }))
+                .map_err(ControlError::from)
+        }
+        "app.keep_awake" => {
+            let params: KeepAwakeParams = parse_params!(req);
+            service::app_keep_awake(state, params.app_id, params.mode)
+                .await
+                .map(|app| json!({ "app": app }))
                 .map_err(ControlError::from)
         }
         "app.list" => service::app_list(state)
@@ -556,6 +570,7 @@ async fn dispatch_request(req: RequestEnvelope, state: &SharedState) -> Response
             };
             if req.method == "process.stop" {
                 let mut pm = state.process_manager.lock().await;
+                state.app_statuses.clear_keep_awake(params.app_id);
                 let killed = pm.kill_process(params.app_id).await;
                 return ok_response(req.request_id, json!({ "stopped": killed }));
             }
@@ -1319,6 +1334,98 @@ fn internal_error(request_id: String, message: String) -> ResponseEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn keep_awake_rpc_validates_modes_and_manual_stop_cancels_pending_start() {
+        let dir = std::env::temp_dir().join(format!("coulson-awake-{}", uuid::Uuid::now_v7()));
+        let cfg = crate::config::CoulsonConfig {
+            apps_root: dir.join("apps"),
+            sqlite_path: dir.join("db"),
+            control_socket: dir.join("s"),
+            scan_warnings_path: dir.join("warnings"),
+            runtime_dir: dir.join("runtime"),
+            certs_dir: dir.join("certs"),
+            process_backend: crate::config::ProcessBackend::Direct,
+            ..Default::default()
+        };
+        let state = crate::build_state(&cfg).unwrap();
+        let (app, _) = state
+            .store
+            .upsert_scanned_managed(
+                "demo",
+                &crate::domain::DomainName("demo.coulson.local".into()),
+                dir.to_str().unwrap(),
+                "procfile",
+                true,
+                "fs",
+                "entry",
+                None,
+            )
+            .unwrap();
+        for mode in [
+            json!({ "mode": "for", "seconds": 3600 }),
+            json!({ "mode": "until_cleared" }),
+        ] {
+            let mut params = mode;
+            params["app_id"] = json!(app.id.0);
+            let response = dispatch_request(
+                RequestEnvelope {
+                    request_id: "awake".into(),
+                    method: "app.keep_awake".into(),
+                    params,
+                },
+                &state,
+            )
+            .await;
+            assert!(response.ok);
+            assert!(response.result.unwrap()["app"]["keep_awake"].is_object());
+            let stopped = dispatch_request(
+                RequestEnvelope {
+                    request_id: "stop".into(),
+                    method: "process.stop".into(),
+                    params: json!({ "app_id": app.id.0 }),
+                },
+                &state,
+            )
+            .await;
+            assert!(stopped.ok);
+            assert!(state.app_statuses.snapshot(&app).keep_awake.is_none());
+        }
+        let invalid =
+            service::app_keep_awake(&state, app.id.0, service::KeepAwakeMode::For { seconds: 0 })
+                .await;
+        assert!(matches!(invalid, Err(ServiceError::InvalidParams(_))));
+        state
+            .app_statuses
+            .set_keep_awake(&app, crate::app_status::KeepAwake { expires_at: None });
+        service::app_set_enabled(&state, app.id.0, false).unwrap();
+        assert!(state.app_statuses.snapshot(&app).keep_awake.is_none());
+        assert!(
+            service::app_keep_awake(&state, app.id.0, service::KeepAwakeMode::UntilCleared)
+                .await
+                .is_err()
+        );
+        service::app_set_enabled(&state, app.id.0, true).unwrap();
+        let guard = state.process_manager.lock().await;
+        state
+            .app_statuses
+            .set_keep_awake(&app, crate::app_status::KeepAwake { expires_at: None });
+        let pm = state.process_manager.clone();
+        let root = dir.clone();
+        let app_id = app.id.0;
+        let pending = tokio::spawn(async move {
+            crate::process::start_kept_awake(&pm, app_id, "demo", &root, "procfile").await
+        });
+        state.app_statuses.clear_keep_awake(app.id.0);
+        drop(guard);
+        assert!(pending.await.unwrap().unwrap().is_none());
+        assert!(!state
+            .process_manager
+            .lock()
+            .await
+            .has_live_process(app.id.0));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn status_rpc_reads_lifecycle_without_waiting_for_startup_lock() {

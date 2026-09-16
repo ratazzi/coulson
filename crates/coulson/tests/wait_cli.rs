@@ -87,3 +87,54 @@ fn wait_cli_text_error_uses_stderr_and_nonzero_exit() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("query_failed"));
 }
+
+#[test]
+fn keep_awake_cli_sends_duration_indefinite_and_clear_modes() {
+    for (args, mode, seconds) in [
+        (vec!["keep-awake", "--json"], "for", Some(3600)),
+        (
+            vec!["keep-awake", "--for", "2h", "--json"],
+            "for",
+            Some(7200),
+        ),
+        (
+            vec!["keep-awake", "--until-cleared", "--json"],
+            "until_cleared",
+            None,
+        ),
+        (vec!["keep-awake", "--clear", "--json"], "off", None),
+    ] {
+        let fixture = Fixture::new();
+        let listener = UnixListener::bind(fixture.0.join("s")).unwrap();
+        let server = std::thread::spawn(move || {
+            for method in ["app.list", "app.keep_awake"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().unwrap())
+                    .read_line(&mut request)
+                    .unwrap();
+                let request: serde_json::Value = serde_json::from_str(&request).unwrap();
+                assert_eq!(request["method"], method);
+                let result = if method == "app.list" {
+                    serde_json::json!({ "apps": [{ "id": 1, "name": "demo", "domain": "demo.coulson.local" }] })
+                } else {
+                    assert_eq!(request["params"]["app_id"], 1);
+                    assert_eq!(request["params"]["mode"], mode);
+                    assert_eq!(request["params"]["seconds"].as_u64(), seconds);
+                    serde_json::json!({ "app": { "app_id": 1, "state": "ready", "keep_awake": null } })
+                };
+                writeln!(
+                    stream,
+                    "{}",
+                    serde_json::json!({ "ok": true, "result": result })
+                )
+                .unwrap();
+            }
+        });
+        let output = fixture.run(&args);
+        assert_eq!(output.status.code(), Some(0));
+        let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(response["app"]["app_id"], 1);
+        server.join().unwrap();
+    }
+}
