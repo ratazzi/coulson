@@ -7,6 +7,11 @@ on:
     branches: [master]
   workflow_dispatch:
 
+# A newer nightly supersedes any still-running one.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
