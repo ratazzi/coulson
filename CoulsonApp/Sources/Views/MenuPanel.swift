@@ -8,9 +8,13 @@ class AppRecordBox: NSObject {
 
 @MainActor
 enum MenuBuilder {
+    @discardableResult
     static func build(
         menu: NSMenu, vm: CoulsonViewModel, updater: UpdaterController?, target: AppDelegate
-    ) {
+    ) -> MenuSearchController {
+        let search = MenuSearchController(menu: menu)
+        menu.addItem(search.menuItem)
+        menu.addItem(.separator())
         // Open Dashboard
         let dashboard = NSMenuItem(
             title: "Open Dashboard", action: #selector(AppDelegate.openDashboard),
@@ -92,11 +96,8 @@ enum MenuBuilder {
 
         // Apps
         let apps = vm.sortedApps
-        if apps.isEmpty {
-            let empty = NSMenuItem(title: "No apps", action: nil, keyEquivalent: "")
-            empty.isEnabled = false
-            menu.addItem(empty)
-        } else {
+        var searchableEntries: [(AppRecord, NSMenuItem)] = []
+        if !apps.isEmpty {
             for app in apps {
                 let state = vm.status(for: app)
                 let awakeSuffix = vm.keepAwakeLabel(for: app).map { " · Awake \($0)" } ?? ""
@@ -109,8 +110,13 @@ enum MenuBuilder {
                 }
                 item.submenu = buildAppSubmenu(app: app, vm: vm, target: target)
                 menu.addItem(item)
+                searchableEntries.append((app, item))
             }
         }
+        let empty = NSMenuItem(title: "No apps", action: nil, keyEquivalent: "")
+        empty.isEnabled = false
+        menu.addItem(empty)
+        search.configure(entries: searchableEntries, emptyItem: empty)
 
         menu.addItem(.separator())
 
@@ -124,17 +130,22 @@ enum MenuBuilder {
         settings.target = target
         menu.addItem(settings)
 
-        // Check for Updates (production mode)
-        if DaemonManager.isProductionApp, let updater, updater.canCheckForUpdates {
-            let update = NSMenuItem(
-                title: "Check for Updates...",
-                action: #selector(AppDelegate.checkForUpdates),
-                keyEquivalent: "")
-            update.image = NSImage(
-                systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
-            update.target = target
-            menu.addItem(update)
+        // Keep this entry visible even before Sparkle is ready or in a dev build.
+        // A nil action prevents NSMenu auto-validation from enabling it prematurely.
+        let canCheck = updater?.canCheckForUpdates == true
+        let update = NSMenuItem(
+            title: "Check for Updates...",
+            action: canCheck ? #selector(AppDelegate.checkForUpdates) : nil,
+            keyEquivalent: "")
+        update.image = NSImage(systemSymbolName: "arrow.down.circle", accessibilityDescription: nil)
+        update.target = canCheck ? target : nil
+        update.isEnabled = canCheck
+        if !canCheck {
+            update.toolTip = DaemonManager.isProductionApp
+                ? "Available when the updater is ready."
+                : "Updates are available in the installed Coulson.app."
         }
+        menu.addItem(update)
 
         menu.addItem(.separator())
 
@@ -143,6 +154,7 @@ enum MenuBuilder {
             title: "Quit Coulson", action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q")
         menu.addItem(quit)
+        return search
     }
 
     private static func buildAppSubmenu(
