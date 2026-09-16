@@ -3,7 +3,13 @@ import AppKit
 /// Wraps AppRecord for use as NSMenuItem.representedObject (requires NSObject)
 class AppRecordBox: NSObject {
     let app: AppRecord
-    init(_ app: AppRecord) { self.app = app }
+    /// State the row was last rendered with, so a live refresh can tell when
+    /// the submenu (whose failure section depends on state) must be rebuilt.
+    var state: AppRuntimeState
+    init(_ app: AppRecord, state: AppRuntimeState) {
+        self.app = app
+        self.state = state
+    }
 }
 
 @MainActor
@@ -99,16 +105,11 @@ enum MenuBuilder {
         var searchableEntries: [(AppRecord, NSMenuItem)] = []
         if !apps.isEmpty {
             for app in apps {
-                let state = vm.status(for: app)
-                let awakeSuffix = vm.keepAwakeLabel(for: app).map { " · Awake \($0)" } ?? ""
-                let item = NSMenuItem(title: "\(app.name) — \(state.label)\(awakeSuffix)", action: nil, keyEquivalent: "")
-                item.image = statusDot(color: state.color)
-                item.toolTip = vm.statusDetail(for: app)
-                if state == .disabled {
-                    item.attributedTitle = NSAttributedString(
-                        string: item.title, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
-                }
-                item.submenu = buildAppSubmenu(app: app, vm: vm, target: target)
+                let box = AppRecordBox(app, state: vm.status(for: app))
+                let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+                item.representedObject = box
+                configure(item: item, app: app, state: box.state, vm: vm)
+                item.submenu = buildAppSubmenu(box: box, vm: vm, target: target)
                 menu.addItem(item)
                 searchableEntries.append((app, item))
             }
@@ -157,11 +158,42 @@ enum MenuBuilder {
         return search
     }
 
+    /// Update app rows in place while the menu is open. NSMenu asks the
+    /// delegate to rebuild only at the start of a tracking session, so status
+    /// pulled by the refresh loop would otherwise sit stale until reopened.
+    static func refreshApps(menu: NSMenu, vm: CoulsonViewModel, target: AppDelegate) {
+        for item in menu.items {
+            guard let box = item.representedObject as? AppRecordBox,
+                  let app = vm.apps.first(where: { $0.id == box.app.id }) else { continue }
+            let state = vm.status(for: app)
+            configure(item: item, app: app, state: state, vm: vm)
+            guard state != box.state else { continue }
+            box.state = state
+            item.submenu = buildAppSubmenu(box: box, vm: vm, target: target)
+        }
+    }
+
+    private static func configure(
+        item: NSMenuItem, app: AppRecord, state: AppRuntimeState, vm: CoulsonViewModel
+    ) {
+        let awakeSuffix = vm.keepAwakeLabel(for: app).map { " · Awake \($0)" } ?? ""
+        let title = "\(app.name) — \(state.label)\(awakeSuffix)"
+        let attributed: NSAttributedString? = state == .disabled
+            ? NSAttributedString(string: title, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
+            : nil
+        let toolTip = vm.statusDetail(for: app)
+        guard item.title != title || item.attributedTitle != attributed || item.toolTip != toolTip else { return }
+        item.title = title
+        item.attributedTitle = attributed
+        item.image = statusDot(color: state.color)
+        item.toolTip = toolTip
+    }
+
     private static func buildAppSubmenu(
-        app: AppRecord, vm: CoulsonViewModel, target: AppDelegate
+        box: AppRecordBox, vm: CoulsonViewModel, target: AppDelegate
     ) -> NSMenu {
         let sub = NSMenu()
-        let box = AppRecordBox(app)
+        let app = box.app
 
         if app.target.type == "managed" && app.enabled {
             let awake = NSMenuItem(title: "Keep Awake", action: nil, keyEquivalent: "")
@@ -192,7 +224,7 @@ enum MenuBuilder {
             sub.addItem(.separator())
         }
 
-        if vm.status(for: app) == .failed {
+        if box.state == .failed {
             let failure = NSMenuItem(title: vm.statusDetail(for: app), action: nil, keyEquivalent: "")
             failure.isEnabled = false
             sub.addItem(failure)
