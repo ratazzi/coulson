@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTask: Task<Void, Never>?
     private var windowInterceptor: WindowCloseInterceptor?
     private weak var mainWindow: NSWindow?
+    private weak var openMenu: NSMenu?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DaemonManager.isProductionApp {
@@ -111,6 +112,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 1_500_000_000)
                 await vm.refreshAll()
+                if let openMenu { MenuBuilder.refreshApps(menu: openMenu, vm: vm, target: self) }
             }
         }
 
@@ -250,6 +252,9 @@ extension AppDelegate: NSMenuDelegate {
         guard let vm else { return }
         MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
     }
+
+    func menuWillOpen(_ menu: NSMenu) { openMenu = menu }
+    func menuDidClose(_ menu: NSMenu) { openMenu = nil }
 }
 
 // MARK: - Menu Actions
