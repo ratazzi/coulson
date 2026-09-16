@@ -48,6 +48,19 @@ pub struct AppStatus {
     pub started_at: Option<i64>,
     pub ready_at: Option<i64>,
     pub last_error: Option<AppFailure>,
+    pub keep_awake: Option<KeepAwake>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct KeepAwake {
+    /// Unix seconds; null means until explicitly cleared in this daemon session.
+    pub expires_at: Option<i64>,
+}
+
+impl KeepAwake {
+    pub fn active_at(self, timestamp: i64) -> bool {
+        self.expires_at.is_none_or(|expires| expires > timestamp)
+    }
 }
 
 #[derive(Clone)]
@@ -59,6 +72,7 @@ struct RuntimeRecord {
     started_at: Option<i64>,
     ready_at: Option<i64>,
     last_error: Option<AppFailure>,
+    keep_awake: Option<KeepAwake>,
 }
 
 /// Lifecycle snapshots can be read even while a slow startup holds the process-manager lock.
@@ -109,6 +123,9 @@ impl AppStatusStore {
             started_at: record.and_then(|r| r.started_at),
             ready_at: record.and_then(|r| r.ready_at),
             last_error: record.and_then(|r| r.last_error.clone()),
+            keep_awake: record
+                .and_then(|r| r.keep_awake)
+                .filter(|policy| app.enabled && policy.active_at(now())),
         };
         if state == AppState::Failed && matches!(app.target, BackendTarget::StaticDir { .. }) {
             result.last_error = Some(AppFailure {
@@ -150,6 +167,51 @@ impl AppStatusStore {
         }
     }
 
+    pub fn set_keep_awake(&self, app: &AppSpec, policy: KeepAwake) {
+        let Some(identity) = identity(app) else {
+            return;
+        };
+        let mut records = self.0.write();
+        let record = records.entry(app.id.0).or_insert_with(|| RuntimeRecord {
+            identity: identity.clone(),
+            state: AppState::Sleeping,
+            since: now(),
+            started_at: None,
+            ready_at: None,
+            last_error: None,
+            keep_awake: None,
+        });
+        if record.identity != identity {
+            *record = RuntimeRecord {
+                identity,
+                state: AppState::Sleeping,
+                since: now(),
+                started_at: None,
+                ready_at: None,
+                last_error: None,
+                keep_awake: None,
+            };
+        }
+        record.keep_awake = Some(policy);
+    }
+
+    pub fn clear_keep_awake(&self, app_id: i64) {
+        if let Some(record) = self.0.write().get_mut(&app_id) {
+            record.keep_awake = None;
+        }
+    }
+
+    pub fn is_kept_awake(&self, app: &AppSpec) -> bool {
+        // Process groups retain their spawn-time enabled flag. The active policy
+        // is current desired state; disable clears it separately.
+        self.0
+            .read()
+            .get(&app.id.0)
+            .filter(|record| Some(record.identity.clone()) == identity(app))
+            .and_then(|record| record.keep_awake)
+            .is_some_and(|policy| policy.active_at(now()))
+    }
+
     pub fn retain_apps(&self, apps: &[AppSpec]) {
         let identities: HashMap<_, _> = apps
             .iter()
@@ -158,6 +220,9 @@ impl AppStatusStore {
         self.0
             .write()
             .retain(|id, r| identities.get(id) == Some(&r.identity));
+        for app in apps.iter().filter(|a| !a.enabled) {
+            self.clear_keep_awake(app.id.0);
+        }
     }
 
     fn transition(&self, app: &AppSpec, state: AppState, failure: Option<AppFailure>) {
@@ -173,6 +238,7 @@ impl AppStatusStore {
             started_at: None,
             ready_at: None,
             last_error: None,
+            keep_awake: None,
         });
         if entry.identity != identity {
             *entry = RuntimeRecord {
@@ -182,6 +248,7 @@ impl AppStatusStore {
                 started_at: None,
                 ready_at: None,
                 last_error: None,
+                keep_awake: None,
             };
         }
         let new_start = entry.state != AppState::Starting || entry.started_at.is_none();

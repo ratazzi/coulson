@@ -56,6 +56,99 @@ pub fn app_status(
     Ok(statuses)
 }
 
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum KeepAwakeMode {
+    For { seconds: u64 },
+    UntilCleared,
+    Off,
+}
+
+pub async fn app_keep_awake(
+    state: &SharedState,
+    app_id: i64,
+    mode: KeepAwakeMode,
+) -> Result<crate::app_status::AppStatus, ServiceError> {
+    let app;
+    let start;
+    {
+        let mut pm = state.process_manager.lock().await;
+        // Serialize the desired-state check with disable/delete/scanner writes.
+        let txn = state.store.begin_write().map_err(ServiceError::from)?;
+        app = txn
+            .get_by_id(app_id)
+            .map_err(ServiceError::from)?
+            .ok_or(ServiceError::NotFound)?;
+        if !matches!(app.target, crate::domain::BackendTarget::Managed { .. }) {
+            return Err(ServiceError::InvalidParams(
+                "Keep awake requires a managed application".into(),
+            ));
+        }
+        if matches!(mode, KeepAwakeMode::Off) {
+            state.app_statuses.clear_keep_awake(app_id);
+            start = false;
+        } else {
+            if !app.enabled {
+                return Err(ServiceError::InvalidParams(
+                    "Enable the application before keeping it awake".into(),
+                ));
+            }
+            let expires_at = match mode {
+                KeepAwakeMode::For { seconds } => {
+                    let seconds =
+                        i64::try_from(seconds)
+                            .ok()
+                            .filter(|s| *s > 0)
+                            .ok_or_else(|| {
+                                ServiceError::InvalidParams(
+                                    "Duration must be positive and fit in seconds".into(),
+                                )
+                            })?;
+                    Some(
+                        time::OffsetDateTime::now_utc()
+                            .unix_timestamp()
+                            .checked_add(seconds)
+                            .ok_or_else(|| {
+                                ServiceError::InvalidParams("Duration is too large".into())
+                            })?,
+                    )
+                }
+                KeepAwakeMode::UntilCleared => None,
+                KeepAwakeMode::Off => unreachable!(),
+            };
+            state
+                .app_statuses
+                .set_keep_awake(&app, crate::app_status::KeepAwake { expires_at });
+            start = !pm.has_live_process(app_id);
+        }
+        drop(txn);
+    }
+    let snapshot = state.app_statuses.snapshot(&app);
+    if start {
+        let pm = state.process_manager.clone();
+        // The setting is accepted immediately; startup/failure is reported by app.status.
+        tokio::spawn(async move {
+            if let crate::domain::BackendTarget::Managed {
+                name, root, kind, ..
+            } = app.target
+            {
+                if let Err(error) = crate::process::start_kept_awake(
+                    &pm,
+                    app_id,
+                    &name,
+                    std::path::Path::new(&root),
+                    &kind,
+                )
+                .await
+                {
+                    tracing::warn!(app_id, error = %error, "keep-awake startup failed");
+                }
+            }
+        });
+    }
+    Ok(snapshot)
+}
+
 pub fn app_get_by_name(state: &SharedState, name: &str) -> Result<AppSpec, ServiceError> {
     match state.store.get_by_name(name) {
         Ok(Some(app)) => Ok(app),
@@ -129,6 +222,7 @@ pub async fn app_delete(state: &SharedState, app_id: i64) -> Result<(), ServiceE
         // path would miss the row and drop its route/tunnel fields, so the
         // stop event is built below from the deleted snapshot instead, and
         // sequenced before AppRemove.
+        state.app_statuses.clear_keep_awake(app_id);
         stopped = pm.kill_process_quiet(app_id).await;
     }
     let factory = state.hook_factory();
@@ -178,6 +272,9 @@ pub fn app_set_enabled(
 ) -> Result<(), ServiceError> {
     match state.store.set_enabled(app_id, enabled) {
         Ok(true) => {
+            if !enabled {
+                state.app_statuses.clear_keep_awake(app_id);
+            }
             state
                 .reload_routes()
                 .map_err(|e| ServiceError::Internal(e.to_string()))?;

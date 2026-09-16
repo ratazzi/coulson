@@ -381,6 +381,22 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Temporarily prevent idle sleep, starting the app if needed
+    KeepAwake {
+        /// App name or domain (omit to match CWD)
+        name: Option<String>,
+        /// Keep awake for this duration (default: 1h; rounded up to seconds)
+        #[arg(long = "for", value_parser = wait::parse_timeout, conflicts_with_all = ["until_cleared", "clear"])]
+        duration: Option<Duration>,
+        /// Keep awake until explicitly cleared or the daemon stops
+        #[arg(long, conflicts_with = "clear")]
+        until_cleared: bool,
+        /// Resume the application's normal automatic sleep behavior
+        #[arg(long)]
+        clear: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Start a managed process
     Start {
         /// App name or domain (omit to match CWD)
@@ -1526,7 +1542,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cli = Cli::parse();
     runtime::init_tracing(matches!(
         &cli.command,
-        Commands::Status { json: true, .. } | Commands::Wait { .. }
+        Commands::Status { json: true, .. }
+            | Commands::Wait { .. }
+            | Commands::KeepAwake { json: true, .. }
     ));
     let cfg = CoulsonConfig::load().context("failed to load config")?;
 
@@ -1587,6 +1605,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             json,
         } => return run_wait(cfg, name, timeout, json).await,
         Commands::Start { name } => run_process_action(cfg, name, "process.start"),
+        Commands::KeepAwake {
+            name,
+            duration,
+            until_cleared,
+            clear,
+            json,
+        } => run_keep_awake(cfg, name, duration, until_cleared, clear, json).await,
         Commands::Stop { name } => run_process_action(cfg, name, "process.stop"),
         Commands::Restart { name } => run_process_action(cfg, name, "process.restart"),
         Commands::Open { name } => run_open(cfg, name),
@@ -2620,6 +2645,36 @@ fn open_url(
     }
 }
 
+async fn run_keep_awake(
+    cfg: CoulsonConfig,
+    name: Option<String>,
+    duration: Option<Duration>,
+    until_cleared: bool,
+    clear: bool,
+    json: bool,
+) -> anyhow::Result<()> {
+    let client = RpcClient::new(&cfg.control_socket);
+    let (name, app_id) = resolve_app_id(&client, &cfg, name)?;
+    let params = if clear {
+        serde_json::json!({ "app_id": app_id, "mode": "off" })
+    } else if until_cleared {
+        serde_json::json!({ "app_id": app_id, "mode": "until_cleared" })
+    } else {
+        let duration = duration.unwrap_or(Duration::from_secs(3600));
+        let seconds = duration.as_secs() + u64::from(duration.subsec_nanos() != 0);
+        serde_json::json!({ "app_id": app_id, "mode": "for", "seconds": seconds })
+    };
+    let response = client.call_async("app.keep_awake", params).await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else if clear {
+        println!("{name}: automatic sleep restored");
+    } else {
+        println!("{name}: keep awake enabled");
+    }
+    Ok(())
+}
+
 async fn run_wait(
     cfg: CoulsonConfig,
     name: Option<String>,
@@ -2661,6 +2716,8 @@ fn run_status(cfg: CoulsonConfig, name: Option<String>, json: bool) -> anyhow::R
         state: &'static str,
         #[tabled(rename = "DETAIL")]
         detail: String,
+        #[tabled(rename = "KEEP AWAKE")]
+        keep_awake: String,
     }
     let result: StatusResponse = serde_json::from_value(response)?;
     let rows: Vec<_> = result
@@ -2681,6 +2738,17 @@ fn run_status(cfg: CoulsonConfig, name: Option<String>, json: bool) -> anyhow::R
                 name: app.name,
                 state: app.state.label(),
                 detail,
+                keep_awake: app
+                    .keep_awake
+                    .map(|policy| match policy.expires_at {
+                        Some(expires) => format_duration(
+                            expires
+                                .saturating_sub(time::OffsetDateTime::now_utc().unix_timestamp())
+                                .max(0) as u64,
+                        ),
+                        None => "until cleared".into(),
+                    })
+                    .unwrap_or_default(),
             }
         })
         .collect();
@@ -3930,6 +3998,35 @@ fn is_pf_configured_quick(
 #[cfg(test)]
 mod open_tests {
     use super::*;
+
+    #[test]
+    fn keep_awake_cli_modes_are_exclusive() {
+        let cli = Cli::try_parse_from(["coulson", "keep-awake", "demo"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::KeepAwake {
+                duration: None,
+                until_cleared: false,
+                clear: false,
+                ..
+            }
+        ));
+        for args in [
+            vec!["coulson", "keep-awake", "demo", "--for", "1h", "--json"],
+            vec!["coulson", "keep-awake", "--until-cleared"],
+            vec!["coulson", "keep-awake", "demo", "--clear"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_ok());
+        }
+        for args in [
+            vec!["coulson", "keep-awake", "--clear", "--until-cleared"],
+            vec!["coulson", "keep-awake", "--for", "1h", "--clear"],
+            vec!["coulson", "keep-awake", "--for", "1h", "--until-cleared"],
+            vec!["coulson", "keep-awake", "--for", "0s"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
 
     #[test]
     fn wait_cli_defaults_and_duration_validation() {

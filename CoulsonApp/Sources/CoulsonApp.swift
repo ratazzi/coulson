@@ -25,6 +25,7 @@ struct CoulsonAppMain: App {
     }
 }
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private(set) var vm: CoulsonViewModel?
@@ -32,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTask: Task<Void, Never>?
     private var windowInterceptor: WindowCloseInterceptor?
     private weak var mainWindow: NSWindow?
+    private var menuSearch: MenuSearchController?
     private weak var openMenu: NSMenu?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
@@ -92,6 +94,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem?.menu = menu
+        statusItem?.button?.setAccessibilityLabel("Coulson menu")
 
         // Add drop target overlay on status bar button
         if let button = statusItem?.button {
@@ -248,13 +251,21 @@ class StatusBarDropView: NSView {
 
 extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menuSearch?.isTracking != true else { return }
         menu.removeAllItems()
         guard let vm else { return }
-        MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
+        menuSearch = MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
     }
 
-    func menuWillOpen(_ menu: NSMenu) { openMenu = menu }
-    func menuDidClose(_ menu: NSMenu) { openMenu = nil }
+    func menuWillOpen(_ menu: NSMenu) {
+        openMenu = menu
+        menuSearch?.beginTracking()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        openMenu = nil
+        menuSearch?.endTracking()
+    }
 }
 
 // MARK: - Menu Actions
@@ -283,6 +294,21 @@ extension AppDelegate {
     @objc func retryStart(_ sender: NSMenuItem) {
         guard let box = sender.representedObject as? AppRecordBox else { return }
         Task { @MainActor in await vm?.retryStart(app: box.app) }
+    }
+
+    @objc func keepAwakeOneHour(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .oneHour) }
+    }
+
+    @objc func keepAwakeUntilCleared(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .untilCleared) }
+    }
+
+    @objc func resumeAutomaticSleep(_ sender: NSMenuItem) {
+        guard let box = sender.representedObject as? AppRecordBox else { return }
+        Task { @MainActor in await vm?.setKeepAwake(app: box.app, choice: .off) }
     }
 
     @objc func openInBrowser(_ sender: NSMenuItem) {
