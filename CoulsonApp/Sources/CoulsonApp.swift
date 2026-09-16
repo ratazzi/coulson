@@ -25,6 +25,7 @@ struct CoulsonAppMain: App {
     }
 }
 
+@MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private(set) var vm: CoulsonViewModel?
@@ -32,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var refreshTask: Task<Void, Never>?
     private var windowInterceptor: WindowCloseInterceptor?
     private weak var mainWindow: NSWindow?
+    private var menuSearch: MenuSearchController?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         if !DaemonManager.isProductionApp {
@@ -91,6 +93,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.delegate = self
         statusItem?.menu = menu
+        statusItem?.button?.setAccessibilityLabel("Coulson menu")
 
         // Add drop target overlay on status bar button
         if let button = statusItem?.button {
@@ -246,10 +249,14 @@ class StatusBarDropView: NSView {
 
 extension AppDelegate: NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menuSearch?.isTracking != true else { return }
         menu.removeAllItems()
         guard let vm else { return }
-        MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
+        menuSearch = MenuBuilder.build(menu: menu, vm: vm, updater: updater, target: self)
     }
+
+    func menuWillOpen(_ menu: NSMenu) { menuSearch?.beginTracking() }
+    func menuDidClose(_ menu: NSMenu) { menuSearch?.endTracking() }
 }
 
 // MARK: - Menu Actions

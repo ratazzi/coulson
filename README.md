@@ -385,6 +385,8 @@ have no fronting ingress worker.
 - **CLI**: `coulson ls`, `coulson add`, `coulson restart`, `coulson open`
 - **Menu bar app**: Coulson.app menu bar icon
 
+The menu bar menu includes a focused search field for filtering applications by name, domain, or project path. Return opens a single enabled match; Tab selects the search text; Escape clears the query, then closes the menu when empty. Input-method composition retains its normal Return behavior. Existing application submenus remain available. Search resets when the menu is reopened; it registers no global keyboard shortcuts. Use the Raycast extension for a global launcher. Check for Updates remains visible, disabled while the updater is unavailable (including development builds).
+
 ## Configuration
 
 Supports TOML config file (`~/.config/coulson/config.toml`) and environment variables. See [example](config.example.toml).
