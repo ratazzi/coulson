@@ -20,7 +20,7 @@ final class MenuSearchTests: XCTestCase {
         let menu = NSMenu()
         let search = MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
         let target = OpenTarget()
-        let open = try XCTUnwrap(menu.item(withTitle: "alpha — Unknown")?.submenu?.item(withTitle: "Open in Browser"))
+        let open = try XCTUnwrap(menu.item(withTitle: "alpha")?.submenu?.item(withTitle: "Open in Browser"))
         open.target = target
         search.beginTracking()
         defer { search.endTracking() }
@@ -67,7 +67,7 @@ final class MenuSearchTests: XCTestCase {
         let menu = NSMenu()
         let search = MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
         let target = OpenTarget()
-        let item = try XCTUnwrap(menu.item(withTitle: "alpha — Unknown"))
+        let item = try XCTUnwrap(menu.item(withTitle: "alpha"))
         let open = try XCTUnwrap(item.submenu?.item(withTitle: "Open in Browser"))
         open.target = target
         search.filter("alpha")
@@ -90,8 +90,8 @@ final class MenuSearchTests: XCTestCase {
         let menu = NSMenu()
         let search = MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
         let target = OpenTarget()
-        let beta = try XCTUnwrap(menu.item(withTitle: "beta — Unknown"))
-        for row in [try XCTUnwrap(menu.item(withTitle: "alpha — Unknown")), beta] {
+        let beta = try XCTUnwrap(menu.item(withTitle: "beta"))
+        for row in [try XCTUnwrap(menu.item(withTitle: "alpha")), beta] {
             try XCTUnwrap(row.submenu?.item(withTitle: "Open in Browser")).target = target
         }
         // Empty query: nothing to fall back to, the highlighted row still opens.
@@ -158,8 +158,8 @@ final class MenuSearchTests: XCTestCase {
         vm.apps = [try app(1, "alpha", root: "/projects/python"), try app(2, "beta", root: "/projects/web")]
         let menu = NSMenu()
         let search = MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-        let alpha = try XCTUnwrap(menu.item(withTitle: "alpha — Unknown"))
-        let beta = try XCTUnwrap(menu.item(withTitle: "beta — Unknown"))
+        let alpha = try XCTUnwrap(menu.item(withTitle: "alpha"))
+        let beta = try XCTUnwrap(menu.item(withTitle: "beta"))
         let submenu = alpha.submenu
         search.filter("ALPHA")
         XCTAssertFalse(alpha.isHidden)

@@ -177,7 +177,7 @@ enum MenuBuilder {
         item: NSMenuItem, app: AppRecord, state: AppRuntimeState, vm: CoulsonViewModel
     ) {
         let awakeSuffix = vm.keepAwakeLabel(for: app).map { " · Awake \($0)" } ?? ""
-        let title = "\(app.name) — \(state.label)\(awakeSuffix)"
+        let title = "\(app.name)\(awakeSuffix)"
         let attributed: NSAttributedString? = state == .disabled
             ? NSAttributedString(string: title, attributes: [.foregroundColor: NSColor.secondaryLabelColor])
             : nil

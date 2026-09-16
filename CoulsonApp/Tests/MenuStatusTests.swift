@@ -24,7 +24,7 @@ final class MenuStatusTests: XCTestCase {
         vm.appStatuses = [1: try JSONDecoder().decode(AppRuntimeStatus.self, from: Data(json.utf8))]
         let menu = NSMenu()
         MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-        let item = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("demo — Failed · Awake") })
+        let item = try XCTUnwrap(menu.items.first { $0.title.hasPrefix("demo · Awake") })
         let options = try XCTUnwrap(item.submenu?.item(withTitle: "Keep Awake")?.submenu)
         XCTAssertNotNil(options.item(withTitle: "For 1 Hour"))
         XCTAssertNotNil(options.item(withTitle: "Until Turned Off"))
@@ -44,7 +44,7 @@ final class MenuStatusTests: XCTestCase {
             vm.appStatuses = [1: try status(state)]
             let menu = NSMenu()
             MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-            let item = try XCTUnwrap(menu.item(withTitle: "demo — \(state.label)"))
+            let item = try XCTUnwrap(menu.item(withTitle: "demo"))
             dots[state] = try XCTUnwrap(item.image?.tiffRepresentation)
             if state == .disabled { XCTAssertNotNil(item.attributedTitle) }
         }
@@ -63,7 +63,7 @@ final class MenuStatusTests: XCTestCase {
         vm.appStatuses = [1: try status(.failed)]
         let menu = NSMenu()
         MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
-        let item = try XCTUnwrap(menu.item(withTitle: "demo — Failed"))
+        let item = try XCTUnwrap(menu.item(withTitle: "demo"))
         XCTAssertEqual(item.toolTip, "Primary process exited unexpectedly (exit 7)")
         XCTAssertNotNil(item.submenu?.item(withTitle: "Retry Start"))
     }
