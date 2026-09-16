@@ -139,9 +139,22 @@ final class MenuSearchController: NSObject, NSSearchFieldDelegate {
 
     @discardableResult
     func activateDefaultResult() -> Bool {
-        guard let item = defaultResult,
-              let open = item.submenu?.items.first(where: { $0.action == #selector(AppDelegate.openInBrowser(_:)) }),
-              open.isEnabled, let action = open.action else { return false }
+        activateReturnTarget(highlighted: menu?.highlightedItem)
+    }
+
+    /// Return acts on whatever the user highlighted with the keyboard or the
+    /// pointer, falling back to the sole search match. The field editor owns
+    /// the key event, so the menu's own Return handling never sees it.
+    @discardableResult
+    func activateReturnTarget(highlighted: NSMenuItem?) -> Bool {
+        var target = defaultResult
+        if let highlighted, !highlighted.isHidden, highlighted.isEnabled {
+            target = highlighted.submenu?.highlightedItem ?? highlighted
+        }
+        guard let target else { return false }
+        // App rows have no action of their own; Return opens them in the browser.
+        let open = target.submenu?.items.first(where: { $0.action == #selector(AppDelegate.openInBrowser(_:)) }) ?? target
+        guard open.isEnabled, let action = open.action else { return false }
         menu?.cancelTracking()
         return NSApplication.shared.sendAction(action, to: open.target, from: open)
     }

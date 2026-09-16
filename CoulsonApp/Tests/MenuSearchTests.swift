@@ -84,6 +84,35 @@ final class MenuSearchTests: XCTestCase {
     }
 
     @MainActor
+    func testReturnPrefersTheHighlightedRowOverTheSearchMatch() throws {
+        let vm = CoulsonViewModel(client: UDSControlClient(socketPath: "/tmp/unused-menu-search.sock"))
+        vm.apps = [try app(1, "alpha", root: "/projects/alpha"), try app(2, "beta", root: "/projects/beta")]
+        let menu = NSMenu()
+        let search = MenuBuilder.build(menu: menu, vm: vm, updater: nil, target: AppDelegate())
+        let target = OpenTarget()
+        let beta = try XCTUnwrap(menu.item(withTitle: "beta — Unknown"))
+        for row in [try XCTUnwrap(menu.item(withTitle: "alpha — Unknown")), beta] {
+            try XCTUnwrap(row.submenu?.item(withTitle: "Open in Browser")).target = target
+        }
+        // Empty query: nothing to fall back to, the highlighted row still opens.
+        XCTAssertNil(search.defaultResult)
+        XCTAssertFalse(search.activateReturnTarget(highlighted: nil))
+        XCTAssertTrue(search.activateReturnTarget(highlighted: beta))
+        XCTAssertEqual(target.receivedID, 2)
+        // A highlighted row wins while the query still shows it.
+        search.filter("projects")
+        XCTAssertNil(search.defaultResult)
+        target.receivedID = nil
+        XCTAssertTrue(search.activateReturnTarget(highlighted: beta))
+        XCTAssertEqual(target.receivedID, 2)
+        // A highlight hidden by the query falls back to the unique match.
+        search.filter("alpha.coulson")
+        XCTAssertTrue(beta.isHidden)
+        XCTAssertTrue(search.activateReturnTarget(highlighted: beta))
+        XCTAssertEqual(target.receivedID, 1)
+    }
+
+    @MainActor
     func testDisabledUniqueResultCannotBeOpenedWithReturn() throws {
         let vm = CoulsonViewModel(client: UDSControlClient(socketPath: "/tmp/unused-menu-search.sock"))
         vm.apps = [try app(1, "alpha", root: "/projects/alpha", enabled: false)]
