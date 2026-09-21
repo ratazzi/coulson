@@ -2755,7 +2755,8 @@ fn run_status(cfg: CoulsonConfig, name: Option<String>, json: bool) -> anyhow::R
     if rows.is_empty() {
         println!("No apps registered");
     } else {
-        println!("{}", tabled::Table::new(rows));
+        use tabled::settings::Style;
+        println!("{}", tabled::Table::new(&rows).with(Style::blank()));
     }
     Ok(())
 }
