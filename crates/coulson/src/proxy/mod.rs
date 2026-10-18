@@ -9,6 +9,8 @@ use bytes::Bytes;
 use pingora::http::ResponseHeader;
 use pingora::prelude::*;
 use pingora::proxy::{http_proxy_service, FailToProxy};
+use pingora::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
+use tokio::sync::watch;
 use tracing::info;
 
 use percent_encoding::percent_decode_str;
@@ -909,11 +911,36 @@ pub struct TlsConfig {
     pub sni_callback: crate::certs::SniCallback,
 }
 
+/// Stops a Pingora server run by coulson once the paired sender sends `true`
+/// or is dropped.
+///
+/// Pingora's default watcher handles SIGTERM itself: it sleeps through a fixed
+/// grace period, and `run_forever` then calls `process::exit`, racing the
+/// daemon's own cleanup. With this watcher the daemon decides when a proxy
+/// stops, and `Server::run` returns instead of exiting the process.
+struct ProxyShutdown(watch::Receiver<bool>);
+
+#[async_trait]
+impl ShutdownSignalWatch for ProxyShutdown {
+    async fn recv(&self) -> ShutdownSignal {
+        let mut rx = self.0.clone();
+        let _ = rx.wait_for(|stop| *stop).await;
+        ShutdownSignal::FastShutdown
+    }
+}
+
+fn run_until_shutdown(server: Server, shutdown: watch::Receiver<bool>) {
+    server.run(RunArgs {
+        shutdown_signal: Box::new(ProxyShutdown(shutdown)),
+    });
+}
+
 pub async fn run_proxy(
     addr: SocketAddr,
     tls: Option<TlsConfig>,
     state: SharedState,
     process_manager: ProcessManagerHandle,
+    shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let bind = addr.to_string();
     info!("proxy listening http://{bind}");
@@ -921,8 +948,10 @@ pub async fn run_proxy(
         info!(bind = %tls.bind, "proxy listening (HTTPS)");
     }
 
-    tokio::task::spawn_blocking(move || run_proxy_blocking(&bind, tls, state, process_manager))
-        .await??;
+    tokio::task::spawn_blocking(move || {
+        run_proxy_blocking(&bind, tls, state, process_manager, shutdown)
+    })
+    .await??;
     Ok(())
 }
 
@@ -931,15 +960,12 @@ fn run_proxy_blocking(
     tls: Option<TlsConfig>,
     state: SharedState,
     process_manager: ProcessManagerHandle,
+    shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     // When TLS is enabled, set ca_file on ServerConf to avoid loading macOS system
     // certificates (which may contain unsupported critical extensions that crash rustls).
     let mut conf = pingora::server::configuration::ServerConf {
         threads: 4,
-        // Pingora defaults to 300s grace period which is far too long for a
-        // local dev gateway. Use short timeouts so SIGTERM exits promptly.
-        grace_period_seconds: Some(3),
-        graceful_shutdown_timeout_seconds: Some(5),
         ..Default::default()
     };
     if let Some(ref tls) = tls {
@@ -1008,7 +1034,8 @@ fn run_proxy_blocking(
     }
 
     server.add_service(service);
-    server.run_forever();
+    run_until_shutdown(server, shutdown);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1068,14 +1095,13 @@ pub fn run_dedicated_proxy_blocking(
     upstream_addr: &str,
     host: &str,
     ca_file: Option<String>,
+    shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let bind = format!("0.0.0.0:{port}");
     // Avoid loading macOS system certificates which may contain unsupported
     // critical extensions that crash rustls. Use provided CA or /dev/null.
     let conf = pingora::server::configuration::ServerConf {
         ca_file: Some(ca_file.unwrap_or_else(|| "/dev/null".to_string())),
-        grace_period_seconds: Some(3),
-        graceful_shutdown_timeout_seconds: Some(5),
         ..Default::default()
     };
     let mut server = Server::new_with_opt_and_conf(None, conf);
@@ -1090,7 +1116,8 @@ pub fn run_dedicated_proxy_blocking(
     );
     service.add_tcp(&bind);
     server.add_service(service);
-    server.run_forever();
+    run_until_shutdown(server, shutdown);
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
