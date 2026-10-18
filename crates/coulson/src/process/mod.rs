@@ -1690,7 +1690,13 @@ impl ProcessManager {
 
         // Set remain-on-exit so session stays for inspection after crash
         let _ = tmux_cmd()
-            .args(["set-option", "-t", &session_name, "remain-on-exit", "on"])
+            .args([
+                "set-option",
+                "-t",
+                &tmux_pane_target(&session_name),
+                "remain-on-exit",
+                "on",
+            ])
             .output();
 
         // Pipe pane output to log file
@@ -1698,7 +1704,7 @@ impl ProcessManager {
             .args([
                 "pipe-pane",
                 "-t",
-                &session_name,
+                &tmux_pane_target(&session_name),
                 "-o",
                 &format!("cat >> {}", log_path.display()),
             ])
@@ -2756,10 +2762,23 @@ fn tmux_cmd() -> std::process::Command {
     cmd
 }
 
+/// Target exactly the session `name`. A bare `-t name` falls back to prefix
+/// and pattern matching, so `api` would resolve to a running `api-docs` and
+/// liveness checks or kills would hit the wrong app.
+pub fn tmux_session_target(name: &str) -> String {
+    format!("={name}")
+}
+
+/// Target the active pane of exactly the session `name`, for commands that
+/// take a window or pane target.
+fn tmux_pane_target(name: &str) -> String {
+    format!("={name}:")
+}
+
 /// Check if a tmux session exists.
 fn tmux_has_session(name: &str) -> bool {
     tmux_cmd()
-        .args(["has-session", "-t", name])
+        .args(["has-session", "-t", &tmux_session_target(name)])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
@@ -2770,7 +2789,13 @@ fn tmux_has_session(name: &str) -> bool {
 /// With `remain-on-exit on`, the session persists after the pane process exits.
 fn tmux_pane_alive(name: &str) -> bool {
     let output = tmux_cmd()
-        .args(["list-panes", "-t", name, "-F", "#{pane_dead}"])
+        .args([
+            "list-panes",
+            "-t",
+            &tmux_pane_target(name),
+            "-F",
+            "#{pane_dead}",
+        ])
         .output();
     match output {
         Ok(out) => {
@@ -2785,7 +2810,13 @@ fn tmux_pane_alive(name: &str) -> bool {
 /// Get the PID of the process running in a tmux session's pane.
 fn tmux_pane_pid(name: &str) -> Option<u32> {
     let output = tmux_cmd()
-        .args(["list-panes", "-t", name, "-F", "#{pane_pid}"])
+        .args([
+            "list-panes",
+            "-t",
+            &tmux_pane_target(name),
+            "-F",
+            "#{pane_pid}",
+        ])
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&output.stdout);
@@ -2795,7 +2826,7 @@ fn tmux_pane_pid(name: &str) -> Option<u32> {
 /// Kill a tmux session.
 fn tmux_kill_session(name: &str) {
     let _ = tmux_cmd()
-        .args(["kill-session", "-t", name])
+        .args(["kill-session", "-t", &tmux_session_target(name)])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
