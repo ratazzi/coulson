@@ -116,7 +116,10 @@ pub async fn start_named_tunnel(
     let creds = credentials.clone();
     let td = tunnel_domain.clone();
     let task = tokio::spawn(async move {
-        let mut handles = Vec::new();
+        // A JoinSet aborts its tasks on drop, so aborting this supervisor task
+        // tears the connections down too; detached handles would keep serving
+        // public traffic after the tunnel was stopped.
+        let mut connections = tokio::task::JoinSet::new();
         let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
@@ -128,7 +131,7 @@ pub async fn start_named_tunnel(
                 app_configs: app_configs.clone(),
                 share_signer: share_signer.clone(),
             };
-            let h = tokio::spawn(async move {
+            connections.spawn(async move {
                 if let Err(err) =
                     transport::run_tunnel_connection(&c, routing, conn_index, connector_id, conns)
                         .await
@@ -136,11 +139,8 @@ pub async fn start_named_tunnel(
                     error!(error = ?err, conn_index, "named tunnel connection failed");
                 }
             });
-            handles.push(h);
         }
-        for h in handles {
-            let _ = h.await;
-        }
+        while connections.join_next().await.is_some() {}
     });
 
     Ok(NamedTunnelHandle {
@@ -174,25 +174,22 @@ pub async fn start_quick_tunnel(
     let mgr = manager.clone();
     let aid = app_id;
     let task = tokio::spawn(async move {
-        let mut handles = Vec::new();
+        let mut connections = tokio::task::JoinSet::new();
         let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
             let conns = new_tunnel_connections();
-            let h = tokio::spawn(async move {
+            connections.spawn(async move {
                 if let Err(err) =
                     transport::run_tunnel_connection(&c, r, conn_index, connector_id, conns).await
                 {
                     error!(error = ?err, conn_index, "tunnel connection failed");
                 }
             });
-            handles.push(h);
         }
         // Wait for all connections (they run forever with reconnection)
-        for h in handles {
-            let _ = h.await;
-        }
+        while connections.join_next().await.is_some() {}
         mgr.lock().remove(&aid);
     });
 
@@ -280,24 +277,21 @@ pub async fn start_app_named_tunnel(
     let mgr = manager.clone();
     let aid = app_id;
     let task = tokio::spawn(async move {
-        let mut handles = Vec::new();
+        let mut connections = tokio::task::JoinSet::new();
         let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
             let conns = new_tunnel_connections();
-            let h = tokio::spawn(async move {
+            connections.spawn(async move {
                 if let Err(err) =
                     transport::run_tunnel_connection(&c, r, conn_index, connector_id, conns).await
                 {
                     error!(error = ?err, conn_index, "app named tunnel connection failed");
                 }
             });
-            handles.push(h);
         }
-        for h in handles {
-            let _ = h.await;
-        }
+        while connections.join_next().await.is_some() {}
         mgr.lock().remove(&aid);
     });
 
