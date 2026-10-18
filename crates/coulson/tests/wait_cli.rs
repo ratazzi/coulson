@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -38,6 +38,14 @@ impl Fixture {
     }
 }
 
+/// Keep the connection open until the client half-closes, like the real
+/// control server, which reads lines until EOF. Closing right after the
+/// response races the client's `shutdown(Write)`, which then fails with
+/// ENOTCONN on macOS.
+fn wait_for_client_eof(mut stream: UnixStream) {
+    std::io::copy(&mut stream, &mut std::io::sink()).ok();
+}
+
 impl Drop for Fixture {
     fn drop(&mut self) {
         std::fs::remove_dir_all(&self.0).ok();
@@ -67,6 +75,7 @@ fn wait_cli_json_and_exit_codes_match_final_outcome() {
                 "since":null, "started_at":null, "ready_at":null, "last_error":null
             }] } });
             writeln!(stream, "{response}").unwrap();
+            wait_for_client_eof(stream);
         });
         // Omitted name resolves from CWD, and info logs must not contaminate JSON.
         let output = fixture.run(&["wait", "--timeout", "100ms", "--json"]);
@@ -129,6 +138,7 @@ fn keep_awake_cli_sends_duration_indefinite_and_clear_modes() {
                     serde_json::json!({ "ok": true, "result": result })
                 )
                 .unwrap();
+                wait_for_client_eof(stream);
             }
         });
         let output = fixture.run(&args);
