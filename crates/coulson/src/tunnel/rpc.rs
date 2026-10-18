@@ -114,6 +114,7 @@ pub async fn handle_control_stream(
     mut send_response: h2::server::SendResponse<Bytes>,
     credentials: &TunnelCredentials,
     conn_index: u8,
+    connector_id: uuid::Uuid,
     conns: TunnelConnections,
 ) -> anyhow::Result<()> {
     let recv_stream = request.into_body();
@@ -141,7 +142,8 @@ pub async fn handle_control_stream(
     let rpc_handle = tokio::task::spawn_local(rpc_system);
 
     // Call registerConnection
-    let reg_result = register_connection(&bootstrap, credentials, conn_index, &conns).await;
+    let reg_result =
+        register_connection(&bootstrap, credentials, conn_index, connector_id, &conns).await;
 
     match reg_result {
         Ok(()) => {
@@ -160,6 +162,7 @@ async fn register_connection(
     bootstrap: &tunnelrpc_capnp::registration_server::Client,
     credentials: &TunnelCredentials,
     conn_index: u8,
+    connector_id: uuid::Uuid,
     conns: &TunnelConnections,
 ) -> anyhow::Result<()> {
     let mut request = bootstrap.register_connection_request();
@@ -176,7 +179,7 @@ async fn register_connection(
 
         let mut options = params.reborrow().init_options();
         let mut client_info = options.reborrow().init_client();
-        client_info.set_client_id(&uuid::Uuid::new_v4().as_bytes()[..]);
+        client_info.set_client_id(&connector_id.as_bytes()[..]);
         client_info.set_version(concat!("coulson/", env!("CARGO_PKG_VERSION")));
         client_info.set_arch(std::env::consts::ARCH);
 

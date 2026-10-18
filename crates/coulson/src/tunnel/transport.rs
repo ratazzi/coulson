@@ -189,17 +189,31 @@ const MAX_BACKOFF_SECS: u64 = 60;
 /// Run a single tunnel connection to Cloudflare edge with reconnection.
 /// Gives up after MAX_CONSECUTIVE_ERRORS consecutive failures.
 /// A successful connection (even if later closed) resets the counter.
+///
+/// `connector_id` must be shared by all connections of one tunnel instance:
+/// the edge groups connections into a replica by it, and a replica with fewer
+/// than the expected 4 connections is reported as degraded.
 pub async fn run_tunnel_connection(
     credentials: &TunnelCredentials,
     routing: TunnelRouting,
     conn_index: u8,
+    connector_id: uuid::Uuid,
     conns: TunnelConnections,
 ) -> anyhow::Result<()> {
     let tls_config = build_tls_config();
     let mut consecutive_errors: u32 = 0;
 
     loop {
-        match try_connect(credentials, &routing, conn_index, &tls_config, &conns).await {
+        match try_connect(
+            credentials,
+            &routing,
+            conn_index,
+            connector_id,
+            &tls_config,
+            &conns,
+        )
+        .await
+        {
             Ok(()) => {
                 consecutive_errors = 0;
                 info!("tunnel connection closed normally, reconnecting...");
@@ -234,6 +248,7 @@ async fn try_connect(
     credentials: &TunnelCredentials,
     routing: &TunnelRouting,
     conn_index: u8,
+    connector_id: uuid::Uuid,
     tls_config: &Arc<ClientConfig>,
     conns: &TunnelConnections,
 ) -> anyhow::Result<()> {
@@ -286,6 +301,7 @@ async fn try_connect(
                             send_response,
                             &creds,
                             conn_index,
+                            connector_id,
                             conns,
                         )
                         .await

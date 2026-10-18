@@ -18,6 +18,9 @@ use crate::store::{self, AppRepository};
 const RESPONSE_USER_HEADERS: &str = "cf-cloudflared-response-headers";
 const RESPONSE_META_HEADER: &str = "cf-cloudflared-response-meta";
 const RESPONSE_META_ORIGIN: &str = r#"{"src":"origin"}"#;
+/// Over h2 the edge drops the hop-by-hop `Connection`/`Upgrade` headers and
+/// flags WebSocket streams with this internal header instead.
+const UPGRADE_HEADER: &str = "cf-cloudflared-proxy-connection-upgrade";
 
 /// Sources needed to locate an app route and read that app's config file.
 /// The store identifies the app only; config values are never copied into it.
@@ -250,6 +253,10 @@ pub async fn proxy_to_local_with_host(
         trusted_forwarded_hosts,
     );
 
+    if is_websocket_request(&parts.headers) {
+        return proxy_websocket(local_req, body, send_response, local_proxy_port, local_host).await;
+    }
+
     let body_bytes = match collect_body_capped(&mut body).await? {
         Some(b) => b,
         None => {
@@ -266,15 +273,7 @@ pub async fn proxy_to_local_with_host(
         Ok(resp) => resp,
         Err(err) => {
             warn!(error = %err, local_host = %local_host, "local proxy request failed");
-            let msg = format!("Bad Gateway: {err}");
-            let response = http::Response::builder()
-                .status(502)
-                .header("content-type", "text/plain")
-                .body(())
-                .unwrap();
-            let mut send_stream = send_response.send_response(response, false)?;
-            send_stream.send_data(Bytes::from(msg), true)?;
-            return Ok(());
+            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
         }
     };
 
@@ -454,6 +453,17 @@ pub async fn proxy_by_host(
         &trusted_forwarded_hosts,
     );
 
+    if is_websocket_request(&parts.headers) {
+        return proxy_websocket(
+            local_req,
+            body,
+            send_response,
+            local_proxy_port,
+            &local_host,
+        )
+        .await;
+    }
+
     // Collect body (capped to bound peak memory)
     let body_bytes = match collect_body_capped(&mut body).await? {
         Some(b) => b,
@@ -471,15 +481,7 @@ pub async fn proxy_by_host(
         Ok(resp) => resp,
         Err(err) => {
             warn!(error = %err, local_host = %local_host, "local proxy request failed");
-            let msg = format!("Bad Gateway: {err}");
-            let response = http::Response::builder()
-                .status(502)
-                .header("content-type", "text/plain")
-                .body(())
-                .unwrap();
-            let mut send_stream = send_response.send_response(response, false)?;
-            send_stream.send_data(Bytes::from(msg), true)?;
-            return Ok(());
+            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
         }
     };
 
@@ -554,24 +556,7 @@ async fn send_proxied_response(
 
     let (resp_parts, resp_body) = local_resp.into_parts();
 
-    let mut response = http::Response::builder().status(resp_parts.status);
-    let mut user_headers = http::HeaderMap::new();
-    for (name, value) in &resp_parts.headers {
-        let n = name.as_str().to_ascii_lowercase();
-        if n == "content-length" {
-            // cloudflared keeps content-length as an h2 header.
-            response = response.header(name, value);
-            continue;
-        }
-        if !is_control_response_header(&n) || is_websocket_client_header(&n) {
-            user_headers.append(name.clone(), value.clone());
-        }
-    }
-    let serialized_user_headers = serialize_headers(&user_headers);
-    response = response
-        .header(RESPONSE_USER_HEADERS, serialized_user_headers)
-        .header(RESPONSE_META_HEADER, RESPONSE_META_ORIGIN);
-    let response = response.body(()).unwrap();
+    let response = tunnel_response_head(resp_parts.status, &resp_parts.headers);
     let mut send_stream = send_response.send_response(response, false)?;
 
     let mut body = resp_body;
@@ -584,6 +569,120 @@ async fn send_proxied_response(
     send_stream.send_data(Bytes::new(), true)?;
 
     Ok(())
+}
+
+/// True if the edge flagged this h2 stream as a WebSocket upgrade.
+fn is_websocket_request(headers: &http::HeaderMap) -> bool {
+    headers
+        .get(UPGRADE_HEADER)
+        .is_some_and(|v| v.as_bytes() == b"websocket")
+}
+
+fn send_bad_gateway(
+    send_response: &mut h2::server::SendResponse<Bytes>,
+    msg: String,
+) -> anyhow::Result<()> {
+    let response = http::Response::builder()
+        .status(502)
+        .header("content-type", "text/plain")
+        .body(())
+        .unwrap();
+    let mut send_stream = send_response.send_response(response, false)?;
+    send_stream.send_data(Bytes::from(msg), true)?;
+    Ok(())
+}
+
+/// Proxy a WebSocket stream: replay the handshake to the local proxy as an
+/// HTTP/1.1 upgrade, then pipe bytes between the h2 stream and the upgraded
+/// connection. Mirrors cloudflared, which restores the upgrade headers the
+/// edge stripped and answers a 101 with 200 since h2 has no 101.
+async fn proxy_websocket(
+    local_req: http::request::Builder,
+    body: RecvStream,
+    mut send_response: h2::server::SendResponse<Bytes>,
+    local_proxy_port: u16,
+    local_host: &str,
+) -> anyhow::Result<()> {
+    use http::header::{HeaderValue, CONNECTION, SEC_WEBSOCKET_VERSION, UPGRADE};
+    use hyper_util::rt::TokioIo;
+
+    let mut local_req = local_req.body(http_body_util::Empty::<Bytes>::new())?;
+    let headers = local_req.headers_mut();
+    headers.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    headers.insert(UPGRADE, HeaderValue::from_static("websocket"));
+    headers.insert(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13"));
+
+    info!(local_host = %local_host, uri = %local_req.uri(), "proxying tunnel websocket");
+
+    // A dedicated connection: upgraded connections can't go back to a pool.
+    let local_resp = async {
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", local_proxy_port)).await?;
+        tcp.set_nodelay(true)?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tcp)).await?;
+        tokio::spawn(async move {
+            if let Err(err) = conn.with_upgrades().await {
+                debug!(error = %err, "local websocket connection closed with error");
+            }
+        });
+        anyhow::Ok(sender.send_request(local_req).await?)
+    }
+    .await;
+    let local_resp = match local_resp {
+        Ok(resp) => resp,
+        Err(err) => {
+            warn!(error = %err, local_host = %local_host, "local websocket request failed");
+            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
+        }
+    };
+
+    // Origin refused the upgrade (auth challenge, 404, ...): relay as plain HTTP.
+    if local_resp.status() != http::StatusCode::SWITCHING_PROTOCOLS {
+        return send_proxied_response(local_resp, send_response).await;
+    }
+
+    let head = tunnel_response_head(http::StatusCode::OK, local_resp.headers());
+    let upgraded = match hyper::upgrade::on(local_resp).await {
+        Ok(upgraded) => upgraded,
+        Err(err) => {
+            warn!(error = %err, local_host = %local_host, "local websocket upgrade failed");
+            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
+        }
+    };
+    let send_stream = send_response.send_response(head, false)?;
+
+    let mut eyeball = super::rpc::H2Stream::new(body, send_stream);
+    let mut origin = TokioIo::new(upgraded);
+    match tokio::io::copy_bidirectional(&mut eyeball, &mut origin).await {
+        Ok((up, down)) => debug!(local_host = %local_host, up, down, "tunnel websocket closed"),
+        Err(err) => {
+            debug!(local_host = %local_host, error = %err, "tunnel websocket closed with error")
+        }
+    }
+    Ok(())
+}
+
+/// Build the h2 response head the edge expects: user headers serialized into
+/// one control header so h1 values bypass h2 header validation.
+fn tunnel_response_head(status: http::StatusCode, headers: &http::HeaderMap) -> http::Response<()> {
+    let mut response = http::Response::builder().status(status);
+    let mut user_headers = http::HeaderMap::new();
+    for (name, value) in headers {
+        let n = name.as_str().to_ascii_lowercase();
+        if n == "content-length" {
+            // cloudflared keeps content-length as an h2 header.
+            response = response.header(name, value);
+            continue;
+        }
+        if !is_control_response_header(&n) || is_websocket_client_header(&n) {
+            user_headers.append(name.clone(), value.clone());
+        }
+    }
+    let serialized_user_headers = serialize_headers(&user_headers);
+    response
+        .header(RESPONSE_USER_HEADERS, serialized_user_headers)
+        .header(RESPONSE_META_HEADER, RESPONSE_META_ORIGIN)
+        .body(())
+        .unwrap()
 }
 
 fn is_control_response_header(name: &str) -> bool {

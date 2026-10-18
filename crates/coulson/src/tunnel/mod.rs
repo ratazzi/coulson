@@ -117,6 +117,7 @@ pub async fn start_named_tunnel(
     let td = tunnel_domain.clone();
     let task = tokio::spawn(async move {
         let mut handles = Vec::new();
+        let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let conns = conns.clone();
@@ -129,7 +130,8 @@ pub async fn start_named_tunnel(
             };
             let h = tokio::spawn(async move {
                 if let Err(err) =
-                    transport::run_tunnel_connection(&c, routing, conn_index, conns).await
+                    transport::run_tunnel_connection(&c, routing, conn_index, connector_id, conns)
+                        .await
                 {
                     error!(error = ?err, conn_index, "named tunnel connection failed");
                 }
@@ -173,12 +175,15 @@ pub async fn start_quick_tunnel(
     let aid = app_id;
     let task = tokio::spawn(async move {
         let mut handles = Vec::new();
+        let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
             let conns = new_tunnel_connections();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index, conns).await {
+                if let Err(err) =
+                    transport::run_tunnel_connection(&c, r, conn_index, connector_id, conns).await
+                {
                     error!(error = ?err, conn_index, "tunnel connection failed");
                 }
             });
@@ -276,12 +281,15 @@ pub async fn start_app_named_tunnel(
     let aid = app_id;
     let task = tokio::spawn(async move {
         let mut handles = Vec::new();
+        let connector_id = uuid::Uuid::new_v4();
         for conn_index in 0..4u8 {
             let c = creds.clone();
             let r = routing.clone();
             let conns = new_tunnel_connections();
             let h = tokio::spawn(async move {
-                if let Err(err) = transport::run_tunnel_connection(&c, r, conn_index, conns).await {
+                if let Err(err) =
+                    transport::run_tunnel_connection(&c, r, conn_index, connector_id, conns).await
+                {
                     error!(error = ?err, conn_index, "app named tunnel connection failed");
                 }
             });
