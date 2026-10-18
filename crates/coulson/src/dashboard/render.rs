@@ -828,7 +828,20 @@ mod tests {
 
     #[test]
     fn templates_parse_correctly() {
-        let _ = templates();
+        // `templates()` only logs parse errors, so parse the directory directly.
+        let glob = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/dashboard/templates/**/*.html"
+        );
+        if let Err(e) = Tera::new(glob) {
+            let mut chain = format!("{e}");
+            let mut src = std::error::Error::source(&e);
+            while let Some(cause) = src {
+                chain.push_str(&format!("\nCaused by: {cause}"));
+                src = cause.source();
+            }
+            panic!("{chain}");
+        }
     }
 
     #[test]
@@ -906,5 +919,51 @@ mod tests {
         let html = render_partial("partials/toast.html", &ctx);
         assert!(html.contains("test msg"));
         assert!(html.contains("emerald"));
+    }
+
+    fn captured(
+        status: Option<u16>,
+        ms: Option<u64>,
+        query: Option<&str>,
+    ) -> crate::store::CapturedRequest {
+        crate::store::CapturedRequest {
+            id: "r1".into(),
+            app_id: 1,
+            timestamp: 0,
+            method: "POST".into(),
+            path: "/api/users".into(),
+            query_string: query.map(Into::into),
+            request_headers: "{}".into(),
+            request_body: None,
+            status_code: status,
+            response_headers: None,
+            response_body: None,
+            response_time_ms: ms,
+        }
+    }
+
+    fn render_row(req: &crate::store::CapturedRequest) -> String {
+        let mut ctx = Context::new();
+        ctx.insert("req", &RequestView::from_captured(req));
+        ctx.insert("base", "/apps/demo");
+        templates()
+            .render("partials/request_row.html", &ctx)
+            .expect("request row renders")
+    }
+
+    #[test]
+    fn request_row_exposes_filter_attributes() {
+        let html = render_row(&captured(Some(503), Some(0), Some("id=7")));
+        assert!(html.contains(r#"data-method="POST""#));
+        assert!(html.contains(r#"data-query="id=7""#));
+        assert!(html.contains(r#"data-status="503""#));
+        assert!(html.contains(r#"data-ms="0""#));
+        // Tera autoescapes `/` as `&#x2F;`; browsers decode it inside attributes.
+        assert!(html.contains(r#"<a href="&#x2F;apps&#x2F;demo/requests/r1">"#));
+
+        let pending = render_row(&captured(None, None, None));
+        assert!(pending.contains(r#"data-query="""#));
+        assert!(pending.contains(r#"data-status="""#));
+        assert!(pending.contains(r#"data-ms="""#));
     }
 }
