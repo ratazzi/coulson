@@ -26,6 +26,11 @@
 # Max requests to keep in the inspector buffer
 # inspect_max_requests = 200
 
+# host:port destinations that tunnel TCP streams (Workers VPC / WARP) may reach.
+# Empty refuses every stream; Coulson's own ports are always refused.
+# Env: COULSON_TUNNEL_TCP_ALLOW (comma-separated)
+# tunnel_tcp_allow = ["127.0.0.1:5432"]
+
 # TLS certificate directory
 # certs_dir = "~/.config/coulson/certs"
 

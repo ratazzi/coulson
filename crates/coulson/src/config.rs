@@ -2,7 +2,7 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::Context;
+use anyhow::{bail, Context};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +80,9 @@ pub struct CoulsonConfig {
     pub inspect_max_requests: usize,
     /// Max request body (MiB) buffered per tunnel request before returning 413.
     pub max_tunnel_body_mb: usize,
+    /// `host:port` destinations warp-routed tunnel TCP streams may reach.
+    /// Empty (the default) refuses every stream.
+    pub tunnel_tcp_allow: Vec<String>,
     pub certs_dir: PathBuf,
     pub runtime_dir: PathBuf,
     pub process_backend: ProcessBackend,
@@ -121,6 +124,7 @@ impl Default for CoulsonConfig {
             link_dir: false,
             inspect_max_requests: 200,
             max_tunnel_body_mb: 100,
+            tunnel_tcp_allow: Vec::new(),
             certs_dir: xdg_config_home().join(format!("{DIR_NAME}/certs")),
             runtime_dir,
             process_backend: ProcessBackend::Auto,
@@ -170,6 +174,9 @@ impl CoulsonConfig {
         }
         if let Some(v) = file.max_tunnel_body_mb {
             cfg.max_tunnel_body_mb = v;
+        }
+        if let Some(ref v) = file.tunnel_tcp_allow {
+            cfg.tunnel_tcp_allow = v.clone();
         }
         if let Some(ref v) = file.certs_dir {
             cfg.certs_dir = expand_tilde(v);
@@ -242,6 +249,15 @@ impl CoulsonConfig {
                 .parse()
                 .with_context(|| format!("invalid COULSON_MAX_TUNNEL_BODY_MB: {raw}"))?;
         }
+        if let Ok(raw) = env::var("COULSON_TUNNEL_TCP_ALLOW") {
+            cfg.tunnel_tcp_allow = raw
+                .split(',')
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(String::from)
+                .collect();
+        }
+        validate_tcp_allow(&cfg.tunnel_tcp_allow)?;
 
         if let Ok(path) = env::var("COULSON_CERTS_DIR") {
             cfg.certs_dir = PathBuf::from(path);
@@ -344,6 +360,20 @@ fn expand_tilde(path: &str) -> PathBuf {
     }
 }
 
+/// Each `tunnel_tcp_allow` entry must be `host:port`, the form the tunnel
+/// matches against, so a typo fails at startup instead of silently refusing.
+fn validate_tcp_allow(entries: &[String]) -> anyhow::Result<()> {
+    for dest in entries {
+        let valid = dest
+            .rsplit_once(':')
+            .is_some_and(|(host, port)| !host.is_empty() && port.parse::<u16>().is_ok());
+        if !valid {
+            bail!("invalid tunnel_tcp_allow entry {dest:?}: expected host:port");
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigFile {
     listen_http: Option<String>,
@@ -358,6 +388,7 @@ struct ConfigFile {
     link_dir: Option<bool>,
     inspect_max_requests: Option<usize>,
     max_tunnel_body_mb: Option<usize>,
+    tunnel_tcp_allow: Option<Vec<String>>,
     certs_dir: Option<String>,
     runtime_dir: Option<String>,
     process_backend: Option<String>,
@@ -422,6 +453,7 @@ impl ConfigFile {
             link_dir,
             inspect_max_requests,
             max_tunnel_body_mb,
+            tunnel_tcp_allow,
             certs_dir,
             runtime_dir,
             process_backend,
@@ -434,6 +466,24 @@ impl ConfigFile {
 #[cfg(all(test, debug_assertions))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tcp_allow_entries_must_be_host_port() {
+        let entries = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(validate_tcp_allow(&entries(&[
+            "127.0.0.1:5432",
+            "db.internal:6379",
+            "[::1]:22"
+        ]))
+        .is_ok());
+        assert!(validate_tcp_allow(&[]).is_ok());
+        for bad in ["127.0.0.1", "127.0.0.1:", ":5432", "db:http", "db:70000"] {
+            assert!(
+                validate_tcp_allow(&entries(&[bad])).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
 
     #[test]
     fn merge_overrides_max_tunnel_body_mb() {
