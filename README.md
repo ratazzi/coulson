@@ -379,6 +379,22 @@ requests, including after every app restart.
 This option is not intended for Quick Tunnels (`*.trycloudflare.com`), which
 have no fronting ingress worker.
 
+### TCP Forwarding (Workers VPC / WARP)
+
+A Named Tunnel can also carry raw TCP streams that Cloudflare routes to it,
+for example from Workers VPC services or WARP clients on a private network
+route. Coulson refuses these streams unless the destination is listed in
+`tunnel_tcp_allow` in `~/.config/coulson/config.toml`:
+
+```toml
+tunnel_tcp_allow = ["127.0.0.1:5432", "db.internal:6379"]
+```
+
+Entries are `host:port` and must match the requested destination exactly.
+The default empty list refuses every stream. Streams to Coulson's own HTTP,
+HTTPS, and dedicated ports are always refused, even when listed: those
+connections would arrive from loopback and be trusted as a local user.
+
 ## Management
 
 - **Web Dashboard**: `http://coulson.local:18080`

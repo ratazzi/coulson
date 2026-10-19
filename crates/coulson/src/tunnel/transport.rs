@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context;
 use h2::server;
@@ -484,6 +484,56 @@ async fn try_connect(
     Ok(())
 }
 
+/// What warp-routed TCP streams (Workers VPC, WARP clients) may reach.
+///
+/// The edge sends any destination the account routes to this tunnel, and a
+/// loopback connection to coulson's own proxy is trusted as a local user,
+/// skipping tunnel basic auth. So streams are refused unless their
+/// destination is allowlisted, and never reach coulson's own listeners.
+pub struct TcpForwardPolicy {
+    /// `host:port` destinations, matched exactly against the requested one.
+    pub allow: Vec<String>,
+    /// True for ports coulson itself listens on.
+    pub is_own_port: Box<dyn Fn(u16) -> bool + Send + Sync>,
+}
+
+/// Unset (e.g. CLI quick tunnels) refuses every stream.
+static TCP_FORWARD_POLICY: OnceLock<TcpForwardPolicy> = OnceLock::new();
+
+/// Install the TCP forwarding policy. Called once at daemon startup.
+pub fn set_tcp_forward_policy(policy: TcpForwardPolicy) {
+    let _ = TCP_FORWARD_POLICY.set(policy);
+}
+
+/// Check `dest` against the policy and resolve it. The returned addresses
+/// are the ones to dial, so the check and the connection share one lookup.
+async fn authorize_tcp_destination(dest: &str) -> Result<Vec<SocketAddr>, String> {
+    let policy = TCP_FORWARD_POLICY
+        .get()
+        .ok_or("TCP forwarding is not configured")?;
+    if !is_allowed_destination(&policy.allow, dest) {
+        return Err("destination is not in tunnel_tcp_allow".to_string());
+    }
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(dest)
+        .await
+        .map_err(|err| format!("failed to resolve destination: {err}"))?
+        .collect();
+    if targets_own_listener(&addrs, &policy.is_own_port) {
+        return Err("destination is a coulson listener".to_string());
+    }
+    Ok(addrs)
+}
+
+fn is_allowed_destination(allow: &[String], dest: &str) -> bool {
+    allow.iter().any(|entry| entry.eq_ignore_ascii_case(dest))
+}
+
+fn targets_own_listener(addrs: &[SocketAddr], is_own_port: impl Fn(u16) -> bool) -> bool {
+    addrs.iter().any(|addr| {
+        (addr.ip().is_loopback() || addr.ip().is_unspecified()) && is_own_port(addr.port())
+    })
+}
+
 async fn proxy_tcp_stream(
     request: Request<h2::RecvStream>,
     mut send_response: h2::server::SendResponse<bytes::Bytes>,
@@ -502,9 +552,19 @@ async fn proxy_tcp_stream(
         })
         .context("no destination in TCP stream request")?;
 
+    let addrs = match authorize_tcp_destination(&dest).await {
+        Ok(addrs) => addrs,
+        Err(reason) => {
+            warn!(%dest, %reason, "TCP proxy: refused");
+            let resp = http::Response::builder().status(403).body(()).unwrap();
+            let _ = send_response.send_response(resp, true);
+            return Ok(());
+        }
+    };
+
     debug!(%dest, "TCP proxy: dialing origin");
 
-    let mut tcp_stream = match TcpStream::connect(&dest).await {
+    let mut tcp_stream = match TcpStream::connect(&addrs[..]).await {
         Ok(s) => s,
         Err(err) => {
             warn!(%dest, error = %err, "TCP proxy: connect failed");
@@ -525,4 +585,119 @@ async fn proxy_tcp_stream(
     let _ = tokio::io::copy_bidirectional(&mut h2_stream, &mut tcp_stream).await;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_destination_must_be_allowlisted_exactly() {
+        let allow = vec!["127.0.0.1:5432".to_string(), "DB.internal:6379".to_string()];
+        assert!(is_allowed_destination(&allow, "127.0.0.1:5432"));
+        assert!(is_allowed_destination(&allow, "db.internal:6379"));
+        assert!(!is_allowed_destination(&allow, "127.0.0.1:5433"));
+        assert!(!is_allowed_destination(&allow, "127.0.0.1"));
+        assert!(!is_allowed_destination(&[], "127.0.0.1:5432"));
+    }
+
+    #[test]
+    fn tcp_destination_never_reaches_own_listeners() {
+        let own = |port: u16| port == 18080;
+        let addr = |s: &str| s.parse::<SocketAddr>().unwrap();
+        assert!(targets_own_listener(&[addr("127.0.0.1:18080")], own));
+        assert!(targets_own_listener(&[addr("[::1]:18080")], own));
+        assert!(targets_own_listener(&[addr("0.0.0.0:18080")], own));
+        // Any resolved address counts, not just the first.
+        assert!(targets_own_listener(
+            &[addr("192.168.1.5:18080"), addr("127.0.0.1:18080")],
+            own
+        ));
+        assert!(!targets_own_listener(&[addr("127.0.0.1:5432")], own));
+        // A LAN address isn't trusted as loopback by the proxy.
+        assert!(!targets_own_listener(&[addr("192.168.1.5:18080")], own));
+    }
+
+    /// Open a TCP stream the way the edge does (an h2 request carrying
+    /// `cf-cloudflared-proxy-src`) and return the status plus, when accepted,
+    /// what the destination echoes back.
+    async fn edge_tcp_stream(dest: &str) -> (u16, Option<Vec<u8>>) {
+        // A wrongly accepted stream to a silent listener would otherwise hang.
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            edge_tcp_stream_inner(dest),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("TCP stream to {dest} did not finish"))
+    }
+
+    async fn edge_tcp_stream_inner(dest: &str) -> (u16, Option<Vec<u8>>) {
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        tokio::spawn(async move {
+            let mut conn = server::handshake(server_io).await.unwrap();
+            let (request, send_response) = conn.accept().await.unwrap().unwrap();
+            assert!(matches!(detect_stream_type(&request), StreamType::Tcp));
+            tokio::spawn(async move { while conn.accept().await.is_some() {} });
+            proxy_tcp_stream(request, send_response).await.unwrap();
+        });
+
+        let (client, conn) = h2::client::handshake(client_io).await.unwrap();
+        tokio::spawn(conn);
+        let mut client = client.ready().await.unwrap();
+        let request = Request::builder()
+            .uri(format!("http://{dest}/"))
+            .header(TCP_PROXY_SRC_HEADER, "203.0.113.7:4000")
+            .body(())
+            .unwrap();
+        let (response, mut send) = client.send_request(request, false).unwrap();
+        let response = response.await.unwrap();
+        let status = response.status().as_u16();
+        if status != 200 {
+            return (status, None);
+        }
+        send.send_data(bytes::Bytes::from_static(b"ping"), true)
+            .unwrap();
+        let mut body = response.into_body();
+        let mut echoed = Vec::new();
+        while let Some(chunk) = body.data().await {
+            echoed.extend_from_slice(&chunk.unwrap());
+        }
+        (status, Some(echoed))
+    }
+
+    #[tokio::test]
+    async fn tcp_stream_is_gated_by_policy() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let echo = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = echo.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = Vec::new();
+                    sock.read_to_end(&mut buf).await.unwrap();
+                    sock.write_all(&buf).await.unwrap();
+                });
+            }
+        });
+        // Stands in for coulson's own proxy port.
+        let own = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let own_addr = own.local_addr().unwrap();
+        let other = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let other_addr = other.local_addr().unwrap();
+
+        let own_port = own_addr.port();
+        set_tcp_forward_policy(TcpForwardPolicy {
+            allow: vec![echo_addr.to_string(), own_addr.to_string()],
+            is_own_port: Box::new(move |port| port == own_port),
+        });
+
+        assert_eq!(
+            edge_tcp_stream(&echo_addr.to_string()).await,
+            (200, Some(b"ping".to_vec()))
+        );
+        assert_eq!(edge_tcp_stream(&other_addr.to_string()).await, (403, None));
+        // Allowlisted, but coulson's own listener stays off limits.
+        assert_eq!(edge_tcp_stream(&own_addr.to_string()).await, (403, None));
+    }
 }

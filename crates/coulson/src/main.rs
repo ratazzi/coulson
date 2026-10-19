@@ -1148,6 +1148,18 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
 
     let state = build_state(&cfg)?;
 
+    let own_ports = [
+        Some(cfg.listen_http.port()),
+        cfg.listen_https.map(|a| a.port()),
+    ];
+    let dedicated_ports = state.dedicated_ports.clone();
+    tunnel::transport::set_tcp_forward_policy(tunnel::transport::TcpForwardPolicy {
+        allow: cfg.tunnel_tcp_allow.clone(),
+        is_own_port: Box::new(move |port| {
+            own_ports.contains(&Some(port)) || dedicated_ports.read().contains_key(&port)
+        }),
+    });
+
     let startup_scan = scanner::sync_from_apps_root(&state)?;
     runtime::write_scan_warnings(&state.scan_warnings_path, &startup_scan.stats)?;
     state.reload_routes()?;
