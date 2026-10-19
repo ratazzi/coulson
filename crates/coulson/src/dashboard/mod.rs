@@ -1,6 +1,9 @@
 mod handlers;
 pub mod render;
 
+use axum::extract::Request;
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
 use bytes::Bytes;
@@ -121,7 +124,44 @@ pub fn router(state: DashboardState) -> Router {
             post(handlers::action_replay),
         )
         .fallback(handlers::not_found)
+        .layer(axum::middleware::from_fn(reject_cross_site))
         .with_state(state)
+}
+
+/// Reject cross-site state-changing requests (CSRF). The dashboard has no
+/// session to tie a token to, and its forms are simple requests a foreign
+/// page can auto-submit: over loopback, or with the embedded inspector's
+/// basic auth, which browsers attach automatically.
+async fn reject_cross_site(req: Request, next: Next) -> Response {
+    if !req.method().is_safe() && !is_same_origin_request(req.headers()) {
+        return (http::StatusCode::FORBIDDEN, "cross-site request rejected").into_response();
+    }
+    next.run(req).await
+}
+
+fn is_same_origin_request(headers: &http::HeaderMap) -> bool {
+    // Fetch metadata is set by the browser and can't be forged by a page. It
+    // also holds through the tunnel, where Host is rewritten to the local name.
+    if let Some(site) = headers.get("sec-fetch-site") {
+        return matches!(site.as_bytes(), b"same-origin" | b"none");
+    }
+    // Older browsers: the Origin must name this host. Requests without Origin
+    // come from non-browser clients, which carry no ambient credentials.
+    let Some(origin) = headers.get(http::header::ORIGIN) else {
+        return true;
+    };
+    let Some(origin) = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.parse::<http::Uri>().ok())
+        .and_then(|u| u.authority().cloned())
+    else {
+        return false;
+    };
+    [http::header::HOST.as_str(), "x-forwarded-host"]
+        .into_iter()
+        .filter_map(|name| headers.get(name)?.to_str().ok())
+        .any(|host| host.eq_ignore_ascii_case(origin.as_str()))
 }
 
 fn copy_headers(
@@ -243,6 +283,63 @@ pub async fn bridge(session: &mut Session, dashboard_router: Router) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> http::HeaderMap {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.parse().unwrap(), v.parse().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn same_origin_check_trusts_fetch_metadata() {
+        assert!(is_same_origin_request(&headers(&[(
+            "sec-fetch-site",
+            "same-origin"
+        )])));
+        assert!(is_same_origin_request(&headers(&[(
+            "sec-fetch-site",
+            "none"
+        )])));
+        // Fetch metadata wins over a matching Origin.
+        for site in ["cross-site", "same-site"] {
+            assert!(!is_same_origin_request(&headers(&[
+                ("sec-fetch-site", site),
+                ("origin", "http://dashboard.coulson.local"),
+                ("host", "dashboard.coulson.local"),
+            ])));
+        }
+    }
+
+    #[test]
+    fn same_origin_check_falls_back_to_origin() {
+        let host = ("host", "dashboard.coulson.local:18080");
+        assert!(is_same_origin_request(&headers(&[
+            ("origin", "http://dashboard.coulson.local:18080"),
+            host,
+        ])));
+        assert!(!is_same_origin_request(&headers(&[
+            ("origin", "https://evil.example"),
+            host
+        ])));
+        assert!(!is_same_origin_request(&headers(&[
+            ("origin", "null"),
+            host
+        ])));
+        // Port is part of the origin.
+        assert!(!is_same_origin_request(&headers(&[
+            ("origin", "http://dashboard.coulson.local"),
+            host,
+        ])));
+        // Tunnel: Host is rewritten locally, the public name is forwarded.
+        assert!(is_same_origin_request(&headers(&[
+            ("origin", "https://myapp.example.com"),
+            ("host", "myapp.coulson.local"),
+            ("x-forwarded-host", "myapp.example.com"),
+        ])));
+        // Non-browser clients send neither header.
+        assert!(is_same_origin_request(&headers(&[host])));
+    }
 
     #[test]
     fn dashboard_host_matches_dedicated_subdomain() {
