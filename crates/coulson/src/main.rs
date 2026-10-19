@@ -2812,11 +2812,11 @@ fn run_attach(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
     }
 
     let bare_name = resolve_app_name(&cfg, name.as_deref())?;
-    let session_name = bare_name.clone();
+    let session_target = process::tmux_session_target(&bare_name);
 
     // Check if the tmux session exists
     let status = std::process::Command::new("tmux")
-        .args(["-L", "coulson", "has-session", "-t", &session_name])
+        .args(["-L", "coulson", "has-session", "-t", &session_target])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()?;
@@ -2830,7 +2830,7 @@ fn run_attach(cfg: CoulsonConfig, name: Option<String>) -> anyhow::Result<()> {
     // Replace current process with tmux attach
     use std::os::unix::process::CommandExt;
     let err = std::process::Command::new("tmux")
-        .args(["-L", "coulson", "attach-session", "-t", &session_name])
+        .args(["-L", "coulson", "attach-session", "-t", &session_target])
         .exec();
     // exec() only returns on error
     bail!("failed to exec tmux: {err}");
