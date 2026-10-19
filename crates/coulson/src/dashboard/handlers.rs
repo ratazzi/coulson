@@ -165,6 +165,7 @@ pub async fn page_requests(
         ctx.insert("app", &app_view);
         ctx.insert("requests", &request_views);
         ctx.insert("request_count", &request_count);
+        ctx.insert("max_requests", &state.shared.inspect_max_requests);
         ctx.insert("embedded", &embedded);
         ctx.insert("base_path", &base_path);
     });

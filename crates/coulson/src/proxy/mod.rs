@@ -364,7 +364,7 @@ impl BridgeProxy {
     }
 }
 
-const INSPECT_BODY_MAX: usize = 65536;
+const INSPECT_BODY_MAX: usize = crate::store::CAPTURE_BODY_MAX;
 
 #[derive(Default)]
 struct ProxyCtx {
@@ -1934,6 +1934,7 @@ fn inspect_capture_resp_body(ctx: &mut ProxyCtx, body: &Option<Bytes>, end_of_st
             response_time_ms: elapsed,
         };
         if let Some(tx) = ctx.inspect_tx.take() {
+            let summary = captured.response_summary();
             let event = crate::InspectEvent {
                 app_id: captured.app_id,
                 request_id: captured.id.clone(),
@@ -1943,6 +1944,8 @@ fn inspect_capture_resp_body(ctx: &mut ProxyCtx, body: &Option<Bytes>, end_of_st
                 status_code: captured.status_code,
                 response_time_ms: captured.response_time_ms,
                 timestamp: captured.timestamp,
+                size_display: summary.size_display(),
+                content_type: summary.content_type,
             };
             let _ = tx.send(event);
         }

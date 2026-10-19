@@ -317,6 +317,8 @@ pub struct RequestView {
     pub status_code: Option<u16>,
     pub status_color: &'static str,
     pub response_time_ms: Option<u64>,
+    pub content_type: Option<String>,
+    pub size_display: Option<String>,
     pub timestamp_ms: i64,
     pub request_headers_display: String,
     pub request_body_display: Option<String>,
@@ -348,6 +350,7 @@ impl RequestView {
             Some(_) => "bg-red-50 text-red-700 dark:bg-red-900/40 dark:text-red-300",
             None => "bg-zinc-50 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400",
         };
+        let summary = req.response_summary();
         Self {
             id: req.id.clone(),
             method: req.method.clone(),
@@ -357,6 +360,8 @@ impl RequestView {
             status_code: req.status_code,
             status_color,
             response_time_ms: req.response_time_ms,
+            size_display: summary.size_display(),
+            content_type: summary.content_type,
             timestamp_ms: req.timestamp,
             request_headers_display: format_headers_json(&req.request_headers),
             request_body_display: req.request_body.as_ref().map(|b| body_to_display(b)),
@@ -965,5 +970,17 @@ mod tests {
         assert!(pending.contains(r#"data-query="""#));
         assert!(pending.contains(r#"data-status="""#));
         assert!(pending.contains(r#"data-ms="""#));
+        assert!(pending.contains(r#"data-type="""#));
+    }
+
+    #[test]
+    fn request_row_shows_type_size_and_zero_duration() {
+        let mut req = captured(Some(200), Some(0), None);
+        req.response_headers = Some(r#"{"content-type":"application/json; charset=utf-8"}"#.into());
+        req.response_body = Some(vec![b'x'; 1536]);
+        let html = render_row(&req);
+        assert!(html.contains(r#"data-type="application&#x2F;json""#));
+        assert!(html.contains(">1.5 KB<"));
+        assert!(html.contains(">0ms<"));
     }
 }
