@@ -1090,7 +1090,52 @@ fn dns_resolves_to_localhost(host: &str) -> Option<bool> {
     }
 }
 
+/// Take an exclusive lock held for the daemon's lifetime, so a second
+/// `coulson serve` fails fast instead of unlinking the live control socket and
+/// fighting the first over ports, tmux sessions and tunnel credentials. The OS
+/// releases the lock when the process exits, even on a crash, so a stale lock
+/// file never blocks startup.
+fn acquire_instance_lock(control_socket: &std::path::Path) -> anyhow::Result<std::fs::File> {
+    use std::io::{Read, Seek, Write};
+
+    let mut path = control_socket.as_os_str().to_owned();
+    path.push(".lock");
+    let path = std::path::PathBuf::from(path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            let mut pid = String::new();
+            let _ = file.read_to_string(&mut pid);
+            bail!(
+                "another coulson daemon is already running (pid {}, lock {})",
+                pid.trim(),
+                path.display()
+            );
+        }
+        Err(std::fs::TryLockError::Error(err)) => {
+            return Err(err).with_context(|| format!("failed to lock {}", path.display()));
+        }
+    }
+    // Record the holder's pid for the error above; the lock is what counts.
+    file.set_len(0)?;
+    file.rewind()?;
+    write!(file, "{}", std::process::id())?;
+    Ok(file)
+}
+
 async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
+    let _instance_lock = acquire_instance_lock(&cfg.control_socket)?;
+
     // Only the daemon should clean up a stale control socket.
     if cfg.control_socket.exists() {
         std::fs::remove_file(&cfg.control_socket)?;
