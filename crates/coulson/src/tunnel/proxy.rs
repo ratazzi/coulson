@@ -1,7 +1,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::task::Poll;
 
 use anyhow::Context;
 use bytes::Bytes;
@@ -42,10 +44,9 @@ impl AppConfigSource {
 /// the backend.
 pub const VIA_TUNNEL_HEADER: &str = "x-coulson-via-tunnel";
 
-/// Maximum request body buffered per tunnel request before returning 413.
-/// Tunnel bodies are fully buffered in memory before being forwarded to the
-/// local proxy, so this caps the peak memory a single (or many concurrent)
-/// uploads can consume and prevents an unbounded-upload OOM of the daemon.
+/// Maximum request body accepted per tunnel request before returning 413.
+/// Bodies are streamed to the local proxy, so this is an upload size policy
+/// rather than a memory bound.
 ///
 /// Configured via `CoulsonConfig::max_tunnel_body_mb` (toml `max_tunnel_body_mb`
 /// / env `COULSON_MAX_TUNNEL_BODY_MB`) and pushed here once at daemon startup by
@@ -151,22 +152,58 @@ fn host_matches(host: &str, patterns: &[String]) -> bool {
     })
 }
 
-/// Read the full h2 request body into memory, enforcing the configured
-/// [`MAX_TUNNEL_REQUEST_BODY`] cap. Returns `Ok(None)` if the body exceeds it
-/// (the caller should respond `413 Payload Too Large`). Flow-control capacity is
-/// released as chunks arrive, matching the unbounded path's backpressure.
-async fn collect_body_capped(body: &mut RecvStream) -> anyhow::Result<Option<Bytes>> {
-    let max = MAX_TUNNEL_REQUEST_BODY.load(Ordering::Relaxed);
-    let mut body_bytes = Vec::new();
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk?;
-        body.flow_control().release_capacity(chunk.len())?;
-        if body_bytes.len() + chunk.len() > max {
-            return Ok(None);
+/// Streams an h2 request body to the local proxy without buffering it.
+///
+/// Flow-control capacity is released only as hyper pulls chunks, so the edge
+/// can't send faster than the local proxy accepts. Exceeding
+/// [`MAX_TUNNEL_REQUEST_BODY`] fails the body and sets `exceeded`, letting the
+/// caller answer 413 instead of 502.
+struct TunnelRequestBody {
+    recv: RecvStream,
+    /// First chunk, read ahead to learn whether the body is empty.
+    first: Option<Bytes>,
+    remaining: usize,
+    exceeded: Arc<AtomicBool>,
+}
+
+impl hyper::body::Body for TunnelRequestBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, Self::Error>>> {
+        let data = match self.first.take() {
+            Some(data) => data,
+            None => match std::task::ready!(self.recv.poll_data(cx)) {
+                Some(Ok(data)) => data,
+                Some(Err(err)) => return Poll::Ready(Some(Err(std::io::Error::other(err)))),
+                None => return Poll::Ready(None),
+            },
+        };
+        let _ = self.recv.flow_control().release_capacity(data.len());
+        if data.len() > self.remaining {
+            self.exceeded.store(true, Ordering::Relaxed);
+            return Poll::Ready(Some(Err(std::io::Error::other(
+                "tunnel request body exceeds cap",
+            ))));
         }
-        body_bytes.extend_from_slice(&chunk);
+        self.remaining -= data.len();
+        Poll::Ready(Some(Ok(hyper::body::Frame::data(data))))
     }
-    Ok(Some(Bytes::from(body_bytes)))
+
+    fn is_end_stream(&self) -> bool {
+        self.first.is_none() && self.recv.is_end_stream()
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        if self.is_end_stream() {
+            hyper::body::SizeHint::with_exact(0)
+        } else {
+            hyper::body::SizeHint::default()
+        }
+    }
 }
 
 /// Send a `413 Payload Too Large` response on the h2 stream.
@@ -187,12 +224,12 @@ fn send_payload_too_large(
 /// Used for per-app tunnels where the backend is not a TCP port (e.g. static_dir, managed).
 pub async fn proxy_to_local_with_host(
     request: Request<RecvStream>,
-    mut send_response: h2::server::SendResponse<Bytes>,
+    send_response: h2::server::SendResponse<Bytes>,
     local_proxy_port: u16,
     local_host: &str,
     trusted_forwarded_hosts: &[String],
 ) -> anyhow::Result<()> {
-    let (parts, mut body) = request.into_parts();
+    let (parts, body) = request.into_parts();
 
     let uri = format!(
         "http://127.0.0.1:{}{}",
@@ -257,27 +294,7 @@ pub async fn proxy_to_local_with_host(
         return proxy_websocket(local_req, body, send_response, local_proxy_port, local_host).await;
     }
 
-    let body_bytes = match collect_body_capped(&mut body).await? {
-        Some(b) => b,
-        None => {
-            warn!(local_host = %local_host, max = MAX_TUNNEL_REQUEST_BODY.load(Ordering::Relaxed), "tunnel request body exceeds cap; returning 413");
-            send_payload_too_large(&mut send_response)?;
-            return Ok(());
-        }
-    };
-
-    let local_req = local_req.body(http_body_util::Full::new(body_bytes))?;
-
-    let client = Client::builder(TokioExecutor::new()).build_http();
-    let local_resp = match client.request(local_req).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            warn!(error = %err, local_host = %local_host, "local proxy request failed");
-            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
-        }
-    };
-
-    send_proxied_response(local_resp, send_response).await?;
+    forward_to_local(local_req, &parts.headers, body, send_response, local_host).await?;
 
     info!(local_host = %local_host, "fixed-host tunnel response sent");
     Ok(())
@@ -315,7 +332,7 @@ pub async fn proxy_by_host(
     app_configs: &AppConfigSource,
     share_authorized: bool,
 ) -> anyhow::Result<()> {
-    let (parts, mut body) = request.into_parts();
+    let (parts, body) = request.into_parts();
 
     // In HTTP/2, the host is in the :authority pseudo-header (mapped to URI authority),
     // not the "host" header. Check URI authority first, then fall back to host header.
@@ -464,28 +481,7 @@ pub async fn proxy_by_host(
         .await;
     }
 
-    // Collect body (capped to bound peak memory)
-    let body_bytes = match collect_body_capped(&mut body).await? {
-        Some(b) => b,
-        None => {
-            warn!(local_host = %local_host, max = MAX_TUNNEL_REQUEST_BODY.load(Ordering::Relaxed), "tunnel request body exceeds cap; returning 413");
-            send_payload_too_large(&mut send_response)?;
-            return Ok(());
-        }
-    };
-
-    let local_req = local_req.body(http_body_util::Full::new(body_bytes))?;
-
-    let client = Client::builder(TokioExecutor::new()).build_http();
-    let local_resp = match client.request(local_req).await {
-        Ok(resp) => resp,
-        Err(err) => {
-            warn!(error = %err, local_host = %local_host, "local proxy request failed");
-            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
-        }
-    };
-
-    send_proxied_response(local_resp, send_response).await?;
+    forward_to_local(local_req, &parts.headers, body, send_response, &local_host).await?;
 
     info!(local_host = %local_host, "named tunnel response sent");
     Ok(())
@@ -561,14 +557,94 @@ async fn send_proxied_response(
 
     let mut body = resp_body;
     while let Some(frame) = body.frame().await {
-        let frame = frame?;
-        if let Some(data) = frame.data_ref() {
-            send_stream.send_data(data.clone(), false)?;
+        if let Ok(data) = frame?.into_data() {
+            send_data_with_capacity(&mut send_stream, data).await?;
         }
     }
     send_stream.send_data(Bytes::new(), true)?;
 
     Ok(())
+}
+
+/// Send `data` on the h2 stream as the peer's flow-control window allows.
+/// `send_data` alone buffers without limit, so a slow client downloading from
+/// a fast origin would grow daemon memory by the whole response.
+async fn send_data_with_capacity(
+    send_stream: &mut h2::SendStream<Bytes>,
+    mut data: Bytes,
+) -> anyhow::Result<()> {
+    while !data.is_empty() {
+        send_stream.reserve_capacity(data.len());
+        let capacity = match std::future::poll_fn(|cx| send_stream.poll_capacity(cx)).await {
+            Some(capacity) => capacity?,
+            None => anyhow::bail!("h2 stream closed while sending response body"),
+        };
+        if capacity == 0 {
+            continue;
+        }
+        send_stream.send_data(data.split_to(capacity.min(data.len())), false)?;
+    }
+    Ok(())
+}
+
+/// Send the request to the local proxy with its body streamed through, then
+/// relay the response.
+async fn forward_to_local(
+    local_req: http::request::Builder,
+    incoming_headers: &http::HeaderMap,
+    mut body: RecvStream,
+    mut send_response: h2::server::SendResponse<Bytes>,
+    local_host: &str,
+) -> anyhow::Result<()> {
+    let max = MAX_TUNNEL_REQUEST_BODY.load(Ordering::Relaxed);
+    let content_length = incoming_headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if content_length.is_some_and(|len| len > max as u64) {
+        warn!(local_host = %local_host, max, "tunnel request body exceeds cap; returning 413");
+        return send_payload_too_large(&mut send_response);
+    }
+
+    // Keep a declared length so the origin isn't switched to chunked encoding.
+    let local_req = match content_length {
+        Some(len) => local_req.header(http::header::CONTENT_LENGTH, len),
+        None => local_req,
+    };
+    // The edge may end a bodiless request with a separate empty DATA frame;
+    // read ahead so such a request isn't sent to the origin chunked.
+    let mut first = None;
+    while !body.is_end_stream() {
+        match body.data().await.transpose()? {
+            Some(chunk) if chunk.is_empty() => continue,
+            chunk => {
+                first = chunk;
+                break;
+            }
+        }
+    }
+    let exceeded = Arc::new(AtomicBool::new(false));
+    let local_req = local_req.body(TunnelRequestBody {
+        recv: body,
+        first,
+        remaining: max,
+        exceeded: exceeded.clone(),
+    })?;
+
+    let client = Client::builder(TokioExecutor::new()).build_http();
+    let local_resp = match client.request(local_req).await {
+        Ok(resp) => resp,
+        Err(_) if exceeded.load(Ordering::Relaxed) => {
+            warn!(local_host = %local_host, max, "tunnel request body exceeds cap; returning 413");
+            return send_payload_too_large(&mut send_response);
+        }
+        Err(err) => {
+            warn!(error = %err, local_host = %local_host, "local proxy request failed");
+            return send_bad_gateway(&mut send_response, format!("Bad Gateway: {err}"));
+        }
+    };
+
+    send_proxied_response(local_resp, send_response).await
 }
 
 /// True if the edge flagged this h2 stream as a WebSocket upgrade.
