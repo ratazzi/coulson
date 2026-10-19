@@ -34,7 +34,7 @@ use parking_lot::{Mutex, RwLock};
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use tabled::Tabled;
 
@@ -1266,8 +1266,17 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
     let proxy_state = state.clone();
     let proxy_addr = cfg.listen_http;
     let proxy_pm = state.process_manager.clone();
+    let (proxy_shutdown_tx, proxy_shutdown_rx) = tokio::sync::watch::channel(false);
     let proxy_task = tokio::spawn(async move {
-        if let Err(err) = proxy::run_proxy(proxy_addr, tls_config, proxy_state, proxy_pm).await {
+        if let Err(err) = proxy::run_proxy(
+            proxy_addr,
+            tls_config,
+            proxy_state,
+            proxy_pm,
+            proxy_shutdown_rx,
+        )
+        .await
+        {
             error!(error = %err, "proxy exited with error");
         }
     });
@@ -1417,10 +1426,7 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
     runtime::wait_for_shutdown().await;
     info!("shutdown signal received");
 
-    {
-        let mut pm = state.process_manager.lock().await;
-        pm.shutdown_all().await;
-    }
+    // Stop public traffic first, then the proxy, then the backends behind it.
     tunnel::shutdown_all(&state.tunnels);
     tunnel::shutdown_all_app_tunnels(&state.app_tunnels);
     if let Some(handle) = state.named_tunnel.lock().take() {
@@ -1428,7 +1434,20 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
         handle.task.abort();
     }
 
-    proxy_task.abort();
+    const PROXY_STOP_TIMEOUT: Duration = Duration::from_secs(5);
+    let _ = proxy_shutdown_tx.send(true);
+    if tokio::time::timeout(PROXY_STOP_TIMEOUT, proxy_task)
+        .await
+        .is_err()
+    {
+        warn!("proxy did not stop within {PROXY_STOP_TIMEOUT:?}");
+    }
+
+    {
+        let mut pm = state.process_manager.lock().await;
+        pm.shutdown_all().await;
+    }
+
     control_task.abort();
     scan_task.abort();
     watch_task.abort();
@@ -1442,7 +1461,8 @@ async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
 
 async fn run_dedicated_port_manager(state: SharedState) {
     let mut rx = state.route_tx.subscribe();
-    let mut running: HashMap<u16, tokio::task::JoinHandle<()>> = HashMap::new();
+    // Dropping a port's sender stops its proxy.
+    let mut running: HashMap<u16, tokio::sync::watch::Sender<bool>> = HashMap::new();
 
     // Start initial dedicated proxies
     sync_dedicated_proxies(&state, &mut running);
@@ -1457,14 +1477,12 @@ async fn run_dedicated_port_manager(state: SharedState) {
         }
     }
 
-    for (_, handle) in running.drain() {
-        handle.abort();
-    }
+    running.clear();
 }
 
 fn sync_dedicated_proxies(
     state: &SharedState,
-    running: &mut HashMap<u16, tokio::task::JoinHandle<()>>,
+    running: &mut HashMap<u16, tokio::sync::watch::Sender<bool>>,
 ) {
     let snapshot: HashMap<u16, String> = {
         let dp = state.dedicated_ports.read();
@@ -1475,9 +1493,8 @@ fn sync_dedicated_proxies(
     let wanted: HashSet<u16> = snapshot.keys().copied().collect();
     let current: HashSet<u16> = running.keys().copied().collect();
     for port in current.difference(&wanted) {
-        if let Some(handle) = running.remove(port) {
+        if running.remove(port).is_some() {
             info!(port, "stopping dedicated proxy");
-            handle.abort();
         }
     }
 
@@ -1500,12 +1517,15 @@ fn sync_dedicated_proxies(
         let upstream = upstream.clone();
         let ca_file = ca_file.clone();
         info!(port, host = %host, "starting dedicated proxy");
-        let handle = tokio::task::spawn_blocking(move || {
-            if let Err(err) = proxy::run_dedicated_proxy_blocking(port, &upstream, &host, ca_file) {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        tokio::task::spawn_blocking(move || {
+            if let Err(err) =
+                proxy::run_dedicated_proxy_blocking(port, &upstream, &host, ca_file, shutdown_rx)
+            {
                 error!(error = %err, port, "dedicated proxy exited with error");
             }
         });
-        running.insert(port, handle);
+        running.insert(port, shutdown_tx);
     }
 }
 
