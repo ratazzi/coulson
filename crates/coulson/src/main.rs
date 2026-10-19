@@ -56,6 +56,8 @@ pub struct InspectEvent {
     pub status_code: Option<u16>,
     pub response_time_ms: Option<u64>,
     pub timestamp: i64,
+    pub content_type: Option<String>,
+    pub size_display: Option<String>,
 }
 
 /// Maps dedicated listen_port → app domain for forwarding to main proxy.

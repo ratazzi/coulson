@@ -1277,7 +1277,7 @@ impl AppRepository {
     ) -> anyhow::Result<Vec<CapturedRequest>> {
         let conn = self.reader();
         let mut stmt = conn.prepare(
-            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ?",
+            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
         )?;
         let mut rows = stmt.query(params![app_id, limit as i64])?;
         let mut results = Vec::new();
@@ -1299,6 +1299,30 @@ impl AppRepository {
         }
     }
 
+    /// Ids of the captured requests just newer and just older than `req` in the
+    /// same app, matching the list order (`timestamp DESC, id DESC`).
+    pub fn adjacent_request_ids(
+        &self,
+        req: &CapturedRequest,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let conn = self.reader();
+        let newer = conn
+            .query_row(
+                "SELECT id FROM request_logs WHERE app_id = ?1 AND (timestamp > ?2 OR (timestamp = ?2 AND id > ?3)) ORDER BY timestamp ASC, id ASC LIMIT 1",
+                params![req.app_id, req.timestamp, req.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let older = conn
+            .query_row(
+                "SELECT id FROM request_logs WHERE app_id = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND id < ?3)) ORDER BY timestamp DESC, id DESC LIMIT 1",
+                params![req.app_id, req.timestamp, req.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok((newer, older))
+    }
+
     pub fn get_request_logs_by_app_name(
         &self,
         app_name: &str,
@@ -1310,7 +1334,7 @@ impl AppRepository {
             Some(app) => {
                 let conn = self.reader();
                 let mut stmt = conn.prepare(
-                    "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 )?;
                 let mut rows = stmt.query(params![app.id.0, limit as i64, offset as i64])?;
                 let mut results = Vec::new();
@@ -1638,6 +1662,80 @@ pub struct CapturedRequest {
     pub response_time_ms: Option<u64>,
 }
 
+/// Request and response bodies are captured up to this many bytes.
+pub const CAPTURE_BODY_MAX: usize = 65536;
+
+/// Response metadata derived from a captured request, for list views.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseSummary {
+    /// MIME type without parameters, e.g. `application/json`.
+    pub content_type: Option<String>,
+    /// `Content-Length` when present, else the captured body length.
+    pub size: Option<u64>,
+    /// The size is a lower bound because the captured body hit the cap.
+    pub size_truncated: bool,
+}
+
+impl ResponseSummary {
+    pub fn size_display(&self) -> Option<String> {
+        let size = self.size?;
+        let text = if size < 1024 {
+            format!("{size} B")
+        } else {
+            let (value, unit) = if size < 1024 * 1024 {
+                (size as f64 / 1024.0, "KB")
+            } else {
+                (size as f64 / (1024.0 * 1024.0), "MB")
+            };
+            if value < 10.0 {
+                format!("{value:.1} {unit}")
+            } else {
+                format!("{value:.0} {unit}")
+            }
+        };
+        Some(if self.size_truncated {
+            format!("{text}+")
+        } else {
+            text
+        })
+    }
+}
+
+impl CapturedRequest {
+    pub fn response_summary(&self) -> ResponseSummary {
+        let Some(headers_json) = self.response_headers.as_deref() else {
+            return ResponseSummary {
+                content_type: None,
+                size: None,
+                size_truncated: false,
+            };
+        };
+        let headers: std::collections::HashMap<String, String> =
+            serde_json::from_str(headers_json).unwrap_or_default();
+        let header = |name: &str| {
+            headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+        };
+        let content_type = header("content-type")
+            .and_then(|v| v.split(';').next())
+            .map(|v| v.trim().to_ascii_lowercase())
+            .filter(|v| !v.is_empty());
+        let body_len = self.response_body.as_ref().map_or(0, |b| b.len());
+        let (size, size_truncated) =
+            match header("content-length").and_then(|v| v.trim().parse::<u64>().ok()) {
+                Some(len) => (len, false),
+                None => (body_len as u64, body_len >= CAPTURE_BODY_MAX),
+            };
+        ResponseSummary {
+            content_type,
+            size: Some(size),
+            size_truncated,
+        }
+    }
+}
+
 fn row_to_captured_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<CapturedRequest> {
     Ok(CapturedRequest {
         id: row.get(0)?,
@@ -1658,6 +1756,91 @@ fn row_to_captured_request(row: &rusqlite::Row<'_>) -> rusqlite::Result<Captured
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn captured_response(headers: Option<&str>, body: Option<Vec<u8>>) -> CapturedRequest {
+        CapturedRequest {
+            id: "r1".into(),
+            app_id: 1,
+            timestamp: 0,
+            method: "GET".into(),
+            path: "/".into(),
+            query_string: None,
+            request_headers: "{}".into(),
+            request_body: None,
+            status_code: headers.map(|_| 200),
+            response_headers: headers.map(Into::into),
+            response_body: body,
+            response_time_ms: None,
+        }
+    }
+
+    #[test]
+    fn adjacent_request_ids_follow_list_order() {
+        let repo = AppRepository {
+            conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
+            read_conn: None,
+            domain_suffix: "coulson.local".to_string(),
+            change_tx: None,
+        };
+        repo.init_schema().expect("schema");
+        let log = |id: &str, app_id: i64, timestamp: i64| {
+            let mut req = captured_response(None, None);
+            req.id = id.into();
+            req.app_id = app_id;
+            req.timestamp = timestamp;
+            repo.insert_request_log(&req, 100).expect("insert");
+            req
+        };
+        let a = log("a", 1, 100);
+        let b = log("b", 1, 200);
+        let c = log("c", 1, 200); // same timestamp as b: id breaks the tie
+        let d = log("d", 1, 300);
+        log("other", 2, 250);
+
+        let order: Vec<String> = repo
+            .list_request_logs(1, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(order, ["d", "c", "b", "a"]);
+
+        let adj = |r: &CapturedRequest| repo.adjacent_request_ids(r).unwrap();
+        assert_eq!(adj(&d), (None, Some("c".into())));
+        assert_eq!(adj(&c), (Some("d".into()), Some("b".into())));
+        assert_eq!(adj(&b), (Some("c".into()), Some("a".into())));
+        assert_eq!(adj(&a), (Some("b".into()), None));
+    }
+
+    #[test]
+    fn response_summary_prefers_content_length() {
+        let req = captured_response(
+            Some(r#"{"Content-Type":"application/json; charset=utf-8","content-length":"2048"}"#),
+            Some(b"{}".to_vec()),
+        );
+        let summary = req.response_summary();
+        assert_eq!(summary.content_type.as_deref(), Some("application/json"));
+        assert_eq!(summary.size, Some(2048));
+        assert_eq!(summary.size_display().as_deref(), Some("2.0 KB"));
+    }
+
+    #[test]
+    fn response_summary_falls_back_to_captured_body() {
+        let small = captured_response(Some("{}"), Some(vec![0; 512]));
+        assert_eq!(
+            small.response_summary().size_display().as_deref(),
+            Some("512 B")
+        );
+
+        let capped = captured_response(Some("{}"), Some(vec![0; CAPTURE_BODY_MAX]));
+        let summary = capped.response_summary();
+        assert!(summary.size_truncated);
+        assert_eq!(summary.content_type, None);
+        assert_eq!(summary.size_display().as_deref(), Some("64 KB+"));
+
+        let pending = captured_response(None, None).response_summary();
+        assert_eq!(pending.size_display(), None);
+    }
 
     #[test]
     fn insert_and_list_enabled() {

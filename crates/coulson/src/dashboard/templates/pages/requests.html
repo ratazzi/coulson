@@ -40,21 +40,38 @@
 {% endif %}
 
 <!-- Filter bar -->
+{% set filter_btn = "px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700" %}
 <div id="filter-bar" class="{% if requests | length == 0 %}hidden{% endif %} mb-4 flex items-center gap-3 flex-wrap">
-  <div id="method-filters" class="flex items-center gap-1">
-    <button data-filter-method="" class="filter-method-btn active px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900">All</button>
-    <button data-filter-method="GET" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">GET</button>
-    <button data-filter-method="POST" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">POST</button>
-    <button data-filter-method="PUT" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">PUT</button>
-    <button data-filter-method="PATCH" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">PATCH</button>
-    <button data-filter-method="DELETE" class="filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700">DELETE</button>
+  <div class="flex items-center gap-1">
+{% for m in ["", "GET", "POST", "PUT", "PATCH", "DELETE"] %}
+    <button data-filter-method="{{ m }}" class="filter-method-btn {{ filter_btn }}">{% if m %}{{ m }}{% else %}All{% endif %}</button>
+{% endfor %}
   </div>
-  <div class="relative flex-1 max-w-xs">
+  <div class="flex items-center gap-1">
+    <button data-filter-status="" class="filter-status-btn {{ filter_btn }}">Any</button>
+{% for s in ["2", "3", "4", "5"] %}
+    <button data-filter-status="{{ s }}" class="filter-status-btn {{ filter_btn }}">{{ s }}xx</button>
+{% endfor %}
+    <button data-filter-status="none" title="No response" class="filter-status-btn {{ filter_btn }}">—</button>
+  </div>
+  <div class="relative flex-1 min-w-48 max-w-sm">
     <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-zinc-400 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="m21 21-5.197-5.197m0 0A7.5 7.5 0 1 0 5.196 5.196a7.5 7.5 0 0 0 10.607 10.607Z"/></svg>
-    <input id="path-filter" type="text" placeholder="Filter by path..." class="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-md border border-zinc-200 bg-white text-zinc-700 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:placeholder-zinc-500 dark:focus:ring-zinc-100/10 dark:focus:border-zinc-600">
+    <input id="path-filter" type="text" placeholder="/api status:5xx ms:>500 -/health" title="Space-separated terms, all must match. Plain text matches path and query. method:get,post · type:json · status:4xx / 404 / none · ms:>500 / ms:<50 · prefix with - to exclude" class="w-full pl-8 pr-3 py-1.5 text-xs font-mono rounded-md border border-zinc-200 bg-white text-zinc-700 placeholder-zinc-400 focus:outline-none focus:ring-2 focus:ring-zinc-900/10 focus:border-zinc-300 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-300 dark:placeholder-zinc-500 dark:focus:ring-zinc-100/10 dark:focus:border-zinc-600">
   </div>
+  <label class="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400 cursor-pointer select-none" title="Hide static assets (js, css, images, fonts, source maps) and dev-server HMR traffic">
+    <input id="hide-noise" type="checkbox" class="rounded border-zinc-300 dark:border-zinc-600 dark:bg-zinc-800">
+    Hide assets
+  </label>
   <span id="visible-count" class="text-xs text-zinc-400 dark:text-zinc-500"></span>
+  <div class="ml-auto flex items-center gap-3">
+    <span class="hidden md:inline text-xs text-zinc-400 dark:text-zinc-500"><kbd class="font-mono">j</kbd>/<kbd class="font-mono">k</kbd> move · <kbd class="font-mono">↵</kbd> open · <kbd class="font-mono">/</kbd> search{% if app.inspect_enabled %} · <kbd class="font-mono">p</kbd> pause{% endif %}</span>
+{% if app.inspect_enabled %}
+    <button id="pause-btn" type="button" class="{{ filter_btn }}">Pause</button>
+{% endif %}
+  </div>
 </div>
+
+<button id="pending-banner" type="button" class="hidden mb-2 w-full rounded-lg bg-blue-50 px-4 py-2 text-sm font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 hover:bg-blue-100 dark:bg-blue-900/20 dark:text-blue-300 dark:ring-blue-400/20 dark:hover:bg-blue-900/30 transition-colors"></button>
 
 <div id="requests-table" class="{% if requests | length == 0 %}hidden{% endif %} rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 overflow-hidden">
   <table class="w-full text-sm">
@@ -64,6 +81,8 @@
         <th class="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">Method</th>
         <th class="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">Path</th>
         <th class="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">Status</th>
+        <th class="px-4 py-2.5 text-left text-xs font-medium text-zinc-500 uppercase tracking-wider">Type</th>
+        <th class="px-4 py-2.5 text-right text-xs font-medium text-zinc-500 uppercase tracking-wider">Size</th>
         <th class="px-4 py-2.5 text-right text-xs font-medium text-zinc-500 uppercase tracking-wider">Duration</th>
       </tr>
     </thead>
@@ -85,14 +104,17 @@
 </div>
 {% endif %}
 
-<div id="inspector-config" class="hidden" data-base="{{ base }}" data-app="{{ app.name }}"></div>
+<div id="inspector-config" class="hidden" data-base="{{ base }}" data-app="{{ app.name }}" data-max="{{ max_requests }}"></div>
 <script>
 (function() {
   var cfg = document.getElementById('inspector-config');
   var basePath = cfg.dataset.base;
   var tbody = document.getElementById('requests-tbody');
   var activeMethod = '';
-  var pathQuery = '';
+  var pathInput = document.getElementById('path-filter');
+  var activeStatus = '';
+  var hideNoise = false;
+  var queryTerms = [];
   var activeCls = 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900';
 
   function formatLocalTime(ms) {
@@ -107,9 +129,84 @@
   var inactiveCls = 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-700';
 
   // -- Filter logic --
+  // Static assets and dev-server traffic (Vite, webpack/Next HMR) hidden by "Hide assets".
+  var noisePattern = /\.(m?js|css|map|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|otf|eot)$|^\/favicon|^\/(@vite|@fs|@id|@react-refresh|node_modules|_next\/static|__vite_ping|sockjs-node)(\/|$)|webpack-hmr|hot-update/;
+
+  function matchStatus(code, value) {
+    if (value === 'none') return code === '';
+    if (code === '') return false;
+    return value.length === 1 ? code.charAt(0) === value : code === value;
+  }
+
+  // Parse the search box into terms. Unrecognised `key:value` tokens fall back to plain text.
+  function parseQuery(text) {
+    var terms = [];
+    text.trim().split(/\s+/).forEach(function(tok) {
+      if (!tok || tok === '-') return;
+      var neg = tok.length > 1 && tok.charAt(0) === '-';
+      if (neg) tok = tok.slice(1);
+      var term = null;
+      var m = /^(method|status|ms|type):(.+)$/i.exec(tok);
+      if (m) {
+        var key = m[1].toLowerCase(), val = m[2];
+        if (key === 'method') {
+          term = {kind: 'method', values: val.toUpperCase().split(',')};
+        } else if (key === 'type') {
+          term = {kind: 'type', value: val.toLowerCase()};
+        } else if (key === 'status') {
+          var values = val.toLowerCase().split(',').map(function(v) {
+            if (v === 'none' || v === 'pending') return 'none';
+            if (/^[1-5]xx$/.test(v)) return v.charAt(0);
+            if (/^\d{3}$/.test(v)) return v;
+            return null;
+          });
+          if (values.indexOf(null) === -1) term = {kind: 'status', values: values};
+        } else {
+          var cmp = /^(>=|<=|>|<|=)?(\d+)$/.exec(val);
+          if (cmp) term = {kind: 'ms', op: cmp[1] || '>=', n: parseInt(cmp[2], 10)};
+        }
+      }
+      if (!term) term = {kind: 'text', value: tok.toLowerCase()};
+      term.neg = neg;
+      terms.push(term);
+    });
+    return terms;
+  }
+
+  function matchTerm(row, t) {
+    switch (t.kind) {
+      case 'text':
+        var q = row.getAttribute('data-query');
+        return (row.getAttribute('data-path') + (q ? '?' + q : '')).toLowerCase().indexOf(t.value) !== -1;
+      case 'method':
+        return t.values.indexOf(row.getAttribute('data-method')) !== -1;
+      case 'type':
+        return row.getAttribute('data-type').indexOf(t.value) !== -1;
+      case 'status':
+        var code = row.getAttribute('data-status');
+        return t.values.some(function(v) { return matchStatus(code, v); });
+      case 'ms':
+        var raw = row.getAttribute('data-ms');
+        if (raw === '') return false;
+        var ms = parseInt(raw, 10);
+        switch (t.op) {
+          case '>': return ms > t.n;
+          case '<': return ms < t.n;
+          case '<=': return ms <= t.n;
+          case '=': return ms === t.n;
+          default: return ms >= t.n;
+        }
+    }
+    return true;
+  }
+
   function matchesFilter(row) {
     if (activeMethod && row.getAttribute('data-method') !== activeMethod) return false;
-    if (pathQuery && row.getAttribute('data-path').indexOf(pathQuery) === -1) return false;
+    if (activeStatus && !matchStatus(row.getAttribute('data-status'), activeStatus)) return false;
+    if (hideNoise && noisePattern.test(row.getAttribute('data-path').toLowerCase())) return false;
+    for (var i = 0; i < queryTerms.length; i++) {
+      if (matchTerm(row, queryTerms[i]) === queryTerms[i].neg) return false;
+    }
     return true;
   }
 
@@ -127,7 +224,7 @@
     }
     var hint = document.getElementById('visible-count');
     if (hint) {
-      if (activeMethod || pathQuery) {
+      if (activeMethod || activeStatus || hideNoise || queryTerms.length) {
         hint.textContent = visible + ' / ' + rows.length + ' shown';
       } else {
         hint.textContent = '';
@@ -135,35 +232,207 @@
     }
   }
 
-  // -- Method buttons --
-  var btns = document.querySelectorAll('.filter-method-btn');
-  for (var i = 0; i < btns.length; i++) {
-    btns[i].addEventListener('click', function() {
-      activeMethod = this.getAttribute('data-filter-method');
-      for (var j = 0; j < btns.length; j++) {
-        btns[j].className = 'filter-method-btn px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + inactiveCls;
-      }
-      this.className = 'filter-method-btn active px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + activeCls;
-      applyFilters();
-    });
+  // -- Persist filters in the URL so reloads keep them --
+  function syncUrl() {
+    var params = new URLSearchParams(window.location.search);
+    var set = function(key, value) { if (value) params.set(key, value); else params.delete(key); };
+    set('method', activeMethod);
+    set('status', activeStatus);
+    set('q', pathInput ? pathInput.value : '');
+    set('assets', hideNoise ? 'hide' : '');
+    var qs = params.toString();
+    history.replaceState(history.state, '', window.location.pathname + (qs ? '?' + qs : '') + window.location.hash);
   }
 
-  // -- Path input --
-  var pathInput = document.getElementById('path-filter');
+  // -- Button groups (method, status) --
+  function buttonGroup(cls, attr, onSelect) {
+    var btns = document.querySelectorAll('.' + cls);
+    function select(value) {
+      var found = false;
+      for (var j = 0; j < btns.length; j++) {
+        var on = btns[j].getAttribute(attr) === value;
+        found = found || on;
+        btns[j].className = cls + (on ? ' active' : '') + ' px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + (on ? activeCls : inactiveCls);
+      }
+      if (found) onSelect(value);
+      return found;
+    }
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', function() {
+        select(this.getAttribute(attr));
+        syncUrl();
+        applyFilters();
+      });
+    }
+    return select;
+  }
+  var selectMethod = buttonGroup('filter-method-btn', 'data-filter-method', function(v) { activeMethod = v; });
+  var selectStatus = buttonGroup('filter-status-btn', 'data-filter-status', function(v) { activeStatus = v; });
+
+  // -- Search input --
   var debounceTimer;
   if (pathInput) {
     pathInput.addEventListener('input', function() {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(function() {
-        pathQuery = pathInput.value.toLowerCase();
+        queryTerms = parseQuery(pathInput.value);
+        syncUrl();
         applyFilters();
       }, 150);
     });
   }
 
+  // -- Hide assets toggle --
+  var noiseToggle = document.getElementById('hide-noise');
+  if (noiseToggle) {
+    noiseToggle.addEventListener('change', function() {
+      hideNoise = noiseToggle.checked;
+      syncUrl();
+      applyFilters();
+    });
+  }
+
+  // -- Restore filters from the URL --
+  var initial = new URLSearchParams(window.location.search);
+  if (!selectMethod((initial.get('method') || '').toUpperCase())) selectMethod('');
+  if (!selectStatus((initial.get('status') || '').toLowerCase())) selectStatus('');
+  if (pathInput && initial.get('q')) {
+    pathInput.value = initial.get('q');
+    queryTerms = parseQuery(pathInput.value);
+  }
+  if (noiseToggle && initial.get('assets') === 'hide') {
+    noiseToggle.checked = true;
+    hideNoise = true;
+  }
+  applyFilters();
+
+  // Remember the visible order so the detail page's prev/next follow the filters.
+  function saveNavContext() {
+    if (!tbody) return;
+    var hrefs = Array.prototype.filter.call(tbody.querySelectorAll('tr'), function(r) { return r.style.display !== 'none'; })
+      .map(function(r) { return r.dataset.href; });
+    try {
+      sessionStorage.setItem('coulson:inspector-nav:' + basePath, JSON.stringify({list: window.location.pathname + window.location.search, hrefs: hrefs}));
+    } catch (e) {}
+  }
+
+  // -- Row navigation: plain click opens in place, ⌘/Ctrl/middle click opens a new tab --
+  if (tbody) {
+    var openRow = function(e) {
+      saveNavContext();
+      if (e.target.closest('a')) return; // real links handle themselves
+      var row = e.target.closest('tr[data-href]');
+      if (!row) return;
+      if (e.type === 'auxclick' && e.button !== 1) return;
+      if (e.type === 'auxclick' || e.metaKey || e.ctrlKey || e.shiftKey) {
+        window.open(row.dataset.href, '_blank');
+      } else {
+        window.location = row.dataset.href;
+      }
+    };
+    tbody.addEventListener('click', openRow);
+    tbody.addEventListener('auxclick', openRow);
+  }
+
+  // -- Keyboard navigation --
+  var selectedRow = null;
+  var selectedCls = ['bg-zinc-100', 'dark:bg-zinc-800'];
+  function selectRow(row) {
+    if (selectedRow) selectedRow.classList.remove.apply(selectedRow.classList, selectedCls);
+    selectedRow = row;
+    if (row) {
+      row.classList.add.apply(row.classList, selectedCls);
+      row.scrollIntoView({block: 'nearest'});
+    }
+  }
+  function moveSelection(delta) {
+    if (!tbody) return;
+    var rows = Array.prototype.filter.call(tbody.querySelectorAll('tr'), function(r) { return r.style.display !== 'none'; });
+    if (!rows.length) return;
+    var idx = rows.indexOf(selectedRow);
+    idx = idx === -1 ? (delta > 0 ? 0 : rows.length - 1) : Math.max(0, Math.min(rows.length - 1, idx + delta));
+    selectRow(rows[idx]);
+  }
+  function onKeydown(e) {
+    if (!document.body.contains(cfg)) return cleanup();
+    var typing = e.target.closest && e.target.closest('input:not([type=checkbox]), textarea, select, [contenteditable]');
+    if (typing) {
+      if (e.key === 'Escape' && e.target === pathInput) pathInput.blur();
+      return;
+    }
+    if (e.altKey || ((e.metaKey || e.ctrlKey) && e.key !== 'Enter')) return;
+    switch (e.key) {
+      case 'j': moveSelection(1); break;
+      case 'k': moveSelection(-1); break;
+      case 'Enter':
+        if (e.target.closest('a, button') || !selectedRow || selectedRow.style.display === 'none') return;
+        saveNavContext();
+        if (e.metaKey || e.ctrlKey) window.open(selectedRow.dataset.href, '_blank');
+        else window.location = selectedRow.dataset.href;
+        break;
+      case '/':
+        if (!pathInput) return;
+        pathInput.focus();
+        pathInput.select();
+        break;
+      case 'Escape': selectRow(null); break;
+      case 'p': if (!pauseBtn) return; togglePause(); break;
+      default: return;
+    }
+    e.preventDefault();
+  }
+  document.addEventListener('keydown', onKeydown);
+
+  // -- Pause live updates (recording continues; new rows are held back) --
+  var pauseBtn = document.getElementById('pause-btn');
+  var pendingBanner = document.getElementById('pending-banner');
+  var paused = false;
+  var pendingRows = [];
+  var maxRows = parseInt(cfg.dataset.max, 10) || 0;
+  function updatePauseUi() {
+    if (pauseBtn) {
+      pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+      pauseBtn.className = 'px-2.5 py-1 text-xs font-medium rounded-md transition-colors ' + (paused ? activeCls : inactiveCls);
+    }
+    if (pendingBanner) {
+      pendingBanner.classList.toggle('hidden', !pendingRows.length);
+      pendingBanner.textContent = pendingRows.length + ' new request' + (pendingRows.length === 1 ? '' : 's') + ' — click to show';
+    }
+  }
+  function insertRows(rows) {
+    rows.forEach(function(row) { tbody.prepend(row); });
+    while (maxRows && tbody.children.length > maxRows) {
+      if (tbody.lastElementChild === selectedRow) selectedRow = null;
+      tbody.lastElementChild.remove();
+    }
+    var counter = document.getElementById('request-count');
+    if (counter) counter.textContent = tbody.children.length;
+    applyFilters();
+  }
+  function togglePause() {
+    paused = !paused;
+    if (!paused && pendingRows.length) {
+      insertRows(pendingRows);
+      pendingRows = [];
+    }
+    updatePauseUi();
+  }
+  if (pauseBtn) pauseBtn.addEventListener('click', togglePause);
+  if (pendingBanner) pendingBanner.addEventListener('click', function() { if (paused) togglePause(); });
+  updatePauseUi();
+
+  // Tear down document-level listeners and the SSE connection when Turbo
+  // renders another page (including back/forward restoration visits).
+  var evtSource = null;
+  function cleanup() {
+    document.removeEventListener('keydown', onKeydown);
+    if (evtSource) evtSource.close();
+  }
+  document.addEventListener('turbo:before-render', cleanup, {once: true});
+
   // -- SSE --
   {% if app.inspect_enabled %}
-  var evtSource = new EventSource(basePath + '/requests/stream');
+  evtSource = new EventSource(basePath + '/requests/stream');
   var esc = function(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function(c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
@@ -175,7 +444,12 @@
     row.className = 'hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer';
     row.setAttribute('data-method', d.method);
     row.setAttribute('data-path', d.path);
-    row.onclick = function() { window.location = basePath + '/requests/' + d.request_id; };
+    row.setAttribute('data-query', d.query_string || '');
+    row.setAttribute('data-status', d.status_code ? String(d.status_code) : '');
+    row.setAttribute('data-ms', d.response_time_ms != null ? String(d.response_time_ms) : '');
+    row.setAttribute('data-type', d.content_type || '');
+    var href = basePath + '/requests/' + d.request_id;
+    row.setAttribute('data-href', href);
 
     var methodColors = {
       'GET': 'bg-blue-50 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
@@ -204,17 +478,28 @@
     var statusHtml = d.status_code
       ? '<span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ' + sc + '">' + d.status_code + '</span>'
       : '<span class="text-xs text-zinc-400">\u2014</span>';
-    var duration = d.response_time_ms ? d.response_time_ms + 'ms' : '\u2014';
+    var duration = d.response_time_ms != null ? d.response_time_ms + 'ms' : '\u2014';
+    var typeCell = d.content_type
+      ? '<td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 font-mono max-w-[10rem] truncate" title="' + esc(d.content_type) + '">' + esc(d.content_type) + '</td>'
+      : '<td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 font-mono max-w-[10rem] truncate">\u2014</td>';
 
     row.innerHTML =
       '<td class="px-4 py-2.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap font-mono"><time data-ts="' + d.timestamp + '">' + ts + '</time></td>' +
       '<td class="px-4 py-2.5"><span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold ' + mc + '">' + esc(d.method) + '</span></td>' +
-      '<td class="px-4 py-2.5 font-mono text-sm max-w-xs truncate">' + esc(d.path) + qs + '</td>' +
+      '<td class="px-4 py-2.5 font-mono text-sm max-w-xs truncate"><a href="' + esc(href) + '">' + esc(d.path) + qs + '</a></td>' +
       '<td class="px-4 py-2.5">' + statusHtml + '</td>' +
+      typeCell +
+      '<td class="px-4 py-2.5 text-right text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">' + esc(d.size_display || '\u2014') + '</td>' +
       '<td class="px-4 py-2.5 text-right text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap">' + duration + '</td>';
 
     if (!matchesFilter(row)) row.style.display = 'none';
-    tbody.prepend(row);
+    if (paused) {
+      pendingRows.push(row);
+      if (maxRows && pendingRows.length > maxRows) pendingRows.shift();
+      updatePauseUi();
+    } else {
+      insertRows([row]);
+    }
 
     var empty = document.getElementById('empty-state');
     if (empty) empty.remove();
@@ -222,10 +507,6 @@
     if (table) table.classList.remove('hidden');
     var filterBar = document.getElementById('filter-bar');
     if (filterBar) filterBar.classList.remove('hidden');
-
-    var counter = document.getElementById('request-count');
-    if (counter) counter.textContent = tbody.children.length;
-    applyFilters();
   };
   {% endif %}
 })();
