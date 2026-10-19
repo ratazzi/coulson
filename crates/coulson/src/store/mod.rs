@@ -1277,7 +1277,7 @@ impl AppRepository {
     ) -> anyhow::Result<Vec<CapturedRequest>> {
         let conn = self.reader();
         let mut stmt = conn.prepare(
-            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ?",
+            "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
         )?;
         let mut rows = stmt.query(params![app_id, limit as i64])?;
         let mut results = Vec::new();
@@ -1299,6 +1299,30 @@ impl AppRepository {
         }
     }
 
+    /// Ids of the captured requests just newer and just older than `req` in the
+    /// same app, matching the list order (`timestamp DESC, id DESC`).
+    pub fn adjacent_request_ids(
+        &self,
+        req: &CapturedRequest,
+    ) -> anyhow::Result<(Option<String>, Option<String>)> {
+        let conn = self.reader();
+        let newer = conn
+            .query_row(
+                "SELECT id FROM request_logs WHERE app_id = ?1 AND (timestamp > ?2 OR (timestamp = ?2 AND id > ?3)) ORDER BY timestamp ASC, id ASC LIMIT 1",
+                params![req.app_id, req.timestamp, req.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let older = conn
+            .query_row(
+                "SELECT id FROM request_logs WHERE app_id = ?1 AND (timestamp < ?2 OR (timestamp = ?2 AND id < ?3)) ORDER BY timestamp DESC, id DESC LIMIT 1",
+                params![req.app_id, req.timestamp, req.id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok((newer, older))
+    }
+
     pub fn get_request_logs_by_app_name(
         &self,
         app_name: &str,
@@ -1310,7 +1334,7 @@ impl AppRepository {
             Some(app) => {
                 let conn = self.reader();
                 let mut stmt = conn.prepare(
-                    "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC LIMIT ? OFFSET ?",
+                    "SELECT id, app_id, timestamp, method, path, query_string, request_headers, request_body, status_code, response_headers, response_body, response_time_ms FROM request_logs WHERE app_id = ? ORDER BY timestamp DESC, id DESC LIMIT ? OFFSET ?",
                 )?;
                 let mut rows = stmt.query(params![app.id.0, limit as i64, offset as i64])?;
                 let mut results = Vec::new();
@@ -1748,6 +1772,44 @@ mod tests {
             response_body: body,
             response_time_ms: None,
         }
+    }
+
+    #[test]
+    fn adjacent_request_ids_follow_list_order() {
+        let repo = AppRepository {
+            conn: Mutex::new(Connection::open_in_memory().expect("open sqlite")),
+            read_conn: None,
+            domain_suffix: "coulson.local".to_string(),
+            change_tx: None,
+        };
+        repo.init_schema().expect("schema");
+        let log = |id: &str, app_id: i64, timestamp: i64| {
+            let mut req = captured_response(None, None);
+            req.id = id.into();
+            req.app_id = app_id;
+            req.timestamp = timestamp;
+            repo.insert_request_log(&req, 100).expect("insert");
+            req
+        };
+        let a = log("a", 1, 100);
+        let b = log("b", 1, 200);
+        let c = log("c", 1, 200); // same timestamp as b: id breaks the tie
+        let d = log("d", 1, 300);
+        log("other", 2, 250);
+
+        let order: Vec<String> = repo
+            .list_request_logs(1, 10)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(order, ["d", "c", "b", "a"]);
+
+        let adj = |r: &CapturedRequest| repo.adjacent_request_ids(r).unwrap();
+        assert_eq!(adj(&d), (None, Some("c".into())));
+        assert_eq!(adj(&c), (Some("d".into()), Some("b".into())));
+        assert_eq!(adj(&b), (Some("c".into()), Some("a".into())));
+        assert_eq!(adj(&a), (Some("b".into()), None));
     }
 
     #[test]

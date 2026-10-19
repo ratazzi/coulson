@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 {% set base = base_path | default(value="/apps/" ~ app.name) %}
-<a href="{{ base }}/requests" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Requests</a>
+<a id="back-to-list" href="{{ base }}/requests" class="inline-flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 mb-6 transition-colors"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.75 19.5L8.25 12l7.5-7.5"/></svg>Back to Requests</a>
 
 <div class="flex items-start justify-between mb-8">
   <div>
@@ -12,15 +12,25 @@
     <p class="mt-1.5 text-sm text-zinc-500 dark:text-zinc-400">
       <time data-ts="{{ req.timestamp_ms }}"></time>
       {% if req.status_code %}&mdash; <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code }}</span>{% endif %}
-      {% if req.response_time_ms %}&mdash; {{ req.response_time_ms }}ms{% endif %}
+      {% if req.response_time_ms is number %}&mdash; {{ req.response_time_ms }}ms{% endif %}
     </p>
   </div>
+  <div class="flex items-center gap-2 shrink-0">
+    <div class="flex items-center gap-1">
+      <a id="nav-newer" {% if newer_id %}href="{{ base }}/requests/{{ newer_id }}"{% else %}aria-disabled="true"{% endif %} title="Previous (newer) request — k" class="inline-flex items-center rounded-md bg-zinc-100 px-2 py-1.5 text-zinc-700 shadow-sm hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors aria-disabled:pointer-events-none aria-disabled:opacity-40"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M4.5 15.75l7.5-7.5 7.5 7.5"/></svg></a>
+      <a id="nav-older" {% if older_id %}href="{{ base }}/requests/{{ older_id }}"{% else %}aria-disabled="true"{% endif %} title="Next (older) request — j" class="inline-flex items-center rounded-md bg-zinc-100 px-2 py-1.5 text-zinc-700 shadow-sm hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors aria-disabled:pointer-events-none aria-disabled:opacity-40"><svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M19.5 8.25l-7.5 7.5-7.5-7.5"/></svg></a>
+    </div>
+    <button id="copy-curl" type="button" title="Copy as cURL — c" class="inline-flex items-center gap-1.5 rounded-md bg-zinc-100 px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700 transition-colors">
+      <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M15.666 3.888A2.25 2.25 0 0013.5 2.25h-3c-1.03 0-1.9.693-2.166 1.638m7.332 0c.055.194.084.4.084.612v0a.75.75 0 01-.75.75H9a.75.75 0 01-.75-.75v0c0-.212.03-.418.084-.612m7.332 0c.646.049 1.288.11 1.927.184 1.1.128 1.907 1.077 1.907 2.185V19.5a2.25 2.25 0 01-2.25 2.25H6.75A2.25 2.25 0 014.5 19.5V6.257c0-1.108.806-2.057 1.907-2.185a48.208 48.208 0 011.927-.184"/></svg>
+      <span>Copy as cURL</span>
+    </button>
   <form method="post" action="{{ base }}/requests/{{ req.id }}/replay" data-turbo-frame="replay-result">
     <button type="submit" class="inline-flex items-center gap-1.5 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white shadow-sm hover:bg-blue-700 transition-colors">
       <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182M2.985 19.644l3.181-3.182"/></svg>
       Replay
     </button>
   </form>
+  </div>
 </div>
 
 <div class="grid gap-6">
@@ -44,7 +54,7 @@
 {% if req.request_body_display %}
     <div class="px-5 py-3 border-t border-zinc-100 dark:border-zinc-800">
       <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400 mb-2">Request Body</h3>
-      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.request_body_display }}</pre>
+      <pre data-body class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.request_body_display }}</pre>
     </div>
 {% endif %}
   </div>
@@ -71,10 +81,18 @@
 {% if req.response_body_display %}
     <div class="px-5 py-3 border-t border-zinc-100 dark:border-zinc-800">
       <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400 mb-2">Response Body</h3>
-      <pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.response_body_display }}</pre>
+      <pre data-body class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.response_body_display }}</pre>
     </div>
 {% endif %}
   </div>
+
+  <!-- cURL -->
+  <details id="curl-details" class="group rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
+    <summary class="px-5 py-3 cursor-pointer select-none text-xs font-semibold text-zinc-500 uppercase tracking-wider dark:text-zinc-400">cURL</summary>
+    <div class="px-5 pb-4">
+      <pre id="curl-text" class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-64 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ curl }}</pre>
+    </div>
+  </details>
 
 <turbo-frame id="replay-result">
 {% if replay %}
@@ -87,16 +105,133 @@
       <div class="px-5 py-3">
         <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Original</h3>
         <p class="text-sm mb-2">Status: <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ req.status_color }}">{{ req.status_code | default(value="—") }}</span></p>
-        {% if req.response_body_display %}<pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.response_body_display }}</pre>{% endif %}
+        {% if req.response_body_display %}<pre data-body class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ req.response_body_display }}</pre>{% endif %}
       </div>
       <div class="px-5 py-3">
         <h3 class="text-xs font-semibold text-zinc-500 uppercase tracking-wider mb-2">Replay</h3>
         <p class="text-sm mb-2">Status: <span class="inline-flex items-center rounded px-1.5 py-0.5 text-xs font-semibold {{ replay.status_color }}">{{ replay.status_code }}</span>{% if replay.status_code != req.status_code %} <span class="text-xs text-red-500 font-medium">Changed</span>{% endif %}</p>
-        {% if replay.body_display %}<pre class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ replay.body_display }}</pre>{% endif %}
+        {% if replay.body_display %}<pre data-body class="text-xs font-mono text-zinc-700 dark:text-zinc-300 whitespace-pre-wrap break-all max-h-48 overflow-auto bg-zinc-50 dark:bg-zinc-800 rounded-lg p-4 leading-relaxed">{{ replay.body_display }}</pre>{% endif %}
       </div>
     </div>
   </div>
 {% endif %}
 </turbo-frame>
 </div>
+
+<div id="detail-config" class="hidden" data-base="{{ base }}" data-href="{{ base }}/requests/{{ req.id }}"></div>
+<script>
+(function() {
+  var cfg = document.getElementById('detail-config');
+
+  // -- JSON syntax highlighting for bodies (server already pretty-prints) --
+  var tokenCls = {
+    key: 'text-sky-700 dark:text-sky-300',
+    string: 'text-emerald-700 dark:text-emerald-300',
+    number: 'text-amber-700 dark:text-amber-300',
+    literal: 'text-purple-700 dark:text-purple-300'
+  };
+  var esc = function(s) {
+    return s.replace(/[&<>]/g, function(c) { return {'&': '&amp;', '<': '&lt;', '>': '&gt;'}[c]; });
+  };
+  function highlight(root) {
+    root.querySelectorAll('pre[data-body]:not([data-highlighted])').forEach(function(pre) {
+      pre.setAttribute('data-highlighted', '');
+      var text = pre.textContent;
+      if (!/^\s*[\[{]/.test(text)) return;
+      try { JSON.parse(text); } catch (e) { return; }
+      pre.innerHTML = text.replace(/("(?:\\.|[^"\\])*")(\s*:)?|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|[^"\w-]+|[\s\S]/g, function(tok, str, colon) {
+        var kind;
+        if (str) kind = colon ? 'key' : 'string';
+        else if (/^(true|false|null)$/.test(tok)) kind = 'literal';
+        else if (/^-?\d/.test(tok)) kind = 'number';
+        if (!kind) return esc(tok);
+        var body = str ? esc(str) : esc(tok);
+        return '<span class="' + tokenCls[kind] + '">' + body + '</span>' + (colon ? esc(colon) : '');
+      });
+    });
+  }
+  highlight(document);
+  var frame = document.getElementById('replay-result');
+  if (frame) frame.addEventListener('turbo:frame-load', function() { highlight(frame); });
+
+  // -- Copy as cURL (clipboard API needs a secure context; fall back to execCommand) --
+  var copyBtn = document.getElementById('copy-curl');
+  function copyCurl() {
+    var pre = document.getElementById('curl-text');
+    var text = pre.textContent;
+    var flash = function(msg) {
+      var label = copyBtn.querySelector('span');
+      label.textContent = msg;
+      setTimeout(function() { label.textContent = 'Copy as cURL'; }, 1500);
+    };
+    var done = function() { flash('Copied!'); };
+    // Clipboard unavailable: reveal and select the command for a manual copy.
+    var failed = function() {
+      flash('Copy failed');
+      document.getElementById('curl-details').open = true;
+      var range = document.createRange();
+      range.selectNodeContents(pre);
+      var sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+    function fallback() {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var copied = false;
+      try { copied = document.execCommand('copy'); } catch (e) {}
+      ta.remove();
+      if (copied) done(); else failed();
+    }
+  }
+  copyBtn.addEventListener('click', copyCurl);
+
+  // -- Prev/next: follow the filtered list the user came from, when known --
+  var newer = document.getElementById('nav-newer');
+  var older = document.getElementById('nav-older');
+  function setNav(el, href) {
+    if (href) { el.setAttribute('href', href); el.removeAttribute('aria-disabled'); }
+    else { el.removeAttribute('href'); el.setAttribute('aria-disabled', 'true'); }
+  }
+  var navCtx = null;
+  try { navCtx = JSON.parse(sessionStorage.getItem('coulson:inspector-nav:' + cfg.dataset.base)); } catch (e) {}
+  if (navCtx && Array.isArray(navCtx.hrefs)) {
+    var idx = navCtx.hrefs.indexOf(cfg.dataset.href);
+    if (idx !== -1) {
+      setNav(newer, navCtx.hrefs[idx - 1]);
+      setNav(older, navCtx.hrefs[idx + 1]);
+      if (navCtx.list) document.getElementById('back-to-list').setAttribute('href', navCtx.list);
+    }
+  }
+
+  // -- Keyboard: j/k next/previous, c copy, Esc back to list --
+  function go(el) { if (el.getAttribute('href')) el.click(); }
+  function onKeydown(e) {
+    if (!document.body.contains(cfg)) return cleanup();
+    if (e.altKey || e.metaKey || e.ctrlKey) return;
+    if (e.target.closest && e.target.closest('input, textarea, select, [contenteditable]')) return;
+    switch (e.key) {
+      case 'j': go(older); break;
+      case 'k': go(newer); break;
+      case 'c': copyCurl(); break;
+      case 'Escape': go(document.getElementById('back-to-list')); break;
+      default: return;
+    }
+    e.preventDefault();
+  }
+  function cleanup() { document.removeEventListener('keydown', onKeydown); }
+  document.addEventListener('keydown', onKeydown);
+  document.addEventListener('turbo:before-render', cleanup, {once: true});
+})();
+</script>
 {% endblock content %}

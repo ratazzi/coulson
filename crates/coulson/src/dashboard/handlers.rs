@@ -188,7 +188,6 @@ pub async fn page_request_detail(
     let (embedded, base_path) = embedded_base(&headers, &app_id);
     let port = state.shared.listen_http.port();
     let app_view = AppView::from_spec(&app, port, state.shared.use_default_http_port());
-    let req_view = RequestView::from_captured(&captured);
 
     let page = render_page("pages/request_detail.html", &state.shared, |ctx| {
         ctx.insert(
@@ -196,11 +195,28 @@ pub async fn page_request_detail(
             &format!("{} {} — Detail", captured.method, captured.path),
         );
         ctx.insert("app", &app_view);
-        ctx.insert("req", &req_view);
+        insert_request_detail(ctx, &state.shared, &app.domain.0, &captured);
         ctx.insert("embedded", &embedded);
         ctx.insert("base_path", &base_path);
     });
     Html(page).into_response()
+}
+
+/// Context shared by the request detail page and its replay re-render.
+fn insert_request_detail(
+    ctx: &mut tera::Context,
+    shared: &SharedState,
+    app_domain: &str,
+    captured: &crate::store::CapturedRequest,
+) {
+    let (newer_id, older_id) = shared
+        .store
+        .adjacent_request_ids(captured)
+        .unwrap_or_default();
+    ctx.insert("req", &RequestView::from_captured(captured));
+    ctx.insert("curl", &curl_command(captured, app_domain));
+    ctx.insert("newer_id", &newer_id);
+    ctx.insert("older_id", &older_id);
 }
 
 pub async fn sse_requests(State(state): State<DashboardState>, Path(id): Path<String>) -> Response {
@@ -683,7 +699,6 @@ pub async fn action_replay(
 
     let port = state.shared.listen_http.port();
     let app_view = AppView::from_spec(&app, port, state.shared.use_default_http_port());
-    let req_view = RequestView::from_captured(&captured);
 
     let replay_view = match outcome.as_ref() {
         Some(o) if o.error.is_some() => ReplayView {
@@ -713,7 +728,7 @@ pub async fn action_replay(
             &format!("{} {} — Replay", captured.method, captured.path),
         );
         ctx.insert("app", &app_view);
-        ctx.insert("req", &req_view);
+        insert_request_detail(ctx, &state.shared, &app.domain.0, &captured);
         ctx.insert("replay", &replay_view);
         ctx.insert("embedded", &embedded);
         ctx.insert("base_path", &base_path);

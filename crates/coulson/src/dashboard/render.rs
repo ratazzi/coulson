@@ -515,6 +515,67 @@ pub async fn execute_replay(
 }
 
 /// Pull the original Host header out of the captured request headers JSON.
+/// Build a `curl` command that reproduces a captured request against the
+/// host it was originally sent to.
+pub fn curl_command(req: &crate::store::CapturedRequest, app_domain: &str) -> String {
+    fn quote(s: &str) -> String {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+    let headers: std::collections::BTreeMap<String, String> =
+        serde_json::from_str::<std::collections::HashMap<String, String>>(&req.request_headers)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k.to_ascii_lowercase(), v))
+            .collect();
+    let host = headers
+        .get("host")
+        .cloned()
+        .unwrap_or_else(|| derive_host_from_domain(app_domain));
+    let scheme = match headers.get("x-forwarded-proto").map(String::as_str) {
+        Some("https") => "https",
+        _ => "http",
+    };
+    let query = req
+        .query_string
+        .as_ref()
+        .map(|q| format!("?{q}"))
+        .unwrap_or_default();
+
+    let mut parts = vec![format!(
+        "curl {}",
+        quote(&format!("{scheme}://{host}{}{query}", req.path))
+    )];
+    if req.method != "GET" {
+        parts.push(format!("-X {}", req.method));
+    }
+    for (name, value) in &headers {
+        match name.as_str() {
+            "host" | "content-length" | "transfer-encoding" | "connection" | "keep-alive" => {}
+            // Let curl negotiate and decode compression so the output is readable.
+            "accept-encoding" => parts.push("--compressed".to_string()),
+            _ => parts.push(format!("-H {}", quote(&format!("{name}: {value}")))),
+        }
+    }
+    match req.request_body.as_deref() {
+        Some(body) if !body.is_empty() => match std::str::from_utf8(body) {
+            Ok(text) if body.len() < crate::store::CAPTURE_BODY_MAX => {
+                parts.push(format!("--data-raw {}", quote(text)));
+            }
+            Ok(_) => parts.push(format!(
+                "# request body omitted: truncated at {} bytes when captured",
+                body.len()
+            )),
+            Err(_) => parts.push(format!(
+                "# request body omitted: {} bytes of binary data",
+                body.len()
+            )),
+        },
+        _ => {}
+    }
+    // A trailing comment would swallow the line continuation, so keep it last.
+    parts.join(" \\\n  ")
+}
+
 fn extract_host_header(headers_json: &str) -> Option<String> {
     let map: std::collections::HashMap<String, String> = serde_json::from_str(headers_json).ok()?;
     map.iter()
@@ -801,11 +862,74 @@ pub fn parse_headers_list(json_str: &str) -> Vec<HeaderPair> {
     pairs
 }
 
+/// Pretty-print already-validated JSON by rewriting only the whitespace
+/// between tokens. Unlike a parse/serialize round trip this keeps key order,
+/// duplicate keys and number spellings (`1.5e3`, big integers) exactly as sent.
+fn reindent_json(src: &str) -> String {
+    const INDENT: &str = "  ";
+    let mut out = String::with_capacity(src.len() + src.len() / 4);
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    let newline = |out: &mut String, depth: usize| {
+        out.push('\n');
+        for _ in 0..depth {
+            out.push_str(INDENT);
+        }
+    };
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                while chars.peek().is_some_and(|c| c.is_whitespace()) {
+                    chars.next();
+                }
+                // Keep empty containers compact: `{}` / `[]`.
+                if matches!(chars.peek(), Some('}' | ']')) {
+                    out.push(chars.next().unwrap_or_default());
+                } else {
+                    depth += 1;
+                    newline(&mut out, depth);
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                newline(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                newline(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn body_to_display(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => {
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(s) {
-                serde_json::to_string_pretty(&val).unwrap_or_else(|_| s.to_string())
+            if serde_json::from_str::<serde::de::IgnoredAny>(s).is_ok() {
+                reindent_json(s)
             } else {
                 s.to_string()
             }
@@ -982,5 +1106,53 @@ mod tests {
         assert!(html.contains(r#"data-type="application&#x2F;json""#));
         assert!(html.contains(">1.5 KB<"));
         assert!(html.contains(">0ms<"));
+    }
+
+    #[test]
+    fn curl_command_reproduces_request() {
+        let mut req = captured(Some(200), Some(1), Some("a=1&b=2"));
+        req.request_headers = r#"{"Host":"demo.test:8080","Accept-Encoding":"gzip","Content-Length":"14","X-Note":"it's"}"#.into();
+        req.request_body = Some(br#"{"name":"o'k"}"#.to_vec());
+        let cmd = curl_command(&req, "demo.test");
+        assert_eq!(
+            cmd,
+            "curl 'http://demo.test:8080/api/users?a=1&b=2' \\\n  -X POST \\\n  --compressed \\\n  -H 'x-note: it'\\''s' \\\n  --data-raw '{\"name\":\"o'\\''k\"}'"
+        );
+    }
+
+    #[test]
+    fn curl_command_falls_back_and_skips_binary_body() {
+        let mut req = captured(None, None, None);
+        req.method = "GET".into();
+        req.request_headers = r#"{"x-forwarded-proto":"https"}"#.into();
+        req.request_body = Some(vec![0xff, 0xfe, 0x00]);
+        let cmd = curl_command(&req, "*.demo.test");
+        assert!(cmd.starts_with("curl 'https://wildcard.demo.test/api/users'"));
+        assert!(!cmd.contains("-X"));
+        assert!(cmd.ends_with("# request body omitted: 3 bytes of binary data"));
+    }
+
+    #[test]
+    fn body_display_keeps_json_as_sent() {
+        let body = br#"{"z":1.5e3,"a":[],"big":12345678901234567890,"z":{},"s":"a, b: {c}\"]","n":[1, {"k" :null}]}"#;
+        assert_eq!(
+            body_to_display(body),
+            r#"{
+  "z": 1.5e3,
+  "a": [],
+  "big": 12345678901234567890,
+  "z": {},
+  "s": "a, b: {c}\"]",
+  "n": [
+    1,
+    {
+      "k": null
+    }
+  ]
+}"#
+        );
+        // Scalars and non-JSON pass through untouched.
+        assert_eq!(body_to_display(b" 42 "), "42");
+        assert_eq!(body_to_display(b"{not json}"), "{not json}");
     }
 }

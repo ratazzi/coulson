@@ -306,9 +306,20 @@
   }
   applyFilters();
 
+  // Remember the visible order so the detail page's prev/next follow the filters.
+  function saveNavContext() {
+    if (!tbody) return;
+    var hrefs = Array.prototype.filter.call(tbody.querySelectorAll('tr'), function(r) { return r.style.display !== 'none'; })
+      .map(function(r) { return r.dataset.href; });
+    try {
+      sessionStorage.setItem('coulson:inspector-nav:' + basePath, JSON.stringify({list: window.location.pathname + window.location.search, hrefs: hrefs}));
+    } catch (e) {}
+  }
+
   // -- Row navigation: plain click opens in place, ⌘/Ctrl/middle click opens a new tab --
   if (tbody) {
     var openRow = function(e) {
+      saveNavContext();
       if (e.target.closest('a')) return; // real links handle themselves
       var row = e.target.closest('tr[data-href]');
       if (!row) return;
@@ -355,6 +366,7 @@
       case 'k': moveSelection(-1); break;
       case 'Enter':
         if (e.target.closest('a, button') || !selectedRow || selectedRow.style.display === 'none') return;
+        saveNavContext();
         if (e.metaKey || e.ctrlKey) window.open(selectedRow.dataset.href, '_blank');
         else window.location = selectedRow.dataset.href;
         break;
