@@ -5,7 +5,7 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::credentials;
 use crate::domain::TunnelMode;
@@ -225,7 +225,16 @@ pub async fn run_control_server(socket_path: PathBuf, state: SharedState) -> any
     info!(path = %socket_path.display(), "control server listening");
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, _) = match listener.accept().await {
+            Ok(conn) => conn,
+            Err(err) => {
+                // Accept errors (EMFILE, ECONNABORTED, ...) are transient; bailing
+                // out would drop the listener and refuse every later client.
+                warn!(error = %err, "control accept failed; retrying");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                continue;
+            }
+        };
         let state = state.clone();
         tokio::spawn(async move {
             if let Err(err) = handle_client(stream, state).await {
