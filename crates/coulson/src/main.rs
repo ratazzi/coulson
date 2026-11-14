@@ -1135,8 +1135,39 @@ fn acquire_instance_lock(control_socket: &std::path::Path) -> anyhow::Result<std
     Ok(file)
 }
 
+/// Lift the soft open-file limit to the hard limit. Each proxied tunnel
+/// request holds three sockets, so the usual 1024 default runs out quickly.
+fn raise_fd_limit() {
+    // SAFETY: plain syscalls on a stack-local rlimit.
+    unsafe {
+        let mut lim: libc::rlimit = std::mem::zeroed();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 {
+            return;
+        }
+        #[allow(unused_mut)]
+        let mut target = lim.rlim_max;
+        // macOS rejects a soft limit above OPEN_MAX (10240, <sys/syslimits.h>)
+        // even when the hard limit is unlimited.
+        #[cfg(target_os = "macos")]
+        {
+            target = target.min(10240);
+        }
+        if target <= lim.rlim_cur {
+            return;
+        }
+        let from = lim.rlim_cur;
+        lim.rlim_cur = target;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            info!(from, to = target, "raised open file limit");
+        } else {
+            warn!(from, to = target, error = %std::io::Error::last_os_error(), "failed to raise open file limit");
+        }
+    }
+}
+
 async fn run_serve(cfg: CoulsonConfig) -> anyhow::Result<()> {
     let _instance_lock = acquire_instance_lock(&cfg.control_socket)?;
+    raise_fd_limit();
 
     // Only the daemon should clean up a stale control socket.
     if cfg.control_socket.exists() {

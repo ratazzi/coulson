@@ -556,7 +556,14 @@ async fn send_proxied_response(
     let mut send_stream = send_response.send_response(response, false)?;
 
     let mut body = resp_body;
-    while let Some(frame) = body.frame().await {
+    loop {
+        // A stalled origin body would otherwise pin this stream's connections
+        // after the client has gone away.
+        let frame = tokio::select! {
+            frame = body.frame() => frame,
+            _ = std::future::poll_fn(|cx| send_stream.poll_reset(cx)) => return Ok(()),
+        };
+        let Some(frame) = frame else { break };
         if let Ok(data) = frame?.into_data() {
             send_data_with_capacity(&mut send_stream, data).await?;
         }
@@ -564,6 +571,19 @@ async fn send_proxied_response(
     send_stream.send_data(Bytes::new(), true)?;
 
     Ok(())
+}
+
+/// Drive `fut` unless the edge resets the stream first (client gone, edge
+/// timeout). Without this a hung origin keeps the request — and its
+/// connections through the local proxy — alive forever.
+async fn unless_reset<F: std::future::Future>(
+    send_response: &mut h2::server::SendResponse<Bytes>,
+    fut: F,
+) -> Option<F::Output> {
+    tokio::select! {
+        out = fut => Some(out),
+        _ = std::future::poll_fn(|cx| send_response.poll_reset(cx)) => None,
+    }
 }
 
 /// Send `data` on the h2 stream as the peer's flow-control window allows.
@@ -632,7 +652,11 @@ async fn forward_to_local(
     })?;
 
     let client = Client::builder(TokioExecutor::new()).build_http();
-    let local_resp = match client.request(local_req).await {
+    let Some(local_resp) = unless_reset(&mut send_response, client.request(local_req)).await else {
+        debug!(local_host = %local_host, "edge reset tunnel stream; abandoning local request");
+        return Ok(());
+    };
+    let local_resp = match local_resp {
         Ok(resp) => resp,
         Err(_) if exceeded.load(Ordering::Relaxed) => {
             warn!(local_host = %local_host, max, "tunnel request body exceeds cap; returning 413");
@@ -701,8 +725,11 @@ async fn proxy_websocket(
             }
         });
         anyhow::Ok(sender.send_request(local_req).await?)
-    }
-    .await;
+    };
+    let Some(local_resp) = unless_reset(&mut send_response, local_resp).await else {
+        debug!(local_host = %local_host, "edge reset tunnel stream; abandoning websocket handshake");
+        return Ok(());
+    };
     let local_resp = match local_resp {
         Ok(resp) => resp,
         Err(err) => {
@@ -802,6 +829,53 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[tokio::test]
+    async fn edge_reset_abandons_hung_origin_request() {
+        use std::time::Duration;
+        use tokio::io::AsyncReadExt;
+
+        // An origin that accepts but never answers.
+        let origin = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = origin.local_addr().unwrap().port();
+
+        let (edge_io, tunnel_io) = tokio::io::duplex(64 * 1024);
+        let tunnel = tokio::spawn(async move {
+            let mut conn = h2::server::handshake(tunnel_io).await.unwrap();
+            let (request, send_response) = conn.accept().await.unwrap().unwrap();
+            tokio::spawn(async move { while conn.accept().await.is_some() {} });
+            let (parts, body) = request.into_parts();
+            let local_req = http::Request::builder()
+                .method(parts.method)
+                .uri(format!("http://127.0.0.1:{port}/"));
+            forward_to_local(local_req, &parts.headers, body, send_response, "app.test").await
+        });
+
+        let (mut edge, conn) = h2::client::handshake(edge_io).await.unwrap();
+        tokio::spawn(conn);
+        let req = http::Request::get("https://app.example.com/")
+            .body(())
+            .unwrap();
+        let (response, send) = edge.send_request(req, true).unwrap();
+
+        let (mut origin_conn, _) = origin.accept().await.unwrap();
+        let mut buf = [0u8; 1024];
+        assert!(origin_conn.read(&mut buf).await.unwrap() > 0);
+
+        // Dropping both halves makes the edge send RST_STREAM(CANCEL).
+        drop((response, send));
+
+        tokio::time::timeout(Duration::from_secs(5), tunnel)
+            .await
+            .expect("tunnel task should finish once the edge resets")
+            .unwrap()
+            .unwrap();
+        let n = tokio::time::timeout(Duration::from_secs(5), origin_conn.read(&mut buf))
+            .await
+            .expect("origin connection should be closed")
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[test]
