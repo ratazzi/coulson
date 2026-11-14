@@ -854,7 +854,9 @@ mod tests {
 
         let (mut edge, conn) = h2::client::handshake(edge_io).await.unwrap();
         tokio::spawn(conn);
-        let req = http::Request::get("https://app.example.com/").body(()).unwrap();
+        let req = http::Request::get("https://app.example.com/")
+            .body(())
+            .unwrap();
         let (response, send) = edge.send_request(req, true).unwrap();
 
         let (mut origin_conn, _) = origin.accept().await.unwrap();
