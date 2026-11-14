@@ -41,7 +41,9 @@ pub async fn run_forwarder(fds: Vec<RawFd>, target: SocketAddr) -> anyhow::Resul
                         });
                     }
                     Err(e) => {
+                        // Back off so a persistent error (e.g. EMFILE) doesn't spin.
                         error!("accept error on {local_addr}: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     }
                 }
             }
